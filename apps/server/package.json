@@ -1,0 +1,14 @@
+{
+  "name": "@2d-moba/server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@geckos.io/server": "^3.1.0"
+  }
+}

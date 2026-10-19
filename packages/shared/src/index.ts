@@ -1,0 +1,194 @@
+import { z } from 'zod'
+
+export const Vector2Schema = z.object({
+  x: z.number().finite(),
+  y: z.number().finite(),
+})
+
+export const MoveOrderSchema = z.object({
+  id: z.string().min(1).max(160),
+  seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  clientTick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  type: z.literal('move'),
+  target: Vector2Schema,
+})
+
+export const GameAttackOrderSchema = z.object({
+  id: z.string().min(1).max(160),
+  seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  clickTick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  type: z.literal('attack'),
+  targetId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+})
+
+export const GameOrderSchema = z.discriminatedUnion('type', [
+  MoveOrderSchema,
+  GameAttackOrderSchema,
+])
+
+export const GameMoveSchema = MoveOrderSchema.extend({
+  entityId: z.number().int().positive(),
+  playerId: z.string(),
+  playerName: z.string(),
+  serverTick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+})
+
+export const GameAttackSchema = GameAttackOrderSchema.extend({
+  entityId: z.number().int().positive(),
+  playerId: z.string(),
+  playerName: z.string(),
+  serverTick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  stamp: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  actionTick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  position: Vector2Schema,
+})
+
+export const GameBroadcastOrderSchema = z.discriminatedUnion('type', [
+  GameMoveSchema,
+  GameAttackSchema,
+])
+
+export const GameHealthStatsSchema = z.object({
+  hp: z.number().int().nonnegative(),
+  maxHp: z.number().int().positive(),
+  shield: z.number().int().nonnegative(),
+  hpSeq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  finalizedTick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  deathTick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+})
+
+export const GameAttackStatsSchema = z.object({
+  attackSpeed: z.number().finite().positive(),
+  attackRange: z.number().finite().positive(),
+  nextAttackTick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+})
+
+export const GameHealthResultSchema = z.object({
+  targetId: z.number().int().positive(),
+  hpAfter: z.number().int().nonnegative(),
+  shieldAfter: z.number().int().nonnegative(),
+  hpSeq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  dealt: z.number().int().nonnegative(),
+})
+
+export const AttackActionSchema = z.object({
+  type: z.literal('attack'),
+  tick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  stamp: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  position: Vector2Schema,
+})
+
+export const EntityOrderSchema = z.discriminatedUnion('type', [
+  MoveOrderSchema,
+  AttackActionSchema,
+])
+
+export const GameOrderAckSchema = z.object({
+  id: z.string().min(1).max(160),
+  seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  status: z.enum(['accepted', 'rejected']),
+  serverTick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  stamp: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  actionTick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  position: Vector2Schema.optional(),
+  reason: z.string().optional(),
+})
+
+export const GameOrderDeliveryAckSchema = z.object({
+  id: z.string().min(1).max(160),
+  seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+})
+
+export const GamePongSchema = z.object({
+  clientTime: z.number().finite(),
+  serverTick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+})
+
+export const GameJoinSchema = z.object({
+  lobbyCode: z.string().length(6),
+  sessionId: z.string().min(1).max(100),
+})
+
+export const GameJoinedSchema = z.object({
+  entityId: z.number().int().positive(),
+  nextOrderSeq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  serverTick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+})
+
+export const GameEntitySchema = z.object({
+  id: z.number().int().positive(),
+  initialPosition: Vector2Schema,
+  orders: z.array(EntityOrderSchema),
+  health: GameHealthStatsSchema.optional(),
+  attackStats: GameAttackStatsSchema.optional(),
+  player: z.object({
+    playerId: z.string(),
+    name: z.string(),
+  }).optional(),
+})
+
+export const GameProjectileSchema = z.object({
+  id: z.number().int().positive(),
+  initialPosition: Vector2Schema,
+  initialTick: z.number().int().nonnegative(),
+  velocity: Vector2Schema,
+  lifetimeTicks: z.number().int().positive(),
+})
+
+export const GameSnapshotSchema = z.object({
+  tick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  entities: z.array(GameEntitySchema),
+  projectiles: z.array(GameProjectileSchema),
+})
+
+export const GameStatusSchema = z.enum(['idle', 'starting', 'running'])
+
+export const GAME_ARENA_WIDTH = 800
+export const GAME_ARENA_HEIGHT = 450
+export const GAME_PLAYER_RADIUS = 18
+export const GAME_PLAYER_SPEED = 220
+export const GAME_TPS = 60
+export const GAME_FPS = 60
+export const GAME_MAX_HP = 10
+export const GAME_MAX_SHIELD = 1
+export const GAME_ATTACK_SPEED = 1
+export const GAME_ATTACK_RANGE = 150
+export const GAME_ATTACK_WINDUP_TICKS = 0
+export const FINALIZE_LAG = 5
+export const GAME_REMOTE_CATCHUP_MAX_SPEED_MULTIPLIER = 3
+export const GAME_REMOTE_CATCHUP_EASE_TICKS = 5
+export const GAME_ORDER_TIMEOUT_MS = 200
+export const GAME_ORDER_VERDICT_RETENTION_MS = GAME_ORDER_TIMEOUT_MS * 2
+export const GAME_ATTACK_BACKDATE_CAP_TICKS = GAME_TPS * 2
+export const GAME_PING_INTERVAL_MS = 1000
+
+export type Vector2 = z.infer<typeof Vector2Schema>
+export type MoveOrder = z.infer<typeof MoveOrderSchema>
+export type GameOrder = z.infer<typeof GameOrderSchema>
+export type GameAttackOrder = z.infer<typeof GameAttackOrderSchema>
+export type GameAttack = z.infer<typeof GameAttackSchema>
+export type GameBroadcastOrder = z.infer<typeof GameBroadcastOrderSchema>
+export type GameHealthStats = z.infer<typeof GameHealthStatsSchema>
+export type GameAttackStats = z.infer<typeof GameAttackStatsSchema>
+export type GameHealthResult = z.infer<typeof GameHealthResultSchema>
+export type AttackAction = z.infer<typeof AttackActionSchema>
+export type EntityOrder = z.infer<typeof EntityOrderSchema>
+export type GameOrderAck = z.infer<typeof GameOrderAckSchema>
+export type GameOrderDeliveryAck = z.infer<typeof GameOrderDeliveryAckSchema>
+export type GameMove = z.infer<typeof GameMoveSchema>
+export type GamePong = z.infer<typeof GamePongSchema>
+export type GameJoin = z.infer<typeof GameJoinSchema>
+export type GameJoined = z.infer<typeof GameJoinedSchema>
+export type GameEntitySnapshot = z.infer<typeof GameEntitySchema>
+export type GameProjectileSnapshot = z.infer<typeof GameProjectileSchema>
+export type GameSnapshot = z.infer<typeof GameSnapshotSchema>
+export type GameStatus = z.infer<typeof GameStatusSchema>
+
+export function getAttackCooldownTicks(attackSpeed: number): number {
+  return Math.max(1, Math.ceil(GAME_TPS / attackSpeed))
+}
+
+export { AttackStats, HealthStats, Simulator } from './simulator.js'
+export { ReliableMessageQueue } from './reliable-messages.js'
+export type { IdentifiedMessage, ReliableMessageUpdate } from './reliable-messages.js'

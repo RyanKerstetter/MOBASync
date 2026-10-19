@@ -1,0 +1,18 @@
+{
+  "name": "@2d-moba/client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@geckos.io/client": "^3.1.0",
+    "pixi.js": "^8.11.0"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  }
+}

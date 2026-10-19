@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>2D-MOBA</title>
+  </head>
+  <body>
+    <main>
+      <h1>2D-MOBA</h1>
+
+      <section id="entry-panel" aria-label="Create or join a lobby">
+        <p>
+          <label for="username">Username</label>
+          <input id="username" type="text" maxlength="24" value="Player" autocomplete="nickname" />
+        </p>
+        <p><button id="create-button" type="button">Create lobby</button></p>
+        <form id="join-form">
+          <label for="lobby-code">Lobby code</label>
+          <input id="lobby-code" type="text" maxlength="6" autocomplete="off" />
+          <button type="submit">Join</button>
+        </form>
+        <p id="message" role="status" aria-live="polite"></p>
+      </section>
+
+      <section id="lobby-panel" aria-label="Lobby" hidden>
+        <p>Code: <strong id="active-code"></strong> <button id="copy-button" type="button">Copy</button></p>
+        <div class="lobby-content">
+          <aside class="lobby-sidebar">
+            <form id="rename-form">
+              <label for="lobby-username">Username</label>
+              <input id="lobby-username" type="text" maxlength="24" autocomplete="nickname" />
+              <button type="submit">Save</button>
+            </form>
+            <h2>Players (<span id="player-count">0</span>)</h2>
+            <ul id="player-list"></ul>
+          </aside>
+          <section class="chat-panel" aria-label="Lobby chat">
+            <h2>Chat</h2>
+            <ul id="chat-messages" aria-live="polite"></ul>
+            <form id="chat-form">
+              <label for="chat-input">Message</label>
+              <div class="chat-input-row">
+                <input id="chat-input" type="text" maxlength="500" autocomplete="off" />
+                <button type="submit">Send</button>
+              </div>
+            </form>
+          </section>
+        </div>
+        <p>
+          <button id="leave-button" type="button">Leave lobby</button>
+          <button id="start-button" type="button">Start game</button>
+        </p>
+        <p id="lobby-message" role="status" aria-live="polite"></p>
+      </section>
+
+      <section id="game-panel" aria-label="Game" hidden>
+        <div class="game-heading">
+          <h2>2D-MOBA</h2>
+          <button id="return-button" type="button">Return to lobby</button>
+        </div>
+        <p id="game-status" role="status" aria-live="polite">Connecting to game server…</p>
+        <div class="game-stage">
+          <section id="game-loading" aria-live="polite">
+            <h3>Getting the game ready</h3>
+            <p id="game-loading-progress">Connecting to the game server…</p>
+            <p>The arena will open when every player is ready.</p>
+          </section>
+          <div id="game-container" aria-label="Game arena" hidden></div>
+        </div>
+        <p class="game-instructions">Right-click the map to move.</p>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
