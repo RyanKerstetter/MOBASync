@@ -425,15 +425,26 @@ export async function startGame({
   }, GAME_PING_INTERVAL_MS)
 
   let debugUpdateElapsedMs = 0
+  let fpsFrameCount = 0
+  let fpsSampleStartedAt = performance.now()
+  let displayedFps = app.ticker.FPS
   app.ticker.add(() => {
     if (!started || disconnected) return
     resizeScene()
+    fpsFrameCount += 1
+    const fpsSampleElapsedMs = performance.now() - fpsSampleStartedAt
+    if (fpsSampleElapsedMs >= 1000) {
+      displayedFps = fpsFrameCount * 1000 / fpsSampleElapsedMs
+      fpsFrameCount = 0
+      fpsSampleStartedAt = performance.now()
+    }
     debugUpdateElapsedMs += app.ticker.deltaMS
     if (debugUpdateElapsedMs >= 250) {
       debugUpdateElapsedMs %= 250
       const debugInfo = gameState.getDebugInfo()
       const position = debugInfo.localPosition
       debugOverlay.textContent = [
+        `FPS: ${displayedFps.toFixed(1)}`,
         `RTT: ${debugInfo.lastRttMs === undefined ? '—' : `${debugInfo.lastRttMs.toFixed(1)} ms`} (avg ${debugInfo.averageRttMs.toFixed(1)} ms, n=${debugInfo.rttSampleCount})`,
         `Tick: ${debugInfo.estimatedTick.toFixed(1)} (server ${debugInfo.serverTick}, update ${debugInfo.tickAnchorAgeMs.toFixed(0)} ms ago)`,
         `Pending orders: ${debugInfo.pendingOrderCount}${debugInfo.oldestPendingOrderAgeMs === undefined ? '' : ` (oldest ${debugInfo.oldestPendingOrderAgeMs.toFixed(0)} ms)`}`,

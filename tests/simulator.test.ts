@@ -41,8 +41,11 @@ test('an attack stops movement at its derived position', () => {
   ])
 
   const attackFrame = simulator.at(3)
-  assert.equal(attackFrame.getAttackValidity(1, 'attack-2'), true)
   assert.deepEqual(attackFrame.get(1)?.getPosition(), { x: 100 + 220 * 2 / 60, y: 100 })
+  assert.deepEqual(attackFrame.get(1)?.getCooldown(), {
+    ready: false,
+    ticksRemaining: GAME_TPS,
+  })
   assert.deepEqual(simulator.at(20).get(1)?.getPosition(), attackFrame.get(1)?.getPosition())
 })
 
@@ -57,7 +60,6 @@ test('an out-of-range attack does not stop movement or start cooldown', () => {
     id: 'attack-2', seq: 2, tick: 3, type: 'attack', targetId: 2,
   })
 
-  assert.equal(simulator.at(3).getAttackValidity(1, 'attack-2'), false)
   const state = simulator.at(20).get(1)
   assert.deepEqual(state?.getPosition(), { x: 100 + 220 * 19 / 60, y: 100 })
   assert.equal(state?.getNextAttackTick(), 0)
@@ -72,8 +74,8 @@ test('an invalid cooldown attack does not stop a later movement order', () => {
     { id: 'attack-3', seq: 3, tick: 2, type: 'attack', targetId: 2 },
   ])
 
-  assert.equal(simulator.at(1).getAttackValidity(1, 'attack-1'), true)
-  assert.equal(simulator.at(2).getAttackValidity(1, 'attack-3'), false)
+  assert.equal(simulator.at(1).get(1)?.getCooldown().ready, false)
+  assert.equal(simulator.at(2).get(1)?.getCooldown().ticksRemaining, 59)
   const state = simulator.at(20).get(1)
   assert.deepEqual(state?.getPosition(), { x: 100 + 220 * 18 / 60, y: 100 })
   assert.equal(state?.getNextAttackTick(), 61)
@@ -121,12 +123,10 @@ test('shared simulation derives shield and health damage from valid attack order
   const secondPeer = createSimulator(orders)
 
   const firstHit = firstPeer.at(1).get(2)?.getHealthState()
-  assert.equal(firstPeer.at(1).getAttackValidity(1, 'attack-1'), true)
   assert.equal(firstHit?.shield, 0)
   assert.equal(firstHit?.hp, 10)
 
   const secondHit = firstPeer.at(61).get(2)?.getHealthState()
-  assert.equal(firstPeer.at(61).getAttackValidity(1, 'attack-2'), true)
   assert.equal(secondHit?.shield, 0)
   assert.equal(secondHit?.hp, 9)
   assert.deepEqual(
@@ -147,7 +147,6 @@ test('valid attacks apply damage and enforce cooldown in simulator snapshots', (
   assert.equal(beforeAttack.get(2)?.getHealth(), 10)
 
   const firstAttack = simulator.at(1)
-  assert.equal(firstAttack.getAttackValidity(1, 'attack-1'), true)
   assert.deepEqual(firstAttack.get(1)?.getCooldown(), {
     ready: false,
     ticksRemaining: GAME_TPS,
@@ -161,7 +160,6 @@ test('valid attacks apply damage and enforce cooldown in simulator snapshots', (
   })
 
   const secondAttack = simulator.at(61)
-  assert.equal(secondAttack.getAttackValidity(1, 'attack-2'), true)
   assert.deepEqual(secondAttack.get(1)?.getCooldown(), {
     ready: false,
     ticksRemaining: GAME_TPS,
@@ -182,7 +180,6 @@ test('a late attack recomputes derived health in later snapshots', () => {
     targetId: 2,
   }), true)
 
-  assert.equal(simulator.at(4).getAttackValidity(1, 'late-attack'), true)
   assert.equal(simulator.at(10).get(2)?.getShield(), 0)
   assert.equal(simulator.at(10).get(2)?.getHealth(), 10)
 })
@@ -203,8 +200,9 @@ test('shared simulation derives death and rejects later attacks against a dead t
 
   assert.equal(simulator.at(11).get(2)?.getHealth(), 0)
   assert.equal(simulator.at(11).get(2)?.getDeathTick(), 11)
-  assert.equal(simulator.at(11).getAttackValidity(1, 'attack-11'), true)
-  assert.equal(simulator.at(12).getAttackValidity(1, 'attack-12'), false)
+  assert.equal(simulator.at(11).get(1)?.getCooldown().ready, false)
+  assert.equal(simulator.at(12).get(1)?.getCooldown().ready, true)
+  assert.equal(simulator.at(12).get(2)?.getHealth(), 0)
 })
 
 test('ring buffer rejects corrections older than retained state', () => {

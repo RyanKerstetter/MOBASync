@@ -167,14 +167,12 @@ export class EntityTickSnapshot {
 export class GameTickSnapshot {
   private readonly entities: Map<number, EntityTickSnapshot>
   private readonly entityStates: Map<number, GameFrameEntity>
-  private readonly attackValidity: Map<string, boolean>
   private readonly frame: GameFrame
 
   constructor(readonly tick: number, frame: GameFrame) {
     this.frame = {
       tick,
       entities: frame.entities.map(cloneFrameEntity),
-      attackValidity: frame.attackValidity.map((entry) => ({ ...entry })),
     }
     this.entityStates = new Map(this.frame.entities.map((entity) => [
       entity.entityId,
@@ -184,27 +182,14 @@ export class GameTickSnapshot {
       entity.entityId,
       new EntityTickSnapshot(entity, tick),
     ]))
-    this.attackValidity = new Map(this.frame.attackValidity.map((entry) => [
-      orderKey(entry.entityId, entry.orderId),
-      entry.valid,
-    ]))
   }
 
   get(entityId: number): EntityTickSnapshot | undefined {
     return this.entities.get(entityId)
   }
 
-  getAttackValidity(entityId: number, orderId: string): boolean | undefined {
-    return this.attackValidity.get(orderKey(entityId, orderId))
-  }
-
-  getAttackValidityEntries(): GameFrame['attackValidity'] {
-    return this.frame.attackValidity.map((entry) => ({ ...entry }))
-  }
-
   getEntityState(entityId: number): GameFrameEntity | undefined {
-    const entity = this.entityStates.get(entityId)
-    return entity ? cloneFrameEntity(entity) : undefined
+    return this.entityStates.get(entityId)
   }
 
   toData(): GameFrame {
@@ -213,7 +198,6 @@ export class GameTickSnapshot {
       entities: [...this.entityStates.values()]
         .sort((left, right) => left.entityId - right.entityId)
         .map(cloneFrameEntity),
-      attackValidity: this.frame.attackValidity.map((entry) => ({ ...entry })),
     }
   }
 
@@ -316,9 +300,7 @@ export class Simulator {
       && !this.getCachedFrame(order.tick - 1)
     ) return false
     if (entity.orders.some((existing) => existing.id === order.id)) return false
-    entity.orders.push(order.type === 'move'
-      ? { ...order, target: clampPosition(order.target) }
-      : { ...order })
+    entity.orders.push({ ...order })
     entity.orders.sort((left, right) => compareEntityOrders(left, right, entity, entity))
     entity.recordOrderSequence(order.seq)
     this.invalidateFrom(order.tick)
@@ -477,7 +459,6 @@ export class Simulator {
     orders.sort((left, right) =>
       compareEntityOrders(left.order, right.order, left.entity, right.entity),
     )
-    const attackValidity: GameFrame['attackValidity'] = []
     const validAttacks: number[] = []
     for (const { entity, order } of orders) {
       const state = states.get(entity.id)
@@ -509,7 +490,6 @@ export class Simulator {
         && attackStats.canAttackAt(tick, state.nextAttackTick)
         && Math.sqrt(dx * dx + dy * dy) <= attackStats.attackRange,
       )
-      attackValidity.push({ entityId: entity.id, orderId: order.id, valid })
       if (!valid || !target) continue
 
       state.movement = undefined
@@ -530,7 +510,6 @@ export class Simulator {
     return new GameTickSnapshot(tick, {
       tick,
       entities: [...states.values()].sort((left, right) => left.entityId - right.entityId),
-      attackValidity,
     })
   }
 
@@ -540,7 +519,6 @@ export class Simulator {
       entities: [...this.entities.values()]
         .sort((left, right) => left.id - right.id)
         .map((entity) => this.createInitialEntityFrame(entity)),
-      attackValidity: [],
     })
   }
 
@@ -619,10 +597,6 @@ function compareEntityOrders(
     return leftEntity.id - rightEntity.id
   }
   return 0
-}
-
-function orderKey(entityId: number, orderId: string): string {
-  return `${entityId}/${orderId}`
 }
 
 function cloneFrameEntity(entity: GameFrameEntity): GameFrameEntity {

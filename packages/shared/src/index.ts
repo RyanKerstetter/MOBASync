@@ -125,16 +125,9 @@ export const GameFrameEntitySchema = z.object({
   movement: GameFrameMovementSchema.optional(),
 })
 
-export const GameFrameAttackValiditySchema = z.object({
-  entityId: z.number().int().positive(),
-  orderId: z.string().min(1).max(160),
-  valid: z.boolean(),
-})
-
 export const GameFrameSchema = z.object({
   tick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   entities: z.array(GameFrameEntitySchema),
-  attackValidity: z.array(GameFrameAttackValiditySchema),
 })
 
 export const GameSnapshotSchema = z.object({
@@ -180,7 +173,6 @@ export type GameAttackStats = z.infer<typeof GameAttackStatsSchema>
 export type GameFrame = z.infer<typeof GameFrameSchema>
 export type GameFrameEntity = z.infer<typeof GameFrameEntitySchema>
 export type GameFrameMovement = z.infer<typeof GameFrameMovementSchema>
-export type GameFrameAttackValidity = z.infer<typeof GameFrameAttackValiditySchema>
 export type EntityOrder = z.infer<typeof EntityOrderSchema>
 export type GameOrderAck = z.infer<typeof GameOrderAckSchema>
 export type GameOrderDeliveryAck = z.infer<typeof GameOrderDeliveryAckSchema>
