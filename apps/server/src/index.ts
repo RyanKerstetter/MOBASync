@@ -178,12 +178,12 @@ function sendReadyProgress(lobby: Lobby): void {
   gameServer.room(lobby.code).emit('game:ready-progress', {
     readyCount: lobby.game.readyPlayerIds.length,
     totalPlayers: lobby.players.size,
-  })
+  }, { reliable: true })
 }
 
 function startGameWhenReady(lobby: Lobby): void {
   const snapshot = lobby.game.startIfReady()
-  if (snapshot) gameServer.room(lobby.code).emit('game:started', snapshot)
+  if (snapshot) gameServer.room(lobby.code).emit('game:started', snapshot, { reliable: true })
 }
 
 function sendReliableOrder(lobbyCode: string, order: GameBroadcastOrder): void {
@@ -442,9 +442,6 @@ function runGameTick(): void {
   for (const lobby of lobbies.values()) {
     if (lobby.game.status === 'running') {
       lobby.game.advanceTick()
-      for (const result of lobby.game.finalizeUpTo(lobby.game.simulator.tick)) {
-        gameServer.room(lobby.code).emit('game:hp-result', result)
-      }
     }
   }
 
@@ -500,6 +497,9 @@ gameServer.onConnection((channel) => {
         acknowledgementEvent: 'game:order-delivery-ack',
         timeoutMs: GAME_ORDER_TIMEOUT_MS,
         parseAcknowledgement: parseIdentifiedMessage,
+        onTimeout: () => {
+          channel.emit('game:snapshot', getGameSnapshot(joinedLobby), { reliable: true })
+        },
         onAcknowledged: () => {
           const activePlayer = lobby?.players.get(player.id)
           if (activePlayer) activePlayer.lastSeen = Date.now()
@@ -517,9 +517,9 @@ gameServer.onConnection((channel) => {
       entityId,
       nextOrderSeq: joinedLobby.game.getNextOrderSequence(player.id),
       serverTick: joinedLobby.game.simulator.tick,
-    })
+    }, { reliable: true })
     if (joinedLobby.game.status === 'running') {
-      channel.emit('game:started', getGameSnapshot(joinedLobby))
+      channel.emit('game:started', getGameSnapshot(joinedLobby), { reliable: true })
     } else {
       sendReadyProgress(joinedLobby)
     }
@@ -568,10 +568,16 @@ gameServer.onConnection((channel) => {
     const player = activeLobby.players.get(activePlayerId)
     if (player) player.lastSeen = Date.now()
     const verdict = activeLobby.game.acceptOrder(activePlayerId, parsed.data)
-    channel.emit('game:order-ack', verdict.ack)
+    channel.emit('game:order-ack', verdict.ack, { reliable: true })
     if (verdict.broadcast) {
       sendReliableOrder(activeLobby.code, verdict.broadcast)
     }
+  })
+
+  channel.on('game:resync', () => {
+    if (!lobby || !playerId || lobby.game.status !== 'running') return
+    if (!lobby.players.has(playerId)) return
+    channel.emit('game:snapshot', getGameSnapshot(lobby), { reliable: true })
   })
 
   channel.onDisconnect(() => {

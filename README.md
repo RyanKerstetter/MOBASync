@@ -37,38 +37,39 @@ screen until every player is connected and ready.
 
 The simulation runs at 60 ticks per second (TPS), and the PixiJS renderer is
 capped at 60 frames per second (FPS). The shared `Simulator` stores entities by
-numeric ID; entities evaluate their position at a synchronized tick using
-their orders. Each entity stores its starting position separately from its
-orders. Movement stays at its destination implicitly once its calculated travel
-time completes; the simulator does not append a hold order.
+numeric ID and keeps a fixed-size ring of tick snapshots. Query state with
+`simulator.at(tick).get(entityId)`, then read the derived position, health,
+shield, and cooldown from that entity snapshot. Each tick is computed from the
+preceding cached tick. If a late order or health result changes an earlier
+tick, cached snapshots from that tick onward are invalidated and recomputed.
+Movement stays at its destination implicitly once its calculated travel time
+completes; the simulator does not append a hold order.
 Right-click the map to issue a movement order. Click an enemy to attack, or
-press Space to attack the closest enemy in range. Attack orders are intents:
-the server clamps their click tick to its backdate window and validates range,
-life state, and cooldown at that stamped tick. An accepted attack interrupts
-movement at the later of the server tick and the click tick, using the unit's
-position at that time. The attack action becomes the position anchor, so the
-unit implicitly remains there when the action finishes (attack wind-up is
-currently zero ticks); no hold order is appended. The click stamp remains the
-basis for attack timing and damage ordering. Shield and health damage are
-finalized five ticks later.
-Resending an order returns its cached acknowledgement
-without rebroadcasting it. Units start with 10 HP and 1 shield. The client
-shows health, shield, local attack range, and cooldown, and applies only newer
-server health results. Movement and attack intents share one order stream,
-sequence, and acknowledgement event; each order is acknowledged as accepted or
-rejected. Pending orders are retried with exponential backoff
-(50 ms, then 100 ms) and undone if no acknowledgement arrives within 200 ms.
-The channel-bound reliable messenger owns sending, acknowledgement matching,
-retries, and timeouts. It acknowledges received broadcasts only after the
-client successfully applies them. The client reconciles movement predictions
-when acknowledgements arrive.
-Accepted orders are broadcast to other clients instead of
-sending recurring full snapshots. Each recipient acknowledges accepted-order
-broadcasts; the server retries unacknowledged orders until the delivery timeout.
-Snapshot recovery after a delivery timeout is not implemented yet. Clients ping
-once per second and average the measured RTT to refine their estimate of the
-server tick. An initial snapshot is still sent when a client joins to establish
-simulation state. Projectiles
+press Space to attack the closest enemy in range. Both are timestamped intents
+ordered deterministically by `(tick, sequence, player, id)`. The client inserts
+its own attack into the simulator immediately. Shared simulation code derives
+whether each attack is valid from life state, range, and cooldown; only a valid
+attack stops movement or starts cooldown, so an invalid attack cannot interrupt
+a move while waiting for the server. Cooldown is derived from valid attack
+orders rather than stored as mutable entity state. The server acknowledges log
+insertion separately from gameplay validity. Every peer uses the shared
+simulator to derive attack validity, damage, shield, and death from the same
+orders; the server does not send attack verdicts or health changes. The server
+commits through `currentTick - 12` to prune old orders. Units start with 10 HP
+and 1 shield.
+
+Pending order messages are retried with exponential backoff. Silence does not
+undo a prediction: after the retry timeout the client requests a full state
+snapshot, and retries continue until an acknowledgement arrives. Server-side
+broadcast timeout also triggers a snapshot. Selected handshake and
+acknowledgement messages use Geckos reliable delivery.
+
+Network snapshots include the recent tick history needed to seed the ring buffer
+and only retain orders at or after the commit frontier. Delivery
+acknowledgements are per message rather than cumulative, and reliability has
+not yet been applied to every lobby/game lifecycle event. Clients ping once per
+second and use an exponential moving average of measured RTT to estimate the
+server tick. An initial snapshot is sent when a client joins. Projectiles
 are stored and simulated separately from entities, with basic velocity and
 lifetime support, but are not currently spawned by a game command.
 All entities render at the current estimated tick. Remote entities retain their

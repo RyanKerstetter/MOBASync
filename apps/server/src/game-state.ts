@@ -1,15 +1,11 @@
 import {
   GAME_ARENA_HEIGHT,
   GAME_ARENA_WIDTH,
-  GAME_ATTACK_WINDUP_TICKS,
-  GAME_ATTACK_BACKDATE_CAP_TICKS,
   FINALIZE_LAG,
-  GAME_TPS,
   GAME_ORDER_VERDICT_RETENTION_MS,
   GameStatusSchema,
   Simulator,
   type GameBroadcastOrder,
-  type GameHealthResult,
   type GameOrder,
   type GameOrderAck,
   type GameSnapshot,
@@ -19,11 +15,6 @@ import {
 type LobbyPlayer = { id: string; name: string }
 type CachedOrderAck = { ack: GameOrderAck; expiresAt: number }
 type OrderVerdict = { ack: GameOrderAck; broadcast?: GameBroadcastOrder }
-const HP_EFFECT_PRIORITY = {
-  damage: 0,
-  heal: 1,
-  revive: 2,
-} as const
 export class ServerGameState {
   status: GameStatus = GameStatusSchema.enum.idle
   readonly simulator = new Simulator()
@@ -39,9 +30,7 @@ export class ServerGameState {
   begin(players: Iterable<LobbyPlayer>): void {
     this.status = GameStatusSchema.enum.starting
     this.readyPlayers.clear()
-    this.simulator.entities.clear()
-    this.simulator.projectiles.clear()
-    this.simulator.tick = 0
+    this.simulator.reset()
     this.entityIdsByPlayerId.clear()
     this.orderAcksByPlayerId.clear()
     this.nextEntityId = 1
@@ -67,8 +56,7 @@ export class ServerGameState {
     if (this.status !== GameStatusSchema.enum.starting) return
     this.status = GameStatusSchema.enum.idle
     this.readyPlayers.clear()
-    this.simulator.entities.clear()
-    this.simulator.projectiles.clear()
+    this.simulator.reset()
     this.entityIdsByPlayerId.clear()
     this.orderAcksByPlayerId.clear()
   }
@@ -103,6 +91,10 @@ export class ServerGameState {
 
   advanceTick(): void {
     this.simulator.advanceTo(this.simulator.tick + 1)
+    const commitTick = Math.max(0, this.simulator.tick - FINALIZE_LAG)
+    if (commitTick > this.simulator.commitTick) {
+      this.simulator.setCommitTick(commitTick)
+    }
   }
 
   getEntityId(playerId: string): number | undefined {
@@ -134,99 +126,29 @@ export class ServerGameState {
     const serverTick = this.simulator.tick
     let reason: string | undefined
 
-    if (attacker?.hasOrderSequence(order.seq)) {
-      reason = 'stale'
-    } else if (entityId === undefined || !attacker) {
+    if (entityId === undefined || !attacker) {
       reason = order.type === 'attack' ? 'dead' : 'The player entity is not available.'
     } else if (order.type === 'move') {
       if (
-        order.clientTick < Math.max(0, serverTick - GAME_TPS * 2)
-        || order.clientTick > serverTick + GAME_TPS * 2
-        || order.clientTick < attacker.latestOrderTick
-        || order.seq <= attacker.highestOrderSequence
+        order.tick <= this.simulator.commitTick
+        || order.tick < Math.max(0, serverTick - FINALIZE_LAG)
+        || order.tick > serverTick + FINALIZE_LAG
       ) {
         reason = 'stale'
-      } else if (attacker.health && (attacker.health.hp <= 0 || attacker.health.deathTick !== undefined)) {
-        reason = 'dead'
       } else if (!this.simulator.addOrder(entityId, order)) {
-        reason = 'The order could not be applied to the player entity.'
+        reason = 'duplicate'
       }
     } else {
-      const stamp = this.getAttackStamp(order.clickTick, serverTick)
-      const actionTick = Math.max(serverTick, order.clickTick)
       const target = this.simulator.entities.get(order.targetId)
       if (
-        order.clickTick < Math.max(0, serverTick - GAME_ATTACK_BACKDATE_CAP_TICKS)
-        || order.clickTick > serverTick + GAME_ATTACK_BACKDATE_CAP_TICKS
+        order.tick <= this.simulator.commitTick
+        || order.tick < Math.max(0, serverTick - FINALIZE_LAG)
+        || order.tick > serverTick + FINALIZE_LAG
       ) {
         reason = 'stale'
-      } else if (
-        !attacker.health
-        || attacker.health.hp <= 0
-        || attacker.health.deathTick !== undefined
-        || !target?.health
-        || target.health.hp <= 0
-        || target.health.deathTick !== undefined
-      ) {
-        reason = 'dead'
-      } else if (
-        target.player?.playerId === playerId
-        || !attacker.attackStats
-        || Math.hypot(
-          attacker.posAt(actionTick).x - target.posAt(actionTick).x,
-          attacker.posAt(actionTick).y - target.posAt(actionTick).y,
-        ) > attacker.attackStats.attackRange
-      ) {
-        reason = 'out_of_range'
-      } else if (!attacker.attackStats.canAttackAt(
-        stamp,
-        serverTick,
-        GAME_ATTACK_BACKDATE_CAP_TICKS,
-      )) {
-        reason = 'cooldown'
       } else {
-        const position = attacker.posAt(actionTick)
-        const inserted = this.simulator.addOrder(entityId, {
-          type: 'attack',
-          tick: actionTick,
-          seq: order.seq,
-          stamp,
-          position,
-        })
-        if (!inserted) {
-          reason = 'stale'
-        } else {
-          attacker.attackStats.recordAttackAt(stamp)
-          const effectTick = Math.max(
-            stamp + GAME_ATTACK_WINDUP_TICKS,
-            (target.health.finalizedTick ?? 0) + 1,
-          )
-          target.health.pendingHp.push({
-            id: `${order.id}:dmg`,
-            tick: effectTick,
-            amount: 1,
-            priority: HP_EFFECT_PRIORITY.damage,
-            stamp,
-            seq: order.seq,
-            attackerId: playerId,
-          })
-
-          const verdict: OrderVerdict = {
-            ack: { id: order.id, seq: order.seq, status: 'accepted', serverTick, stamp, actionTick, position },
-            broadcast: {
-              ...order,
-              entityId,
-              playerId,
-              playerName: attacker.player?.name ?? 'Player',
-              serverTick,
-              stamp,
-              actionTick,
-              position,
-            },
-          }
-          this.cacheOrderAck(playerId, verdict.ack)
-          return verdict
-        }
+        if (!target || !attacker.attackStats) reason = 'target_unavailable'
+        else if (!this.simulator.addOrder(entityId, order)) reason = 'duplicate'
       }
     }
 
@@ -238,7 +160,7 @@ export class ServerGameState {
         serverTick,
         ...(reason ? { reason } : {}),
       },
-      ...(reason || !attacker || entityId === undefined || order.type !== 'move'
+      ...(reason || !attacker || entityId === undefined
         ? {}
         : {
           broadcast: {
@@ -246,68 +168,11 @@ export class ServerGameState {
             entityId,
             playerId,
             playerName: attacker.player?.name ?? 'Player',
-            serverTick,
           },
         }),
     }
     this.cacheOrderAck(playerId, verdict.ack)
     return verdict
-  }
-
-  finalizeUpTo(nowTick: number): GameHealthResult[] {
-    const finalizeThrough = Math.max(0, nowTick - FINALIZE_LAG)
-    const results: GameHealthResult[] = []
-    for (const entity of this.simulator.entities.values()) {
-      const health = entity.health
-      if (!health) continue
-      const effectsByTick = new Map<number, typeof health.pendingHp>()
-      health.pendingHp.sort((left, right) =>
-        left.tick - right.tick
-        || left.priority - right.priority
-        || left.stamp - right.stamp
-        || left.seq - right.seq
-        || left.attackerId.localeCompare(right.attackerId)
-        || left.id.localeCompare(right.id),
-      )
-      for (let index = 0; index < health.pendingHp.length;) {
-        const effect = health.pendingHp[index]
-        if (effect.tick > finalizeThrough) {
-          index += 1
-          continue
-        }
-        health.pendingHp.splice(index, 1)
-        const effects = effectsByTick.get(effect.tick) ?? []
-        effects.push(effect)
-        effectsByTick.set(effect.tick, effects)
-      }
-
-      for (const [tick, effects] of effectsByTick) {
-        if (
-          health.deathTick !== undefined
-        ) continue
-
-        let dealt = 0
-        for (const effect of effects) {
-          const shieldDamage = Math.min(health.shield, effect.amount)
-          health.shield -= shieldDamage
-          const hpDamage = Math.min(health.hp, effect.amount - shieldDamage)
-          health.hp -= hpDamage
-          dealt += shieldDamage + hpDamage
-        }
-        health.hpSeq += 1
-        if (health.hp <= 0) health.deathTick = tick
-        results.push({
-          targetId: entity.id,
-          hpAfter: health.hp,
-          shieldAfter: health.shield,
-          hpSeq: health.hpSeq,
-          dealt,
-        })
-      }
-      health.finalizedTick = Math.max(health.finalizedTick, finalizeThrough)
-      if (health.deathTick !== undefined) health.pendingHp.length = 0
-    }
-    return results
   }
 
   removePlayer(playerId: string): void {
@@ -329,10 +194,4 @@ export class ServerGameState {
     this.orderAcksByPlayerId.set(playerId, orderAcks)
   }
 
-  private getAttackStamp(clickTick: number, serverTick: number): number {
-    return Math.max(
-      Math.max(0, serverTick - GAME_ATTACK_BACKDATE_CAP_TICKS),
-      Math.min(clickTick, serverTick),
-    )
-  }
 }

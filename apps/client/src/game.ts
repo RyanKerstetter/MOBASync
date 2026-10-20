@@ -8,14 +8,13 @@ import {
   GAME_PING_INTERVAL_MS,
   GAME_PLAYER_RADIUS,
   GameBroadcastOrderSchema,
-  GameHealthResultSchema,
   GameJoinedSchema,
   GameOrderAckSchema,
   GamePongSchema,
   GameSnapshotSchema,
-  parseIdentifiedMessage,
   ReliableMessenger,
   type GameOrder,
+  type GameOrderAck,
   type GameSnapshot,
 } from '../../../packages/shared/src/index.ts'
 import { Application, Container, Graphics, Rectangle, Text } from 'pixi.js'
@@ -103,6 +102,7 @@ export async function startGame({
   const actors = new Map<number, Actor>()
   const projectileActors = new Map<number, Container>()
   const floatingDamage: FloatingDamage[] = []
+  const displayedHealth = new Map<number, number>()
   const attackRangeRing = new Graphics()
   attackRangeRing.alpha = 0.3
   attackRangeRing.visible = false
@@ -149,11 +149,20 @@ export async function startGame({
   const renderState = (now = performance.now()): void => {
     const entities = gameState.getEntities(now)
     const activeIds = new Set(entities.map((entity) => entity.id))
+    for (const entity of entities) {
+      const health = (entity.health?.hp ?? 0) + (entity.health?.shield ?? 0)
+      const previousHealth = displayedHealth.get(entity.id)
+      if (previousHealth !== undefined && health < previousHealth) {
+        showFloatingDamage(entity.id, previousHealth - health)
+      }
+      displayedHealth.set(entity.id, health)
+    }
     for (const [id, actor] of actors) {
       if (!activeIds.has(id)) {
         scene.removeChild(actor.node)
         actor.node.destroy({ children: true })
         actors.delete(id)
+        displayedHealth.delete(id)
       }
     }
     for (const entity of entities) {
@@ -233,16 +242,33 @@ export async function startGame({
     url: `${window.location.protocol}//${window.location.hostname}`,
     port: 9209,
   })
-  const reliableMessenger = new ReliableMessenger<GameOrder>({
+  const requestSnapshot = (): void => {
+    channel.emit('game:resync', {}, { reliable: true })
+  }
+  const reliableMessenger = new ReliableMessenger<GameOrder, GameOrderAck>({
     channel,
     messageEvent: 'game:order',
     acknowledgementEvent: 'game:order-ack',
     timeoutMs: orderTimeoutMs,
-    parseAcknowledgement: parseIdentifiedMessage,
-    onTimeout: (order) => {
-      if (gameState.timeOutOrder(order.id, order.seq)) {
-        onStatus(`Order ${order.seq} timed out and was undone.`, true)
+    parseAcknowledgement: (data) => {
+      const parsed = GameOrderAckSchema.safeParse(data)
+      return parsed.success ? parsed.data : undefined
+    },
+    onAcknowledgement: (ack) => {
+      if (gameState.applyOrderAck(ack)) requestSnapshot()
+      if (ack.status === 'rejected') {
+        const reasonMessages: Record<string, string> = {
+          out_of_range: 'Target is out of attack range.',
+          cooldown: 'Attack is not ready yet.',
+          dead: 'Attacker or target is dead.',
+          stale: 'Order was too old or out of sequence.',
+        }
+        onStatus(reasonMessages[ack.reason ?? ''] ?? ack.reason ?? `Order ${ack.seq} was rejected.`, true)
       }
+    },
+    onTimeout: () => {
+      requestSnapshot()
+      onStatus('Order acknowledgement delayed; requesting a state sync.', true)
     },
   })
 
@@ -295,7 +321,7 @@ export async function startGame({
     }
     connected = true
     onStatus('Connected. Joining the lobby game…')
-    channel.emit('game:join', { lobbyCode, sessionId })
+    channel.emit('game:join', { lobbyCode, sessionId }, { reliable: true })
   })
 
   channel.on('game:joined', (data) => {
@@ -307,7 +333,7 @@ export async function startGame({
     gameState.setLocalEntityId(parsed.data.entityId)
     gameState.setNextOrderSequence(parsed.data.nextOrderSeq)
     gameState.setServerTick(parsed.data.serverTick)
-    channel.emit('playerReady')
+    channel.emit('playerReady', {}, { reliable: true })
     channel.emit('game:ping', { clientTime: performance.now() })
     onStatus('You are ready. Waiting for every player…')
   })
@@ -342,6 +368,20 @@ export async function startGame({
     onStatus('Game started. Right-click to move; click an enemy or press Space to attack.')
   })
 
+  channel.on('game:snapshot', (data) => {
+    const parsed = GameSnapshotSchema.safeParse(data)
+    if (!parsed.success) {
+      onStatus('The server sent invalid recovery state.', true)
+      return
+    }
+    const snapshotResult = gameState.applySnapshot(parsed.data)
+    for (const order of snapshotResult.confirmedOrders) {
+      reliableMessenger.acknowledge(order.id, order.seq)
+    }
+    if (!snapshotResult.applied) return
+    onStatus('Game state synchronized.')
+  })
+
   reliableMessenger.listenFor('game:order', 'game:order-delivery-ack', (data) => {
     const parsed = GameBroadcastOrderSchema.safeParse(data)
     if (!parsed.success) {
@@ -349,35 +389,6 @@ export async function startGame({
       return false
     }
     return gameState.applyOrder(parsed.data)
-  })
-
-  channel.on('game:hp-result', (data) => {
-    const parsed = GameHealthResultSchema.safeParse(data)
-    if (!parsed.success) {
-      onStatus('The server sent an invalid health result.', true)
-      return
-    }
-    if (gameState.applyHealthResult(parsed.data)) {
-      showFloatingDamage(parsed.data.targetId, parsed.data.dealt)
-    }
-  })
-
-  channel.on('game:order-ack', (data) => {
-    const parsed = GameOrderAckSchema.safeParse(data)
-    if (!parsed.success) {
-      onStatus('The server sent an invalid order acknowledgement.', true)
-      return
-    }
-    gameState.applyOrderAck(parsed.data)
-    if (parsed.data.status === 'rejected') {
-      const reasonMessages: Record<string, string> = {
-        out_of_range: 'Target is out of attack range.',
-        cooldown: 'Attack is not ready yet.',
-        dead: 'Attacker or target is dead.',
-        stale: 'Order was too old or out of sequence.',
-      }
-      onStatus(reasonMessages[parsed.data.reason ?? ''] ?? parsed.data.reason ?? `Order ${parsed.data.seq} was rejected.`, true)
-    }
   })
 
   channel.on('game:pong', (data) => {

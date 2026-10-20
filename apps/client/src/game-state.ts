@@ -4,13 +4,14 @@ import {
   GAME_REMOTE_CATCHUP_EASE_TICKS,
   GAME_REMOTE_CATCHUP_MAX_SPEED_MULTIPLIER,
   GAME_TPS,
+  FINALIZE_LAG,
   getAttackCooldownTicks,
   Simulator,
   type EntityOrder,
   type GameAttackOrder,
   type GameBroadcastOrder,
-  type GameHealthResult,
   type GameEntitySnapshot,
+  type GameTickSnapshot,
   type GameOrder,
   type GameOrderAck,
   type GameProjectileSnapshot,
@@ -24,7 +25,9 @@ export type TrackedOrder = {
   sentAt: number
 }
 
-export type RenderedEntity = GameEntitySnapshot & { position: Vector2 }
+export type RenderedEntity =
+  Pick<GameEntitySnapshot, 'id' | 'player' | 'health' | 'attackStats'>
+  & { position: Vector2 }
 export type RenderedProjectile = GameProjectileSnapshot & { position: Vector2 }
 
 type RenderedRemotePosition = {
@@ -41,6 +44,7 @@ export class ClientGameState {
   private serverTick = 0
   private serverTickReceivedAt = performance.now()
   private nextOrderSequence = 1
+  private lastIssuedTick = 0
   private rttSampleCount = 0
   private averageRttMs = 0
   private lastRttMs: number | undefined
@@ -59,7 +63,7 @@ export class ClientGameState {
     receivedAt = performance.now(),
     roundTripTimeMs = this.averageRttMs,
   ): void {
-    if (tick < this.serverTick) return
+    if (tick <= this.serverTick) return
     this.serverTick = tick
     this.serverTickReceivedAt = receivedAt - roundTripTimeMs / 2
     this.lastServerUpdateAt = receivedAt
@@ -70,8 +74,16 @@ export class ClientGameState {
     if (!Number.isFinite(sample) || sample < 0) return
     this.lastRttMs = sample
     this.rttSampleCount += 1
-    this.averageRttMs += (sample - this.averageRttMs) / this.rttSampleCount
-    this.setServerTick(serverTick, receivedAt)
+    this.averageRttMs = this.rttSampleCount === 1
+      ? sample
+      : this.averageRttMs + (sample - this.averageRttMs) * 0.2
+    this.setServerTick(serverTick, receivedAt, sample)
+    const authoritativeTick = Math.max(this.simulator.tick, serverTick)
+    this.simulator.advanceTo(authoritativeTick)
+    this.simulator.setCommitTick(Math.max(
+      this.simulator.commitTick,
+      Math.min(authoritativeTick, serverTick - FINALIZE_LAG),
+    ))
   }
 
   getAverageRttMs(): number {
@@ -108,7 +120,9 @@ export class ClientGameState {
       oldestPendingOrderAgeMs: oldestPendingOrder
         ? Math.max(0, now - oldestPendingOrder.sentAt)
         : undefined,
-      localPosition: localEntity?.posAt(this.estimateTick(now)),
+      localPosition: localEntity
+        ? this.getSnapshotAtEstimatedTick(now).get(localEntity.id)?.getPosition()
+        : undefined,
     }
   }
 
@@ -116,7 +130,7 @@ export class ClientGameState {
     snapshot: GameSnapshot,
     receivedAt = performance.now(),
   ): { applied: boolean; confirmedOrders: GameOrder[] } {
-    if (this.serverSnapshot && snapshot.tick <= this.serverSnapshot.tick) {
+    if (this.serverSnapshot && snapshot.tick < this.serverSnapshot.tick) {
       return { applied: false, confirmedOrders: [] }
     }
 
@@ -128,17 +142,17 @@ export class ClientGameState {
     const localEntity = this.localEntityId === undefined
       ? undefined
       : this.simulator.entities.get(this.localEntityId)
-    const replicatedOrderSequences = new Set(
+    const replicatedOrders = new Set(
       localEntity?.orders.map((order) => order.seq) ?? [],
     )
     const confirmedOrders: GameOrder[] = []
     for (const [sequence, tracked] of this.localOrders) {
-      if (replicatedOrderSequences.has(sequence)) {
+      if (replicatedOrders.has(sequence)) {
         confirmedOrders.push(tracked.order)
         this.localOrders.delete(sequence)
       } else if (
         this.localEntityId !== undefined
-        && tracked.order.type === 'move'
+        && tracked.order.tick > snapshot.commitTick
       ) {
         this.simulator.addOrder(this.localEntityId, tracked.order)
       }
@@ -156,7 +170,7 @@ export class ClientGameState {
     const order: MoveOrder = {
       id: `${entity.player?.playerId ?? this.localEntityId}:${seq}`,
       seq,
-      clientTick: Math.floor(this.estimateTick(now)),
+      tick: this.nextOrderTick(now),
       type: 'move',
       target: { ...target },
     }
@@ -181,11 +195,12 @@ export class ClientGameState {
     const order: GameAttackOrder = {
       id: `${playerId}:${seq}`,
       seq,
-      clickTick: Math.floor(this.estimateTick(now)),
+      tick: this.nextOrderTick(now),
       targetId,
       type: 'attack',
     }
     this.nextOrderSequence += 1
+    if (!this.simulator.addOrder(this.localEntityId, order)) return undefined
     this.trackOrder(order, now)
     return order
   }
@@ -222,93 +237,51 @@ export class ClientGameState {
   }
 
   getAttackCooldownProgress(now = performance.now()): number {
-    const attackStats = this.localEntityId === undefined
+    const localEntityId = this.localEntityId
+    const attackStats = localEntityId === undefined
       ? undefined
-      : this.simulator.entities.get(this.localEntityId)?.attackStats
-    if (!attackStats) return 1
-    const estimatedTick = this.estimateTick(now)
+      : this.simulator.entities.get(localEntityId)?.attackStats
+    if (localEntityId === undefined || !attackStats) return 1
+    const state = this.getSnapshotAtEstimatedTick(now).get(localEntityId)
+    const cooldown = state?.getCooldown()
+    if (!cooldown) return 1
     const cooldownTicks = getAttackCooldownTicks(attackStats.attackSpeed)
-    const cooldownStartTick = attackStats.nextAttackTick - cooldownTicks
-    return Math.max(0, Math.min(
-      1,
-      (estimatedTick - cooldownStartTick) / cooldownTicks,
-    ))
+    return Math.max(0, Math.min(1, 1 - cooldown.ticksRemaining / cooldownTicks))
   }
 
-  applyHealthResult(result: GameHealthResult): boolean {
-    const entity = this.simulator.entities.get(result.targetId)
-    const health = entity?.health
-    if (!health || result.hpSeq <= health.hpSeq) return false
-    health.hp = result.hpAfter
-    health.shield = result.shieldAfter
-    health.hpSeq = result.hpSeq
-    return true
-  }
-
-  timeOutOrder(id: string, sequence: number): boolean {
-    const tracked = this.localOrders.get(sequence)
-    if (!tracked || tracked.order.id !== id) return false
-    this.localOrders.delete(sequence)
-    if (tracked.order.type === 'move' && this.localEntityId !== undefined) {
-      this.simulator.removeOrder(this.localEntityId, sequence)
-    }
-    return true
-  }
-
-  applyOrder(order: GameBroadcastOrder, receivedAt = performance.now()): boolean {
-    const entityOrder: EntityOrder = order.type === 'move'
-      ? order
-      : {
-        type: 'attack',
-        tick: order.actionTick,
-        seq: order.seq,
-        stamp: order.stamp,
-        position: order.position,
-      }
-    const applied = this.applySimulationOrder(order.entityId, entityOrder)
-    this.setServerTick(order.serverTick, receivedAt)
+  applyOrder(order: GameBroadcastOrder): boolean {
+    const applied = this.applySimulationOrder(order.entityId, order)
     return applied
   }
 
-  applyOrderAck(ack: GameOrderAck, receivedAt = performance.now()): void {
+  applyOrderAck(ack: GameOrderAck, receivedAt = performance.now()): boolean {
     const tracked = this.localOrders.get(ack.seq)
     this.setServerTick(ack.serverTick, receivedAt)
-    if (!tracked || tracked.order.id !== ack.id) return
+    if (!tracked || tracked.order.id !== ack.id) return false
 
     if (ack.status === 'accepted') {
       this.localOrders.delete(ack.seq)
-      if (this.localEntityId !== undefined) {
-        const entity = this.simulator.entities.get(this.localEntityId)
-        if (tracked.order.type === 'move') {
-          this.applySimulationOrder(this.localEntityId, tracked.order)
-        } else if (entity) {
-          const actionTick = ack.actionTick ?? ack.serverTick
-          this.applySimulationOrder(this.localEntityId, {
-            type: 'attack',
-            tick: actionTick,
-            seq: ack.seq,
-            stamp: ack.stamp ?? actionTick,
-            position: ack.position ?? entity.posAt(actionTick),
-          })
-        }
-      }
+      return false
     } else {
       this.localOrders.delete(ack.seq)
-      if (tracked.order.type === 'move' && this.localEntityId !== undefined) {
-        this.simulator.removeOrder(this.localEntityId, ack.seq)
-      }
+      if (this.localEntityId === undefined) return true
+      return !this.simulator.removeOrder(this.localEntityId, ack.seq)
     }
   }
 
   getEntities(now = performance.now()): RenderedEntity[] {
-    const tick = this.estimateTick(now)
+    const snapshot = this.getSnapshotAtEstimatedTick(now)
     const entities: RenderedEntity[] = []
     const activeEntityIds = new Set<number>()
     for (const entity of this.simulator.entities.values()) {
       activeEntityIds.add(entity.id)
+      const health = snapshot.get(entity.id)?.getHealthState()
       entities.push({
-        ...entity.snapshot(),
-        position: this.getRenderedEntityPosition(entity.id, tick, now),
+        id: entity.id,
+        ...(entity.player ? { player: { ...entity.player } } : {}),
+        ...(entity.attackStats ? { attackStats: entity.attackStats.snapshot() } : {}),
+        ...(health ? { health } : {}),
+        position: this.getRenderedEntityPosition(entity.id, now, snapshot),
       })
     }
     for (const entityId of this.renderedRemotePositions.keys()) {
@@ -331,10 +304,32 @@ export class ClientGameState {
     return this.serverTick + Math.max(0, now - this.serverTickReceivedAt) * GAME_TPS / 1000
   }
 
-  private getRenderedEntityPosition(entityId: number, tick: number, now: number): Vector2 {
+  private getSnapshotAtEstimatedTick(now: number): GameTickSnapshot {
+    return this.simulator.at(Math.max(
+      this.simulator.latestSnapshotTick,
+      Math.floor(this.estimateTick(now)),
+    ))
+  }
+
+  private nextOrderTick(now: number): number {
+    this.lastIssuedTick = Math.max(
+      this.lastIssuedTick,
+      this.simulator.commitTick + 1,
+      this.simulator.latestSnapshotTick + 1,
+      Math.floor(this.estimateTick(now)),
+    )
+    return this.lastIssuedTick
+  }
+
+  private getRenderedEntityPosition(
+    entityId: number,
+    now: number,
+    snapshot: GameTickSnapshot,
+  ): Vector2 {
     const entity = this.simulator.entities.get(entityId)
     if (!entity) return { x: 0, y: 0 }
-    const target = entity.posAt(tick)
+    const target = snapshot.get(entityId)?.getPosition()
+      ?? entity.initialPosition
     if (entityId === this.localEntityId) return target
 
     const rendered = this.renderedRemotePositions.get(entityId)
@@ -373,11 +368,7 @@ export class ClientGameState {
   private applySimulationOrder(entityId: number, order: EntityOrder): boolean {
     const entity = this.simulator.entities.get(entityId)
     if (!entity) return false
-    const inserted = this.simulator.addOrder(entityId, order)
-    if (inserted && order.type === 'attack') {
-      entity.attackStats?.recordAttackAt(order.stamp)
-    }
-    return true
+    return this.simulator.addOrder(entityId, order)
   }
 
   private trackOrder(order: GameOrder, now: number): void {

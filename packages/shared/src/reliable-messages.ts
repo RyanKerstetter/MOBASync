@@ -14,24 +14,32 @@ type PendingMessage<T> = {
   timeoutAt: number
   nextRetryAt: number
   retryDelayMs: number
+  timeoutReported: boolean
 }
 
-type ReliableMessengerOptions<T extends IdentifiedMessage> = {
+type ReliableMessengerOptions<
+  T extends IdentifiedMessage,
+  A extends IdentifiedMessage,
+> = {
   channel: ReliableChannel
   messageEvent: string
   acknowledgementEvent: string
   timeoutMs: number
-  parseAcknowledgement: (data: unknown) => IdentifiedMessage | undefined
+  parseAcknowledgement: (data: unknown) => A | undefined
+  onAcknowledgement?: (acknowledgement: A) => void
   onAcknowledged?: (message: T) => void
   onTimeout?: (message: T) => void
 }
 
-export class ReliableMessenger<T extends IdentifiedMessage> {
+export class ReliableMessenger<
+  T extends IdentifiedMessage,
+  A extends IdentifiedMessage = IdentifiedMessage,
+> {
   private readonly pending = new Map<string, PendingMessage<T>>()
   private timer: ReturnType<typeof setTimeout> | undefined
   private closed = false
 
-  constructor(private readonly options: ReliableMessengerOptions<T>) {
+  constructor(private readonly options: ReliableMessengerOptions<T, A>) {
     if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
       throw new RangeError('Message timeout must be a finite, positive number.')
     }
@@ -39,6 +47,7 @@ export class ReliableMessenger<T extends IdentifiedMessage> {
       const acknowledgement = options.parseAcknowledgement(data)
       if (acknowledgement) {
         this.acknowledge(acknowledgement.id, acknowledgement.seq)
+        options.onAcknowledgement?.(acknowledgement)
       }
     })
   }
@@ -56,6 +65,7 @@ export class ReliableMessenger<T extends IdentifiedMessage> {
       timeoutAt: now + this.options.timeoutMs,
       nextRetryAt: now + retryDelayMs,
       retryDelayMs,
+      timeoutReported: false,
     })
     this.options.channel.emit(this.options.messageEvent, message)
     this.scheduleNextUpdate()
@@ -126,11 +136,15 @@ export class ReliableMessenger<T extends IdentifiedMessage> {
     this.timer = undefined
     if (this.closed) return
     const now = performance.now()
-    for (const [id, pending] of this.pending) {
+    for (const pending of this.pending.values()) {
       if (now >= pending.timeoutAt) {
-        this.pending.delete(id)
-        this.options.onTimeout?.(pending.message)
-      } else if (now >= pending.nextRetryAt) {
+        if (!pending.timeoutReported) {
+          pending.timeoutReported = true
+          pending.timeoutAt = Number.POSITIVE_INFINITY
+          this.options.onTimeout?.(pending.message)
+        }
+      }
+      if (now >= pending.nextRetryAt) {
         this.options.channel.emit(this.options.messageEvent, pending.message)
         pending.retryDelayMs *= 2
         pending.nextRetryAt += pending.retryDelayMs
