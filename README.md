@@ -58,7 +58,10 @@ server health results. Movement and attack intents share one order stream,
 sequence, and acknowledgement event; each order is acknowledged as accepted or
 rejected. Pending orders are retried with exponential backoff
 (50 ms, then 100 ms) and undone if no acknowledgement arrives within 200 ms.
-The client reconciles movement predictions when acknowledgements arrive.
+The channel-bound reliable messenger owns sending, acknowledgement matching,
+retries, and timeouts. It acknowledges received broadcasts only after the
+client successfully applies them. The client reconciles movement predictions
+when acknowledgements arrive.
 Accepted orders are broadcast to other clients instead of
 sending recurring full snapshots. Each recipient acknowledges accepted-order
 broadcasts; the server retries unacknowledged orders until the delivery timeout.

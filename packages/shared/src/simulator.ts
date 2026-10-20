@@ -280,6 +280,15 @@ export class Simulator {
     return true
   }
 
+  removeOrder(entityId: number, seq: number): boolean {
+    const entity = this.entities.get(entityId)
+    if (!entity) return false
+    const orderIndex = entity.orders.findIndex((order) => order.seq === seq)
+    if (orderIndex < 0) return false
+    entity.orders.splice(orderIndex, 1)
+    return true
+  }
+
   remove(entityId: number): void {
     this.entities.delete(entityId)
   }

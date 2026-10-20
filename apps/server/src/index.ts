@@ -1,13 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { randomInt } from 'node:crypto'
-import geckos, { type ServerChannel } from '@geckos.io/server'
+import geckos from '@geckos.io/server'
 import {
   GAME_ORDER_TIMEOUT_MS,
   GAME_TPS,
   GameJoinSchema,
   GameOrderSchema,
-  GameOrderDeliveryAckSchema,
-  ReliableMessageQueue,
+  parseIdentifiedMessage,
+  ReliableMessenger,
   type GameBroadcastOrder,
   type GameSnapshot,
 } from '../../../packages/shared/src/index.js'
@@ -60,9 +60,7 @@ type PublicLobby = {
 type PlayerRequest = { sessionId: string; name: string }
 type GameDeliveryClient = {
   lobbyCode: string
-  playerId: string
-  channel: ServerChannel
-  pendingOrders: ReliableMessageQueue<GameBroadcastOrder>
+  reliableMessenger: ReliableMessenger<GameBroadcastOrder>
 }
 
 const lobbies = new Map<string, Lobby>()
@@ -191,8 +189,7 @@ function startGameWhenReady(lobby: Lobby): void {
 function sendReliableOrder(lobbyCode: string, order: GameBroadcastOrder): void {
   for (const client of gameDeliveryClients.values()) {
     if (client.lobbyCode !== lobbyCode) continue
-    client.pendingOrders.track(order, performance.now())
-    client.channel.emit('game:order', order)
+    client.reliableMessenger.send(order)
   }
 }
 
@@ -451,16 +448,6 @@ function runGameTick(): void {
     }
   }
 
-  for (const client of gameDeliveryClients.values()) {
-    const update = client.pendingOrders.update(now)
-    for (const order of update.retryMessages) {
-      client.channel.emit('game:order', order)
-    }
-    if (update.timedOutMessages.length > 0) {
-      // TODO: Send a full snapshot to this client after delivery ack timeouts so it can reconcile state.
-    }
-  }
-
   nextGameTick += 1000 / GAME_TPS
   if (nextGameTick < now) nextGameTick = now + 1000 / GAME_TPS
   const timer = setTimeout(runGameTick, Math.max(0, nextGameTick - performance.now()))
@@ -507,9 +494,17 @@ gameServer.onConnection((channel) => {
     }
     deliveryClient = {
       lobbyCode: joinedLobby.code,
-      playerId: player.id,
-      channel,
-      pendingOrders: new ReliableMessageQueue(GAME_ORDER_TIMEOUT_MS),
+      reliableMessenger: new ReliableMessenger<GameBroadcastOrder>({
+        channel,
+        messageEvent: 'game:order',
+        acknowledgementEvent: 'game:order-delivery-ack',
+        timeoutMs: GAME_ORDER_TIMEOUT_MS,
+        parseAcknowledgement: parseIdentifiedMessage,
+        onAcknowledged: () => {
+          const activePlayer = lobby?.players.get(player.id)
+          if (activePlayer) activePlayer.lastSeen = Date.now()
+        },
+      }),
     }
     gameDeliveryClients.set(deliveryChannelId, deliveryClient)
     const entityId = joinedLobby.game.getEntityId(player.id)
@@ -579,17 +574,8 @@ gameServer.onConnection((channel) => {
     }
   })
 
-  channel.on('game:order-delivery-ack', (data) => {
-    const parsed = GameOrderDeliveryAckSchema.safeParse(data)
-    if (!parsed.success || !deliveryClient || !lobby || !playerId) return
-    if (deliveryClient.playerId !== playerId || deliveryClient.lobbyCode !== lobby.code) return
-    if (deliveryClient.pendingOrders.acknowledge(parsed.data.id, parsed.data.seq)) {
-      const player = lobby.players.get(playerId)
-      if (player) player.lastSeen = Date.now()
-    }
-  })
-
   channel.onDisconnect(() => {
+    deliveryClient?.reliableMessenger.close()
     if (
       deliveryChannelId
       && deliveryClient

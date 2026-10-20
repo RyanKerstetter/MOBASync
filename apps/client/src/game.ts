@@ -13,6 +13,9 @@ import {
   GameOrderAckSchema,
   GamePongSchema,
   GameSnapshotSchema,
+  parseIdentifiedMessage,
+  ReliableMessenger,
+  type GameOrder,
   type GameSnapshot,
 } from '../../../packages/shared/src/index.ts'
 import { Application, Container, Graphics, Rectangle, Text } from 'pixi.js'
@@ -96,7 +99,7 @@ export async function startGame({
       .stroke({ color: '#314862', width: 2 }),
   )
 
-  const gameState = new ClientGameState(orderTimeoutMs)
+  const gameState = new ClientGameState()
   const actors = new Map<number, Actor>()
   const projectileActors = new Map<number, Container>()
   const floatingDamage: FloatingDamage[] = []
@@ -230,6 +233,18 @@ export async function startGame({
     url: `${window.location.protocol}//${window.location.hostname}`,
     port: 9209,
   })
+  const reliableMessenger = new ReliableMessenger<GameOrder>({
+    channel,
+    messageEvent: 'game:order',
+    acknowledgementEvent: 'game:order-ack',
+    timeoutMs: orderTimeoutMs,
+    parseAcknowledgement: parseIdentifiedMessage,
+    onTimeout: (order) => {
+      if (gameState.timeOutOrder(order.id, order.seq)) {
+        onStatus(`Order ${order.seq} timed out and was undone.`, true)
+      }
+    },
+  })
 
   scene.eventMode = 'static'
   scene.hitArea = new Rectangle(0, 0, GAME_ARENA_WIDTH, GAME_ARENA_HEIGHT)
@@ -249,13 +264,13 @@ export async function startGame({
         .sort((left, right) => left.distance - right.distance)[0]?.entity
       if (clickedEnemy) {
         const order = gameState.createAttackOrder(clickedEnemy.id, sessionId)
-        if (order) channel.emit('game:order', order)
+        if (order) reliableMessenger.send(order)
         return
       }
     }
     if (event.button !== 2 || !started || disconnected) return
     const order = gameState.createMoveOrder({ x: target.x, y: target.y })
-    if (order) channel.emit('game:order', order)
+    if (order) reliableMessenger.send(order)
   })
   const onContextMenu = (event: MouseEvent): void => event.preventDefault()
   app.canvas.addEventListener('contextmenu', onContextMenu)
@@ -269,7 +284,7 @@ export async function startGame({
     const target = gameState.getClosestEnemyInRange()
     if (!target) return
     const order = gameState.createAttackOrder(target.id, sessionId)
-    if (order) channel.emit('game:order', order)
+    if (order) reliableMessenger.send(order)
   }
   window.addEventListener('keydown', onKeyDown)
 
@@ -318,24 +333,22 @@ export async function startGame({
       onStatus('The server sent invalid game state.', true)
       return
     }
-    gameState.applySnapshot(parsed.data)
+    const snapshotResult = gameState.applySnapshot(parsed.data)
+    for (const order of snapshotResult.confirmedOrders) {
+      reliableMessenger.acknowledge(order.id, order.seq)
+    }
     started = true
     onStarted(parsed.data)
     onStatus('Game started. Right-click to move; click an enemy or press Space to attack.')
   })
 
-  channel.on('game:order', (data) => {
+  reliableMessenger.listenFor('game:order', 'game:order-delivery-ack', (data) => {
     const parsed = GameBroadcastOrderSchema.safeParse(data)
     if (!parsed.success) {
       onStatus('The server sent an invalid order.', true)
-      return
+      return false
     }
-    if (gameState.applyOrder(parsed.data)) {
-      channel.emit('game:order-delivery-ack', {
-        id: parsed.data.id,
-        seq: parsed.data.seq,
-      })
-    }
+    return gameState.applyOrder(parsed.data)
   })
 
   channel.on('game:hp-result', (data) => {
@@ -417,16 +430,6 @@ export async function startGame({
       ].join('\n')
     }
     const now = performance.now()
-    const pendingUpdate = gameState.updatePendingOrders(now)
-    for (const order of pendingUpdate.retryOrders) {
-      channel.emit('game:order', order)
-    }
-    if (pendingUpdate.timedOutOrderSequences.length > 0) {
-      onStatus(
-        `${pendingUpdate.timedOutOrderSequences.length} order(s) timed out and were undone.`,
-        true,
-      )
-    }
     renderState(now)
     for (let index = floatingDamage.length - 1; index >= 0; index -= 1) {
       const floating = floatingDamage[index]
@@ -448,6 +451,7 @@ export async function startGame({
     app.canvas.removeEventListener('contextmenu', onContextMenu)
     window.removeEventListener('keydown', onKeyDown)
     debugOverlay.remove()
+    reliableMessenger.close()
     channel.close()
     app.destroy(true, { children: true })
     container.replaceChildren()

@@ -190,5 +190,5 @@ export function getAttackCooldownTicks(attackSpeed: number): number {
 }
 
 export { AttackStats, HealthStats, Simulator } from './simulator.js'
-export { ReliableMessageQueue } from './reliable-messages.js'
-export type { IdentifiedMessage, ReliableMessageUpdate } from './reliable-messages.js'
+export { ReliableMessenger, parseIdentifiedMessage } from './reliable-messages.js'
+export type { IdentifiedMessage } from './reliable-messages.js'

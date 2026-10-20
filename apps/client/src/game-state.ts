@@ -3,10 +3,8 @@ import {
   GAME_PLAYER_SPEED,
   GAME_REMOTE_CATCHUP_EASE_TICKS,
   GAME_REMOTE_CATCHUP_MAX_SPEED_MULTIPLIER,
-  GAME_ORDER_TIMEOUT_MS,
   GAME_TPS,
   getAttackCooldownTicks,
-  ReliableMessageQueue,
   Simulator,
   type EntityOrder,
   type GameAttackOrder,
@@ -23,13 +21,7 @@ import {
 
 export type TrackedOrder = {
   order: GameOrder
-  status: 'pending' | 'accepted' | 'rejected' | 'timed-out'
   sentAt: number
-}
-
-export type PendingOrderUpdate = {
-  retryOrders: GameOrder[]
-  timedOutOrderSequences: number[]
 }
 
 export type RenderedEntity = GameEntitySnapshot & { position: Vector2 }
@@ -45,9 +37,6 @@ export class ClientGameState {
   private localEntityId: number | undefined
   private serverSnapshot: GameSnapshot | undefined
   private readonly localOrders = new Map<number, TrackedOrder>()
-  private readonly orderStatuses = new Map<number, TrackedOrder>()
-  private readonly outgoingOrders: ReliableMessageQueue<GameOrder>
-  private readonly confirmedOrdersByEntity = new Map<number, Map<number, EntityOrder>>()
   private readonly renderedRemotePositions = new Map<number, RenderedRemotePosition>()
   private serverTick = 0
   private serverTickReceivedAt = performance.now()
@@ -56,10 +45,6 @@ export class ClientGameState {
   private averageRttMs = 0
   private lastRttMs: number | undefined
   private lastServerUpdateAt = performance.now()
-
-  constructor(orderTimeoutMs = GAME_ORDER_TIMEOUT_MS) {
-    this.outgoingOrders = new ReliableMessageQueue(orderTimeoutMs)
-  }
 
   setLocalEntityId(entityId: number): void {
     this.localEntityId = entityId
@@ -127,22 +112,18 @@ export class ClientGameState {
     }
   }
 
-  applySnapshot(snapshot: GameSnapshot, receivedAt = performance.now()): boolean {
-    if (this.serverSnapshot && snapshot.tick <= this.serverSnapshot.tick) return false
+  applySnapshot(
+    snapshot: GameSnapshot,
+    receivedAt = performance.now(),
+  ): { applied: boolean; confirmedOrders: GameOrder[] } {
+    if (this.serverSnapshot && snapshot.tick <= this.serverSnapshot.tick) {
+      return { applied: false, confirmedOrders: [] }
+    }
 
     this.serverSnapshot = snapshot
     this.simulator.replaceFromSnapshot(snapshot)
     this.renderedRemotePositions.clear()
     this.setServerTick(snapshot.tick, receivedAt)
-    this.confirmedOrdersByEntity.clear()
-    for (const [entityId, entity] of this.simulator.entities) {
-      if (entity.orders.length > 0) {
-        this.confirmedOrdersByEntity.set(
-          entityId,
-          new Map(entity.orders.map((order) => [order.seq, order])),
-        )
-      }
-    }
 
     const localEntity = this.localEntityId === undefined
       ? undefined
@@ -150,11 +131,11 @@ export class ClientGameState {
     const replicatedOrderSequences = new Set(
       localEntity?.orders.map((order) => order.seq) ?? [],
     )
+    const confirmedOrders: GameOrder[] = []
     for (const [sequence, tracked] of this.localOrders) {
       if (replicatedOrderSequences.has(sequence)) {
-        tracked.status = 'accepted'
+        confirmedOrders.push(tracked.order)
         this.localOrders.delete(sequence)
-        this.outgoingOrders.acknowledge(tracked.order.id, sequence)
       } else if (
         this.localEntityId !== undefined
         && tracked.order.type === 'move'
@@ -162,7 +143,7 @@ export class ClientGameState {
         this.simulator.addOrder(this.localEntityId, tracked.order)
       }
     }
-    return true
+    return { applied: true, confirmedOrders }
   }
 
   createMoveOrder(target: Vector2, now = performance.now()): MoveOrder | undefined {
@@ -264,23 +245,14 @@ export class ClientGameState {
     return true
   }
 
-  updatePendingOrders(
-    now = performance.now(),
-  ): PendingOrderUpdate {
-    const update = this.outgoingOrders.update(now)
-    const timedOutOrderSequences = update.timedOutMessages.map((order) => order.seq)
-    for (const order of update.timedOutMessages) {
-      const tracked = this.localOrders.get(order.seq)
-      if (tracked?.order.id === order.id) {
-        tracked.status = 'timed-out'
-        this.localOrders.delete(order.seq)
-      }
+  timeOutOrder(id: string, sequence: number): boolean {
+    const tracked = this.localOrders.get(sequence)
+    if (!tracked || tracked.order.id !== id) return false
+    this.localOrders.delete(sequence)
+    if (tracked.order.type === 'move' && this.localEntityId !== undefined) {
+      this.simulator.removeOrder(this.localEntityId, sequence)
     }
-    if (timedOutOrderSequences.length > 0) this.rebuildPredictedState()
-    return {
-      retryOrders: update.retryMessages.map(cloneGameOrder),
-      timedOutOrderSequences,
-    }
+    return true
   }
 
   applyOrder(order: GameBroadcastOrder, receivedAt = performance.now()): boolean {
@@ -304,9 +276,7 @@ export class ClientGameState {
     if (!tracked || tracked.order.id !== ack.id) return
 
     if (ack.status === 'accepted') {
-      tracked.status = 'accepted'
       this.localOrders.delete(ack.seq)
-      this.outgoingOrders.acknowledge(ack.id, ack.seq)
       if (this.localEntityId !== undefined) {
         const entity = this.simulator.entities.get(this.localEntityId)
         if (tracked.order.type === 'move') {
@@ -323,21 +293,11 @@ export class ClientGameState {
         }
       }
     } else {
-      tracked.status = 'rejected'
       this.localOrders.delete(ack.seq)
-      this.outgoingOrders.acknowledge(ack.id, ack.seq)
-      this.rebuildPredictedState()
+      if (tracked.order.type === 'move' && this.localEntityId !== undefined) {
+        this.simulator.removeOrder(this.localEntityId, ack.seq)
+      }
     }
-  }
-
-  getOrderStatuses(): TrackedOrder[] {
-    return [...this.orderStatuses.values()].map((tracked) => ({
-      order: tracked.order.type === 'move'
-        ? { ...tracked.order, target: { ...tracked.order.target } }
-        : { ...tracked.order },
-      status: tracked.status,
-      sentAt: tracked.sentAt,
-    }))
   }
 
   getEntities(now = performance.now()): RenderedEntity[] {
@@ -410,27 +370,10 @@ export class ClientGameState {
     return rendered.position
   }
 
-  private rebuildPredictedState(): void {
-    if (!this.serverSnapshot) return
-    this.simulator.replaceFromSnapshot(this.serverSnapshot)
-    for (const [entityId, orders] of this.confirmedOrdersByEntity) {
-      for (const order of orders.values()) this.simulator.addOrder(entityId, order)
-    }
-    if (this.localEntityId === undefined) return
-    for (const tracked of this.localOrders.values()) {
-      if (tracked.order.type === 'move') {
-        this.simulator.addOrder(this.localEntityId, tracked.order)
-      }
-    }
-  }
-
   private applySimulationOrder(entityId: number, order: EntityOrder): boolean {
     const entity = this.simulator.entities.get(entityId)
     if (!entity) return false
     const inserted = this.simulator.addOrder(entityId, order)
-    const confirmedOrders = this.confirmedOrdersByEntity.get(entityId) ?? new Map()
-    confirmedOrders.set(order.seq, order)
-    this.confirmedOrdersByEntity.set(entityId, confirmedOrders)
     if (inserted && order.type === 'attack') {
       entity.attackStats?.recordAttackAt(order.stamp)
     }
@@ -440,17 +383,8 @@ export class ClientGameState {
   private trackOrder(order: GameOrder, now: number): void {
     const tracked: TrackedOrder = {
       order,
-      status: 'pending',
       sentAt: now,
     }
-    this.outgoingOrders.track(order, now)
     this.localOrders.set(order.seq, tracked)
-    this.orderStatuses.set(order.seq, tracked)
   }
-}
-
-function cloneGameOrder(order: GameOrder): GameOrder {
-  return order.type === 'move'
-    ? { ...order, target: { ...order.target } }
-    : { ...order }
 }
