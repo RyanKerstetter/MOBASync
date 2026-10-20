@@ -135,8 +135,12 @@ export const GameSnapshotSchema = z.object({
   commitTick: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   entities: z.array(GameEntitySchema),
   projectiles: z.array(GameProjectileSchema),
-  history: z.array(GameFrameSchema),
-})
+  checkpoint: GameFrameSchema,
+}).refine(
+  ({ tick, commitTick, checkpoint }) =>
+    checkpoint.tick === commitTick && commitTick <= tick,
+  { message: 'Checkpoint must match the commit tick and not exceed the current tick.' },
+)
 
 export const GameStatusSchema = z.enum(['idle', 'starting', 'running'])
 

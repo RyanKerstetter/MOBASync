@@ -382,26 +382,30 @@ export class Simulator {
   }
 
   snapshot(): GameSnapshot {
-    const currentFrame = this.at(this.tick)
-    const history: GameFrame[] = []
-    const oldestTick = Math.max(0, this.tick - this.frameBuffer.length + 1)
-    for (let frameTick = oldestTick; frameTick <= this.tick; frameTick += 1) {
-      const frame = this.getCachedFrame(frameTick)
-      if (frame) history.push(this.toFrameData(frame))
-    }
+    const checkpoint = this.at(this.commitTick)
     return {
       tick: this.tick,
       commitTick: this.commitTick,
-      entities: [...this.entities.values()].map((entity) => entity.snapshot()),
+      entities: [...this.entities.values()].map((entity) => ({
+        ...entity.snapshot(),
+        orders: entity.orders
+          .filter((order) => order.tick > this.commitTick)
+          .map((order) => order.type === 'move' ? { ...order, target: { ...order.target } } : { ...order }),
+      })),
       projectiles: [...this.projectiles.values()].map((projectile) => projectile.snapshot()),
-      history: history.length > 0 ? history : [this.toFrameData(currentFrame)],
+      checkpoint: this.toFrameData(checkpoint),
     }
   }
 
   replaceFromSnapshot(snapshot: GameSnapshot): void {
+    if (
+      snapshot.checkpoint.tick !== snapshot.commitTick
+      || snapshot.commitTick > snapshot.tick
+    ) {
+      throw new RangeError('Snapshot checkpoint must match its commit tick and not exceed its current tick.')
+    }
     this.entities.clear()
     this.projectiles.clear()
-    this.tick = snapshot.tick
     this.commitTick = snapshot.commitTick
     for (const entity of snapshot.entities) {
       this.entities.set(entity.id, new SimEntity(
@@ -415,13 +419,8 @@ export class Simulator {
       ))
     }
     this.frameBuffer.fill(undefined)
-    for (const frameData of snapshot.history) {
-      this.storeFrame(new GameTickSnapshot(frameData.tick, frameData))
-    }
-    this.latestComputedTick = snapshot.tick
-    if (!this.getCachedFrame(snapshot.tick)) {
-      throw new RangeError('Snapshot history must include its current tick.')
-    }
+    this.latestComputedTick = snapshot.commitTick
+    this.storeFrame(new GameTickSnapshot(snapshot.checkpoint.tick, snapshot.checkpoint))
     for (const projectile of snapshot.projectiles) {
       this.projectiles.set(projectile.id, new SimProjectile(
         projectile.id,
@@ -431,6 +430,8 @@ export class Simulator {
         projectile.lifetimeTicks,
       ))
     }
+    this.tick = snapshot.commitTick
+    this.advanceTo(snapshot.tick)
   }
 
   private computeFrame(tick: number, previous: GameTickSnapshot): GameTickSnapshot {

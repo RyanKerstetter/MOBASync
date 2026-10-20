@@ -97,21 +97,25 @@ test('a late order invalidates and recomputes cached snapshots after its tick', 
   assert.deepEqual(after.get(1)?.getPosition(), { x: 100 + 220 * 9 / 60, y: 100 })
 })
 
-test('snapshots include tick history and continue from their latest cached state', () => {
+test('snapshots restore from the committed checkpoint and replay newer orders', () => {
   const original = createSimulator([
     { id: 'move-1', seq: 1, tick: 1, type: 'move', target: { x: 700, y: 100 } },
+    { id: 'move-2', seq: 2, tick: 7, type: 'move', target: { x: 400, y: 100 } },
   ])
+  original.advanceTo(10)
+  original.setCommitTick(5)
   const expectedPosition = original.at(10).get(1)?.getPosition()
-  original.tick = 10
-  assert.equal(GameSnapshotSchema.safeParse(original.snapshot()).success, true)
+  const expectedNextPosition = original.at(11).get(1)?.getPosition()
+  const snapshot = original.snapshot()
+  assert.equal(snapshot.checkpoint.tick, 5)
+  assert.deepEqual(snapshot.entities[0]?.orders.map((order) => order.id), ['move-2'])
+  assert.equal(GameSnapshotSchema.safeParse(snapshot).success, true)
   const restored = new Simulator()
-  restored.replaceFromSnapshot(original.snapshot())
+  restored.replaceFromSnapshot(snapshot)
 
   assert.deepEqual(restored.at(10).get(1)?.getPosition(), expectedPosition)
-  assert.deepEqual(
-    restored.at(11).get(1)?.getPosition(),
-    { x: 100 + 220 * 10 / 60, y: 100 },
-  )
+  assert.equal(restored.at(5).get(1)?.getPosition().x, 100 + 220 * 4 / 60)
+  assert.deepEqual(restored.at(11).get(1)?.getPosition(), expectedNextPosition)
 })
 
 test('shared simulation derives shield and health damage from valid attack orders', () => {

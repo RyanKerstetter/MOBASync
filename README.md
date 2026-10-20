@@ -64,9 +64,11 @@ snapshot, and retries continue until an acknowledgement arrives. Server-side
 broadcast timeout also triggers a snapshot. Selected handshake and
 acknowledgement messages use Geckos reliable delivery.
 
-Network snapshots include the recent tick history needed to seed the ring buffer
-and only retain orders at or after the commit frontier. Delivery
-acknowledgements are per message rather than cumulative, and reliability has
+Network snapshots use the latest committed frame as a checkpoint and include
+only orders newer than that checkpoint for replay. The server sends these
+checkpoints once per second by default; configure the positive-integer
+`GAME_CHECKPOINT_INTERVAL_MS` environment variable to change the interval.
+Delivery acknowledgements are per message rather than cumulative, and reliability has
 not yet been applied to every lobby/game lifecycle event. Clients ping once per
 second and use an exponential moving average of measured RTT to estimate the
 server tick. An initial snapshot is sent when a client joins. Projectiles

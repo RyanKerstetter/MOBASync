@@ -18,9 +18,13 @@ const codeCharacters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const lobbyCodeLength = 6
 const playerTimeoutMs = 45_000
 const maxPlayers = Number(process.env.LOBBY_MAX_PLAYERS ?? 2)
+const checkpointIntervalMs = Number(process.env.GAME_CHECKPOINT_INTERVAL_MS ?? 1_000)
 
 if (!Number.isInteger(maxPlayers) || maxPlayers < 1) {
   throw new Error('LOBBY_MAX_PLAYERS must be a positive integer.')
+}
+if (!Number.isInteger(checkpointIntervalMs) || checkpointIntervalMs < 1) {
+  throw new Error('GAME_CHECKPOINT_INTERVAL_MS must be a positive integer.')
 }
 
 type Player = {
@@ -437,12 +441,22 @@ const cleanupTimer = setInterval(() => {
 cleanupTimer.unref()
 
 let nextGameTick = performance.now() + 1000 / GAME_TPS
+let nextCheckpointAt = performance.now() + checkpointIntervalMs
 function runGameTick(): void {
   const now = performance.now()
   for (const lobby of lobbies.values()) {
     if (lobby.game.status === 'running') {
       lobby.game.advanceTick()
     }
+  }
+
+  if (now >= nextCheckpointAt) {
+    for (const lobby of lobbies.values()) {
+      if (lobby.game.status === 'running') {
+        gameServer.room(lobby.code).emit('game:snapshot', getGameSnapshot(lobby), { reliable: true })
+      }
+    }
+    nextCheckpointAt = now + checkpointIntervalMs
   }
 
   nextGameTick += 1000 / GAME_TPS
