@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomInt } from 'node:crypto'
 import geckos from '@geckos.io/server'
 import {
+  champions,
   GAME_ORDER_TIMEOUT_MS,
   GAME_TPS,
   GameJoinSchema,
@@ -82,6 +83,7 @@ type PublicLobby = {
   game: {
     status: Lobby['game']['status']
     readyPlayerIds: string[]
+    selections: Array<{ playerId: string; championId: string; locked: boolean }>
   }
 }
 type PlayerRequest = { sessionId: string; name: string }
@@ -192,6 +194,7 @@ function toPublicLobby(lobby: Lobby): PublicLobby {
     game: {
       status: lobby.game.status,
       readyPlayerIds: lobby.game.readyPlayerIds,
+      selections: [...lobby.game.selections].map(([playerId, selection]) => ({ playerId, ...selection })),
     },
   }
 }
@@ -206,6 +209,11 @@ function sendReadyProgress(lobby: Lobby): void {
     readyCount: lobby.game.readyPlayerIds.length,
     totalPlayers: lobby.players.size,
   }, { reliable: true })
+}
+
+// Champion select ends as soon as every remaining player has locked in.
+function beginGameWhenAllLocked(lobby: Lobby): void {
+  if (lobby.game.allChampionsLocked()) lobby.game.begin(lobby.players.values())
 }
 
 function startGameWhenReady(lobby: Lobby): void {
@@ -304,10 +312,35 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     const body = await readJson(request)
     const sessionId = requireBodySessionId(body)
     requireLeader(lobby, sessionId)
-    if (lobby.game.status !== 'idle') {
+    if (!lobby.game.beginSelection(lobby.players.values())) {
       throw new HttpError(409, 'A game is already starting or running.')
     }
-    lobby.game.begin(lobby.players.values())
+    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
+    return
+  }
+
+  if (request.method === 'POST' && pathParts.length === 4 && pathParts[3] === 'pick') {
+    const body = await readJson(request)
+    const sessionId = requireBodySessionId(body)
+    if (!lobby.players.has(sessionId)) throw new HttpError(404, 'You are no longer in this lobby.')
+    if (typeof body.championId !== 'string' || !champions.has(body.championId)) {
+      throw new HttpError(400, 'Pick a champion from the list.')
+    }
+    if (!lobby.game.pickChampion(sessionId, body.championId)) {
+      throw new HttpError(409, 'Your champion is locked in or champion select is not open.')
+    }
+    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
+    return
+  }
+
+  if (request.method === 'POST' && pathParts.length === 4 && pathParts[3] === 'lock') {
+    const body = await readJson(request)
+    const sessionId = requireBodySessionId(body)
+    if (!lobby.players.has(sessionId)) throw new HttpError(404, 'You are no longer in this lobby.')
+    if (!lobby.game.lockChampion(sessionId)) {
+      throw new HttpError(409, 'Champion select is not open.')
+    }
+    beginGameWhenAllLocked(lobby)
     sendJson(response, 200, { lobby: toPublicLobby(lobby) })
     return
   }
@@ -316,7 +349,9 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     const body = await readJson(request)
     const sessionId = requireBodySessionId(body)
     if (!lobby.players.has(sessionId)) throw new HttpError(404, 'You are no longer in this lobby.')
-    if (lobby.game.status === 'starting') {
+    if (lobby.game.status === 'selecting') {
+      lobby.game.cancelStart()
+    } else if (lobby.game.status === 'starting') {
       lobby.game.cancelStart()
       gameServer.room(lobby.code).emit('game:cancelled', { message: 'A player cancelled game start.' }, { reliable: true })
     }
@@ -370,6 +405,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     if (targetSessionId === lobby.leaderId) throw new HttpError(400, 'The lobby leader cannot be kicked.')
     if (!lobby.players.delete(targetSessionId)) throw new HttpError(404, 'Player is no longer in this lobby.')
     lobby.game.removePlayer(targetSessionId)
+    beginGameWhenAllLocked(lobby)
     sendReadyProgress(lobby)
     startGameWhenReady(lobby)
     sendJson(response, 200, { lobby: toPublicLobby(lobby) })
@@ -402,6 +438,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       lobby.players.delete(playerRequest.sessionId)
       lobby.game.removePlayer(playerRequest.sessionId)
       promoteOldestPlayer(lobby)
+      beginGameWhenAllLocked(lobby)
       sendReadyProgress(lobby)
       startGameWhenReady(lobby)
       sendJson(response, 200, { success: true })
@@ -457,6 +494,7 @@ const cleanupTimer = setInterval(() => {
       }
     }
     promoteOldestPlayer(lobby)
+    beginGameWhenAllLocked(lobby)
     sendReadyProgress(lobby)
     startGameWhenReady(lobby)
   }
@@ -546,14 +584,14 @@ gameServer.onConnection((channel) => {
       }),
     }
     gameDeliveryClients.set(deliveryChannelId, deliveryClient)
-    const entityId = joinedLobby.game.getEntityId(player.id)
-    if (entityId === undefined) {
-      channel.emit('game:error', { message: 'Your game entity is not available.' }, { reliable: true })
+    const characterId = joinedLobby.game.getCharacterId(player.id)
+    if (characterId === undefined) {
+      channel.emit('game:error', { message: 'Your game character is not available.' }, { reliable: true })
       return
     }
     channel.emit('game:joined', {
       playerId: player.id,
-      entityId,
+      characterId,
       nextOrderSeq: joinedLobby.game.getNextOrderSequence(player.id),
       serverTick: joinedLobby.game.simulator.tick,
     }, { reliable: true })

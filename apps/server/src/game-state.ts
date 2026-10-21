@@ -1,7 +1,9 @@
 import {
+  champions,
   DEFAULT_CHAMPION_ID,
   GAME_ARENA_HEIGHT,
   GAME_ARENA_WIDTH,
+  GAME_SPAWN_SPACING,
   FINALIZE_LAG,
   GAME_DEATH_LEAD_TICKS,
   GAME_ORDER_VERDICT_RETENTION_MS,
@@ -20,55 +22,99 @@ import {
 type LobbyPlayer = { id: string; name: string }
 type CachedOrderAck = { ack: GameOrderAck; expiresAt: number }
 type OrderVerdict = { ack: GameOrderAck; broadcast?: GameBroadcastOrder }
+export type ChampionSelection = { championId: string; locked: boolean }
 export class ServerGameState {
   status: GameStatus = GameStatusSchema.enum.idle
   readonly simulator = new Simulator()
+  // Champion select: one pick per player until the game begins.
+  readonly selections = new Map<string, ChampionSelection>()
   private readonly readyPlayers = new Set<string>()
-  private readonly entityIdsByPlayerId = new Map<string, number>()
+  private readonly characterIdsByPlayerId = new Map<string, number>()
   private readonly orderAcksByPlayerId = new Map<string, Map<string, CachedOrderAck>>()
-  private nextEntityId = 1
+  private nextCharacterId = 1
 
   get readyPlayerIds(): string[] {
     return [...this.readyPlayers]
+  }
+
+  beginSelection(players: Iterable<LobbyPlayer>): boolean {
+    if (this.status !== GameStatusSchema.enum.idle) return false
+    this.status = GameStatusSchema.enum.selecting
+    this.selections.clear()
+    for (const player of players) {
+      this.selections.set(player.id, { championId: DEFAULT_CHAMPION_ID, locked: false })
+    }
+    return true
+  }
+
+  pickChampion(playerId: string, championId: string): boolean {
+    const selection = this.selections.get(playerId)
+    if (
+      this.status !== GameStatusSchema.enum.selecting
+      || !selection
+      || selection.locked
+      || !champions.has(championId)
+    ) return false
+    selection.championId = championId
+    return true
+  }
+
+  lockChampion(playerId: string): boolean {
+    const selection = this.selections.get(playerId)
+    if (this.status !== GameStatusSchema.enum.selecting || !selection) return false
+    selection.locked = true
+    return true
+  }
+
+  allChampionsLocked(): boolean {
+    return this.status === GameStatusSchema.enum.selecting
+      && this.selections.size > 0
+      && [...this.selections.values()].every(({ locked }) => locked)
   }
 
   begin(players: Iterable<LobbyPlayer>): void {
     this.status = GameStatusSchema.enum.starting
     this.readyPlayers.clear()
     this.simulator.reset()
-    this.entityIdsByPlayerId.clear()
+    this.characterIdsByPlayerId.clear()
     this.orderAcksByPlayerId.clear()
-    this.nextEntityId = 1
+    this.nextCharacterId = 1
 
     const roster = [...players]
     roster.forEach((player, index) => {
-      const entityId = this.nextEntityId
-      this.nextEntityId += 1
-      this.entityIdsByPlayerId.set(player.id, entityId)
+      const characterId = this.nextCharacterId
+      this.nextCharacterId += 1
+      this.characterIdsByPlayerId.set(player.id, characterId)
       this.simulator.addPlayer(
-        entityId,
+        characterId,
         player.id,
         player.name,
         {
-          x: GAME_ARENA_WIDTH * (index + 1) / (roster.length + 1),
+          x: GAME_ARENA_WIDTH / 2 + (index - (roster.length - 1) / 2) * GAME_SPAWN_SPACING,
           y: GAME_ARENA_HEIGHT / 2,
         },
-        getChampion(DEFAULT_CHAMPION_ID),
+        getChampion(this.selections.get(player.id)?.championId ?? DEFAULT_CHAMPION_ID),
       )
     })
+    this.selections.clear()
   }
 
+  // Leaves champion select or the loading screen and goes back to the lobby.
   cancelStart(): void {
-    if (this.status !== GameStatusSchema.enum.starting) return
+    if (
+      this.status !== GameStatusSchema.enum.starting
+      && this.status !== GameStatusSchema.enum.selecting
+    ) return
     this.status = GameStatusSchema.enum.idle
+    this.selections.clear()
     this.readyPlayers.clear()
     this.simulator.reset()
-    this.entityIdsByPlayerId.clear()
+    this.characterIdsByPlayerId.clear()
     this.orderAcksByPlayerId.clear()
   }
 
   markReady(playerId: string): boolean {
-    if (this.status !== GameStatusSchema.enum.starting || !this.entityIdsByPlayerId.has(playerId)) {
+    if (this.status !== GameStatusSchema.enum.starting || !this.characterIdsByPlayerId.has(playerId)) {
       return false
     }
     this.readyPlayers.add(playerId)
@@ -82,8 +128,8 @@ export class ServerGameState {
   startIfReady(): GameSnapshot | undefined {
     if (
       this.status !== GameStatusSchema.enum.starting
-      || this.entityIdsByPlayerId.size === 0
-      || this.readyPlayers.size !== this.entityIdsByPlayerId.size
+      || this.characterIdsByPlayerId.size === 0
+      || this.readyPlayers.size !== this.characterIdsByPlayerId.size
     ) {
       return undefined
     }
@@ -105,32 +151,32 @@ export class ServerGameState {
     return this.confirmDeaths()
   }
 
-  // An entity at 0 health on a committed tick can no longer be saved by a late order, so
+  // A character at 0 health on a committed tick can no longer be saved by a late order, so
   // its death is definitive. It takes effect a few ticks ahead so every client can still
   // receive the message before the tick it names.
   private confirmDeaths(): GameDeath[] {
     const commitTick = this.simulator.commitTick
     const committed = this.simulator.at(commitTick)
     const deaths: GameDeath[] = []
-    for (const entity of this.simulator.entities.values()) {
-      const health = committed.get(entity.id)?.getHealthState()
+    for (const character of this.simulator.characters.values()) {
+      const health = committed.get(character.id)?.getHealthState()
       if (!health || health.hp > 0 || health.deathTick !== undefined) continue
-      if (entity.deaths.some((death) => death.respawnTick > commitTick)) continue
+      if (character.deaths.some((death) => death.respawnTick > commitTick)) continue
       const tick = this.simulator.tick + GAME_DEATH_LEAD_TICKS
       const timing = { tick, respawnTick: tick + GAME_RESPAWN_TICKS }
-      if (this.simulator.addDeath(entity.id, timing)) deaths.push({ entityId: entity.id, ...timing })
+      if (this.simulator.addDeath(character.id, timing)) deaths.push({ characterId: character.id, ...timing })
     }
     return deaths
   }
 
-  getEntityId(playerId: string): number | undefined {
-    return this.entityIdsByPlayerId.get(playerId)
+  getCharacterId(playerId: string): number | undefined {
+    return this.characterIdsByPlayerId.get(playerId)
   }
 
   getNextOrderSequence(playerId: string): number {
-    const entityId = this.entityIdsByPlayerId.get(playerId)
-    const entity = entityId === undefined ? undefined : this.simulator.entities.get(entityId)
-    return (entity?.highestOrderSequence ?? 0) + 1
+    const characterId = this.characterIdsByPlayerId.get(playerId)
+    const character = characterId === undefined ? undefined : this.simulator.characters.get(characterId)
+    return (character?.highestOrderSequence ?? 0) + 1
   }
 
   private getCachedOrderAck(playerId: string, orderId: string, now = Date.now()): GameOrderAck | undefined {
@@ -147,24 +193,24 @@ export class ServerGameState {
     const cachedAck = this.getCachedOrderAck(playerId, order.id)
     if (cachedAck) return { ack: cachedAck }
 
-    const entityId = this.entityIdsByPlayerId.get(playerId)
-    const attacker = entityId === undefined ? undefined : this.simulator.entities.get(entityId)
+    const characterId = this.characterIdsByPlayerId.get(playerId)
+    const attacker = characterId === undefined ? undefined : this.simulator.characters.get(characterId)
     const serverTick = this.simulator.tick
     let reason: string | undefined
 
-    if (entityId === undefined || !attacker) {
-      reason = order.type === 'move' ? 'The player entity is not available.' : 'dead'
+    if (characterId === undefined || !attacker) {
+      reason = order.type === 'move' ? 'The player character is not available.' : 'dead'
     } else if (
       order.tick <= this.simulator.commitTick
       || order.tick < Math.max(0, serverTick - FINALIZE_LAG)
       || order.tick > serverTick + FINALIZE_LAG
     ) {
       reason = 'stale'
-    } else if (order.type === 'attack' && !this.simulator.entities.has(order.targetId)) {
+    } else if (order.type === 'attack' && !this.simulator.characters.has(order.targetId)) {
       reason = 'target_unavailable'
     } else if (order.type === 'cast' && !attacker.champion.hasAbility(order.abilityId)) {
       reason = 'unknown_ability'
-    } else if (!this.simulator.addOrder(entityId, order)) {
+    } else if (!this.simulator.addOrder(characterId, order)) {
       reason = 'duplicate'
     }
 
@@ -176,12 +222,12 @@ export class ServerGameState {
         serverTick,
         ...(reason ? { reason } : {}),
       },
-      ...(reason || !attacker || entityId === undefined
+      ...(reason || !attacker || characterId === undefined
         ? {}
         : {
           broadcast: {
             ...order,
-            entityId,
+            characterId,
             playerId,
             playerName: attacker.player?.name ?? 'Player',
           },
@@ -192,9 +238,10 @@ export class ServerGameState {
   }
 
   removePlayer(playerId: string): void {
-    const entityId = this.entityIdsByPlayerId.get(playerId)
-    if (entityId !== undefined) this.simulator.remove(entityId)
-    this.entityIdsByPlayerId.delete(playerId)
+    this.selections.delete(playerId)
+    const characterId = this.characterIdsByPlayerId.get(playerId)
+    if (characterId !== undefined) this.simulator.remove(characterId)
+    this.characterIdsByPlayerId.delete(playerId)
     this.readyPlayers.delete(playerId)
     this.orderAcksByPlayerId.delete(playerId)
   }

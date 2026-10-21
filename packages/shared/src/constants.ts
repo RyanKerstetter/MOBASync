@@ -1,5 +1,12 @@
-export const GAME_ARENA_WIDTH = 800
-export const GAME_ARENA_HEIGHT = 450
+// The whole map, three times the width and height of the original single-screen arena.
+export const GAME_ARENA_WIDTH = 2400
+export const GAME_ARENA_HEIGHT = 1350
+// How much of the world the camera shows at least, centred on the controlled champion. A screen
+// with another shape shows more of the world on its long side rather than adding bars.
+export const GAME_VIEW_WIDTH = 800
+export const GAME_VIEW_HEIGHT = 450
+// Players start in a row across the middle of the map, this far apart.
+export const GAME_SPAWN_SPACING = 400
 export const GAME_TPS = 60
 export const GAME_FPS = 60
 export const GAME_ORDER_WINDOW_TICKS = 12

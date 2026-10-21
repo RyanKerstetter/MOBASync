@@ -54,6 +54,22 @@
         <p id="lobby-message" role="status" aria-live="polite"></p>
       </section>
 
+      <section id="select-panel" aria-label="Champion select" hidden>
+        <div class="select-layout">
+          <h2>Choose your champion</h2>
+          <div class="select-body">
+            <ul id="champion-grid" class="champion-grid"></ul>
+            <aside id="champion-details" class="champion-details" aria-live="polite"></aside>
+          </div>
+          <ul id="select-players" class="select-players" aria-label="Players"></ul>
+          <p id="select-message" role="status" aria-live="polite"></p>
+          <div class="select-actions">
+            <button id="select-back-button" type="button">Back to lobby</button>
+            <button id="lock-button" type="button">Lock in</button>
+          </div>
+        </div>
+      </section>
+
       <section id="game-panel" aria-label="Game" hidden>
         <div id="game-container" aria-label="Game arena" hidden></div>
         <section id="game-loading" aria-live="polite">

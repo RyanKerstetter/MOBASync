@@ -99,23 +99,159 @@ input {
   flex: 1;
 }
 
-/* Once a game is open the page is only the game: no margins, headings or scrollbars. */
-body:has(#game-panel:not([hidden])) {
+/* Once champion select or a game is open the page is only that screen: no margins or headings. */
+body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) {
   max-width: none;
   margin: 0;
   padding: 0;
   overflow: hidden;
 }
 
-body:has(#game-panel:not([hidden])) > main > h1 {
+body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   display: none;
 }
 
+#select-panel,
 #game-panel {
   position: fixed;
   z-index: 10;
   inset: 0;
   background: #101827;
+}
+
+#select-panel {
+  overflow-y: auto;
+  color: #d9e6f2;
+}
+
+.select-layout {
+  box-sizing: border-box;
+  display: grid;
+  gap: 1rem;
+  width: min(60rem, 100%);
+  margin: 0 auto;
+  padding: 1.5rem 1rem 2rem;
+}
+
+.select-layout h2 {
+  margin: 0;
+}
+
+.select-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.champion-grid,
+.select-players {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.champion-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: 0.75rem;
+}
+
+.champion-card {
+  display: grid;
+  gap: 0.35rem;
+  width: 100%;
+  height: 100%;
+  padding: 0.75rem;
+  color: inherit;
+  background: #18263a;
+  border: 2px solid #314862;
+  border-radius: 0.5rem;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.champion-card:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.champion-card.is-selected {
+  border-color: #79dfb1;
+  background: #1d3a3a;
+  opacity: 1;
+}
+
+.champion-card span {
+  font-size: 0.8rem;
+  line-height: 1.3;
+}
+
+.champion-picks {
+  color: #f2b66d;
+}
+
+.champion-details {
+  padding: 0.75rem 1rem;
+  background: #18263a;
+  border: 1px solid #314862;
+  border-radius: 0.5rem;
+}
+
+.champion-details h3,
+.champion-details h4,
+.champion-details p {
+  margin: 0.25rem 0 0.5rem;
+}
+
+.champion-details dl {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.15rem 1rem;
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+}
+
+.champion-details dd {
+  margin: 0;
+  text-align: right;
+}
+
+.champion-details ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.85rem;
+}
+
+.champion-details li {
+  display: grid;
+  margin-bottom: 0.4rem;
+}
+
+.select-players li {
+  padding: 0.2rem 0;
+}
+
+.select-players li.is-locked {
+  color: #79dfb1;
+}
+
+.select-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+#select-message.is-error {
+  color: #ff9d9d;
+}
+
+@media (max-width: 640px) {
+  .select-body {
+    grid-template-columns: 1fr;
+  }
 }
 
 #game-container {

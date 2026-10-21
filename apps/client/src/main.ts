@@ -1,4 +1,5 @@
 import './style.css'
+import { createChampionSelect } from './champion-select.ts'
 import { startGame } from './game.ts'
 import type { GameStatus } from '../../../packages/shared/src/index.ts'
 
@@ -16,6 +17,7 @@ type Lobby = {
   game: {
     status: GameStatus
     readyPlayerIds: string[]
+    selections: Array<{ playerId: string; championId: string; locked: boolean }>
   }
 }
 
@@ -39,6 +41,7 @@ sessionStorage.setItem(sessionKey, sessionId)
 
 const entryPanel = requiredElement<HTMLElement>('#entry-panel')
 const lobbyPanel = requiredElement<HTMLElement>('#lobby-panel')
+const selectPanel = requiredElement<HTMLElement>('#select-panel')
 const usernameInput = requiredElement<HTMLInputElement>('#username')
 const createButton = requiredElement<HTMLButtonElement>('#create-button')
 const joinForm = requiredElement<HTMLFormElement>('#join-form')
@@ -65,6 +68,9 @@ const returnButton = requiredElement<HTMLButtonElement>('#return-button')
 const lobbyMessage = requiredElement<HTMLParagraphElement>('#lobby-message')
 
 const TOAST_DURATION_MS = 3500
+const LOBBY_POLL_MS = 1500
+// Other players' picks arrive by polling, so check more often while choosing.
+const SELECT_POLL_MS = 500
 
 let currentLobby: Lobby | null = null
 let pollTimer: number | undefined
@@ -97,7 +103,15 @@ async function request<T>(path: string, method = 'GET', body?: unknown): Promise
     body: body === undefined ? undefined : JSON.stringify(body),
   })
 
-  const result = await response.json() as { error?: string } & T
+  // An empty or non-JSON body means the request never reached the lobby server (for example
+  // a dev server running without its proxy), so report the status instead of a parse error.
+  const text = await response.text()
+  let result: ({ error?: string } & T) | undefined
+  try {
+    result = JSON.parse(text) as { error?: string } & T
+  } catch {
+    throw new Error(`The lobby server did not answer correctly (HTTP ${response.status}). If you just updated the code, restart npm run dev.`)
+  }
   if (!response.ok) {
     throw new Error(result.error ?? `Request failed (${response.status})`)
   }
@@ -181,6 +195,60 @@ function renderLobby(lobby: Lobby): void {
   const latestMessage = lobby.messages.at(-1)
   if (latestMessage && String(latestMessage.id) !== previousLatestId) {
     chatMessages.lastElementChild?.scrollIntoView({ block: 'nearest' })
+  }
+  syncChampionSelect(lobby)
+}
+
+const championSelect = createChampionSelect({
+  root: selectPanel,
+  onPick: (championId) => void sendSelectionRequest('pick', { championId }),
+  onLock: () => void sendSelectionRequest('lock', {}),
+  onBack: () => void sendSelectionRequest('cancel-start', {}),
+})
+
+// Champion select replaces the lobby for everyone while the lobby is in the 'selecting' state.
+function syncChampionSelect(lobby: Lobby): void {
+  if (lobby.game.status === 'selecting') {
+    const opening = selectPanel.hidden
+    lobbyPanel.hidden = true
+    selectPanel.hidden = false
+    championSelect.render({
+      localPlayerId: sessionId,
+      players: lobby.players,
+      selections: lobby.game.selections,
+    })
+    if (opening) {
+      championSelect.setMessage('')
+      beginPolling(SELECT_POLL_MS)
+    }
+    return
+  }
+  if (selectPanel.hidden) return
+  selectPanel.hidden = true
+  beginPolling()
+  if (lobby.game.status === 'idle') {
+    lobbyPanel.hidden = false
+    setLobbyMessage('Champion select was cancelled.')
+  }
+}
+
+async function sendSelectionRequest(
+  action: 'pick' | 'lock' | 'cancel-start',
+  body: Record<string, unknown>,
+): Promise<void> {
+  if (!currentLobby) return
+  try {
+    const result = await request<{ lobby: Lobby }>(
+      `/api/lobbies/${encodeURIComponent(currentLobby.code)}/${action}`,
+      'POST',
+      { sessionId, ...body },
+    )
+    currentLobby = result.lobby
+    renderLobby(result.lobby)
+    if (result.lobby.game.status === 'starting') void enterGame(result.lobby)
+  } catch (error) {
+    championSelect.setMessage(errorMessage(error), true)
+    championSelect.discardPendingPick()
   }
 }
 
@@ -303,11 +371,11 @@ async function sendChatMessage(event: SubmitEvent): Promise<void> {
   }
 }
 
-function beginPolling(): void {
+function beginPolling(intervalMs = LOBBY_POLL_MS): void {
   window.clearInterval(pollTimer)
   pollTimer = window.setInterval(() => {
     void refreshLobby()
-  }, 1500)
+  }, intervalMs)
 }
 
 async function renamePlayer(event: SubmitEvent): Promise<void> {
@@ -353,6 +421,7 @@ function returnToEntry(): void {
   window.clearInterval(pollTimer)
   currentLobby = null
   gamePanel.hidden = true
+  selectPanel.hidden = true
   lobbyPanel.hidden = true
   entryPanel.hidden = false
   setLobbyMessage('')
