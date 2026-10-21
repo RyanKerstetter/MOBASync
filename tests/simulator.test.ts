@@ -1,11 +1,28 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  Champion,
+  DEFAULT_CHAMPION_ID,
   GameSnapshotSchema,
   GAME_TPS,
+  getChampion,
   Simulator,
+  type ChampionDef,
   type EntityOrder,
 } from '../packages/shared/src/index.js'
+
+function championDef(champion: Champion): ChampionDef {
+  return { ...champion, abilities: [...champion.abilities] }
+}
+
+function assertPositionClose(
+  actual: { x: number; y: number } | undefined,
+  expected: { x: number; y: number },
+): void {
+  assert.ok(actual)
+  assert.ok(Math.abs(actual.x - expected.x) < 1e-9, `x ${actual.x} != ${expected.x}`)
+  assert.ok(Math.abs(actual.y - expected.y) < 1e-9, `y ${actual.y} != ${expected.y}`)
+}
 
 function createSimulator(orders: EntityOrder[]): Simulator {
   const simulator = new Simulator()
@@ -41,7 +58,7 @@ test('an attack stops movement at its derived position', () => {
   ])
 
   const attackFrame = simulator.at(3)
-  assert.deepEqual(attackFrame.get(1)?.getPosition(), { x: 100 + 220 * 2 / 60, y: 100 })
+  assertPositionClose(attackFrame.get(1)?.getPosition(), { x: 100 + 220 * 2 / 60, y: 100 })
   assert.deepEqual(attackFrame.get(1)?.getCooldown(), {
     ready: false,
     ticksRemaining: GAME_TPS,
@@ -61,7 +78,7 @@ test('an out-of-range attack does not stop movement or start cooldown', () => {
   })
 
   const state = simulator.at(20).get(1)
-  assert.deepEqual(state?.getPosition(), { x: 100 + 220 * 19 / 60, y: 100 })
+  assertPositionClose(state?.getPosition(), { x: 100 + 220 * 19 / 60, y: 100 })
   assert.equal(state?.getNextAttackTick(), 0)
   assert.equal(simulator.at(20).get(2)?.getHealth(), 10)
   assert.equal(simulator.at(20).get(2)?.getShield(), 1)
@@ -77,7 +94,7 @@ test('an invalid cooldown attack does not stop a later movement order', () => {
   assert.equal(simulator.at(1).get(1)?.getCooldown().ready, false)
   assert.equal(simulator.at(2).get(1)?.getCooldown().ticksRemaining, 59)
   const state = simulator.at(20).get(1)
-  assert.deepEqual(state?.getPosition(), { x: 100 + 220 * 18 / 60, y: 100 })
+  assertPositionClose(state?.getPosition(), { x: 100 + 220 * 18 / 60, y: 100 })
   assert.equal(state?.getNextAttackTick(), 61)
 })
 
@@ -86,7 +103,7 @@ test('a late order invalidates and recomputes cached snapshots after its tick', 
     { id: 'move-1', seq: 1, tick: 1, type: 'move', target: { x: 700, y: 100 } },
   ])
   const before = simulator.at(10)
-  assert.deepEqual(before.get(1)?.getPosition(), { x: 100 + 220 * 9 / 60, y: 100 })
+  assertPositionClose(before.get(1)?.getPosition(), { x: 100 + 220 * 9 / 60, y: 100 })
 
   assert.equal(simulator.addOrder(1, {
     id: 'move-2', seq: 2, tick: 5, type: 'move', target: { x: 300, y: 100 },
@@ -94,7 +111,7 @@ test('a late order invalidates and recomputes cached snapshots after its tick', 
 
   const after = simulator.at(10)
   assert.notEqual(after, before)
-  assert.deepEqual(after.get(1)?.getPosition(), { x: 100 + 220 * 9 / 60, y: 100 })
+  assertPositionClose(after.get(1)?.getPosition(), { x: 100 + 220 * 9 / 60, y: 100 })
 })
 
 test('snapshots restore from the committed checkpoint and replay newer orders', () => {
@@ -114,7 +131,7 @@ test('snapshots restore from the committed checkpoint and replay newer orders', 
   restored.replaceFromSnapshot(snapshot)
 
   assert.deepEqual(restored.at(10).get(1)?.getPosition(), expectedPosition)
-  assert.equal(restored.at(5).get(1)?.getPosition().x, 100 + 220 * 4 / 60)
+  assertPositionClose(restored.at(5).get(1)?.getPosition(), { x: 100 + 220 * 4 / 60, y: 100 })
   assert.deepEqual(restored.at(11).get(1)?.getPosition(), expectedNextPosition)
 })
 
@@ -188,25 +205,89 @@ test('a late attack recomputes derived health in later snapshots', () => {
   assert.equal(simulator.at(10).get(2)?.getHealth(), 10)
 })
 
-test('shared simulation derives death and rejects later attacks against a dead target', () => {
-  const simulator = createSimulator(
-    Array.from({ length: 12 }, (_, index) => ({
+function createKillSimulator(): Simulator {
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, new Champion({
+    ...championDef(getChampion(DEFAULT_CHAMPION_ID)),
+    attackSpeed: GAME_TPS,
+  }))
+  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 140, y: 100 })
+  for (let index = 0; index < 12; index += 1) {
+    simulator.addOrder(1, {
       id: `attack-${index + 1}`,
       seq: index + 1,
       tick: index + 1,
-      type: 'attack' as const,
+      type: 'attack',
       targetId: 2,
-    })),
-  )
-  const attacker = simulator.entities.get(1)
-  assert.ok(attacker?.attackStats)
-  attacker.attackStats.attackSpeed = GAME_TPS
+    })
+  }
+  return simulator
+}
+
+test('reaching 0 health does not kill; only a confirmed death does', () => {
+  const simulator = createKillSimulator()
 
   assert.equal(simulator.at(11).get(2)?.getHealth(), 0)
-  assert.equal(simulator.at(11).get(2)?.getDeathTick(), 11)
-  assert.equal(simulator.at(11).get(1)?.getCooldown().ready, false)
-  assert.equal(simulator.at(12).get(1)?.getCooldown().ready, true)
-  assert.equal(simulator.at(12).get(2)?.getHealth(), 0)
+  assert.equal(simulator.at(11).get(2)?.getDeathTick(), undefined)
+  assert.equal(simulator.at(14).get(2)?.isDead(), false)
+})
+
+test('a confirmed death stops the entity and a later attack on it is rejected', () => {
+  const simulator = createKillSimulator()
+  simulator.at(12)
+  assert.equal(simulator.addDeath(2, { tick: 14, respawnTick: 14 + 30 }), true)
+  simulator.addOrder(2, { id: 'move-1', seq: 1, tick: 13, type: 'move', target: { x: 700, y: 100 } })
+  simulator.addOrder(1, { id: 'attack-late', seq: 13, tick: 16, type: 'attack', targetId: 2 })
+
+  const dead = simulator.at(20).get(2)
+  assert.equal(dead?.getDeathTick(), 14)
+  assert.equal(dead?.isDead(), true)
+  assert.equal(dead?.getHealth(), 0)
+  assert.ok((dead?.getPosition().x ?? 0) > 140, 'it moved until it died')
+  assert.deepEqual(simulator.at(30).get(2)?.getPosition(), dead?.getPosition())
+  assert.equal(simulator.at(20).get(1)?.getNextAttackTick(), 13)
+})
+
+test('a dead entity respawns at its start with full health', () => {
+  const simulator = createKillSimulator()
+  simulator.at(12)
+  simulator.addDeath(2, { tick: 14, respawnTick: 44 })
+  simulator.addOrder(2, { id: 'move-1', seq: 1, tick: 13, type: 'move', target: { x: 700, y: 100 } })
+
+  const respawned = simulator.at(44).get(2)
+  assert.equal(respawned?.isDead(), false)
+  assert.equal(respawned?.getHealth(), 10)
+  assert.equal(respawned?.getShield(), 1)
+  assert.deepEqual(respawned?.getPosition(), { x: 140, y: 100 })
+  assert.deepEqual(simulator.at(46).get(2)?.getPosition(), { x: 140, y: 100 })
+})
+
+test('a death is rejected when it overlaps another or is too old to schedule', () => {
+  const simulator = createKillSimulator()
+  for (let tick = 1; tick <= 30; tick += 1) simulator.at(tick)
+
+  assert.equal(simulator.addDeath(2, { tick: 5, respawnTick: 40 }), false)
+  assert.equal(simulator.addDeath(2, { tick: 32, respawnTick: 32 }), false)
+  assert.equal(simulator.addDeath(2, { tick: 32, respawnTick: 60 }), true)
+  assert.equal(simulator.addDeath(2, { tick: 40, respawnTick: 70 }), false)
+})
+
+test('snapshots carry pending deaths so a resync cannot lose one', () => {
+  const original = createKillSimulator()
+  original.advanceTo(12)
+  original.addDeath(2, { tick: 20, respawnTick: 80 })
+  original.advanceTo(15)
+  original.setCommitTick(3)
+  const snapshot = original.snapshot()
+  assert.deepEqual(snapshot.entities.find(({ id }) => id === 2)?.deaths, [{ tick: 20, respawnTick: 80 }])
+  assert.equal(GameSnapshotSchema.safeParse(snapshot).success, true)
+
+  const restored = new Simulator()
+  restored.replaceFromSnapshot(snapshot)
+
+  assert.equal(restored.at(20).get(2)?.isDead(), true)
+  assert.equal(restored.at(80).get(2)?.isDead(), false)
+  assert.deepEqual(restored.at(80).get(2)?.getPosition(), { x: 140, y: 100 })
 })
 
 test('ring buffer rejects corrections older than retained state', () => {

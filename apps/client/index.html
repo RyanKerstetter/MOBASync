@@ -55,20 +55,14 @@
       </section>
 
       <section id="game-panel" aria-label="Game" hidden>
-        <div class="game-heading">
-          <h2>2D-MOBA</h2>
+        <div id="game-container" aria-label="Game arena" hidden></div>
+        <section id="game-loading" aria-live="polite">
+          <h3>Getting the game ready</h3>
+          <p id="game-loading-progress">Connecting to the game server…</p>
+          <p id="game-status" role="status" aria-live="polite">Connecting to game server…</p>
           <button id="return-button" type="button">Return to lobby</button>
-        </div>
-        <p id="game-status" role="status" aria-live="polite">Connecting to game server…</p>
-        <div class="game-stage">
-          <section id="game-loading" aria-live="polite">
-            <h3>Getting the game ready</h3>
-            <p id="game-loading-progress">Connecting to the game server…</p>
-            <p>The arena will open when every player is ready.</p>
-          </section>
-          <div id="game-container" aria-label="Game arena" hidden></div>
-        </div>
-        <p class="game-instructions">Right-click the map to move.</p>
+        </section>
+        <p id="game-toast" role="status" aria-live="polite" hidden></p>
       </section>
     </main>
     <script type="module" src="/src/main.ts"></script>

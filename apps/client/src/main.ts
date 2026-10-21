@@ -31,9 +31,10 @@ type LobbyResponse = {
   player: Player
 }
 
-const apiUrl = `${window.location.protocol}//${window.location.hostname}:9208`
+// The dev and preview servers proxy /api to the lobby server, so the page only needs its own origin.
+const apiUrl = ''
 const sessionKey = 'lobby-session-id'
-const sessionId = sessionStorage.getItem(sessionKey) ?? crypto.randomUUID()
+const sessionId = sessionStorage.getItem(sessionKey) ?? createSessionId()
 sessionStorage.setItem(sessionKey, sessionId)
 
 const entryPanel = requiredElement<HTMLElement>('#entry-panel')
@@ -59,14 +60,27 @@ const gameContainer = requiredElement<HTMLDivElement>('#game-container')
 const gameStatus = requiredElement<HTMLParagraphElement>('#game-status')
 const gameLoading = requiredElement<HTMLElement>('#game-loading')
 const gameLoadingProgress = requiredElement<HTMLParagraphElement>('#game-loading-progress')
+const gameToast = requiredElement<HTMLParagraphElement>('#game-toast')
 const returnButton = requiredElement<HTMLButtonElement>('#return-button')
 const lobbyMessage = requiredElement<HTMLParagraphElement>('#lobby-message')
 
+const TOAST_DURATION_MS = 3500
+
 let currentLobby: Lobby | null = null
 let pollTimer: number | undefined
+let toastTimer: number | undefined
+let gameRunning = false
 let stopGame: (() => void) | undefined
 let isEnteringGame = false
 let gameGeneration = 0
+
+// crypto.randomUUID only exists on HTTPS pages and localhost; a VPS served over plain
+// HTTP still has getRandomValues.
+function createSessionId(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
 
 function requiredElement<T extends HTMLElement>(selector: string): T {
   const element = document.querySelector<T>(selector)
@@ -98,6 +112,19 @@ function setEntryMessage(text: string, isError = false): void {
 function setLobbyMessage(text: string, isError = false): void {
   lobbyMessage.textContent = text
   lobbyMessage.classList.toggle('is-error', isError)
+}
+
+// A running game shows nothing but the arena, so errors surface as a brief toast over it.
+function showGameToast(text: string, persistent = false): void {
+  window.clearTimeout(toastTimer)
+  gameToast.textContent = text
+  gameToast.hidden = false
+  if (!persistent) toastTimer = window.setTimeout(hideGameToast, TOAST_DURATION_MS)
+}
+
+function hideGameToast(): void {
+  window.clearTimeout(toastTimer)
+  gameToast.hidden = true
 }
 
 function renderLobby(lobby: Lobby): void {
@@ -358,6 +385,8 @@ async function enterGame(lobby: Lobby): Promise<void> {
   gamePanel.hidden = false
   gameLoading.hidden = false
   gameContainer.hidden = false
+  gameRunning = false
+  hideGameToast()
   gameStatus.textContent = 'Connecting to game server…'
   gameStatus.classList.remove('is-error')
   gameLoadingProgress.textContent = `0/${lobby.players.length} players ready`
@@ -369,6 +398,10 @@ async function enterGame(lobby: Lobby): Promise<void> {
       sessionId,
       playerName: lobbyUsernameInput.value || 'Player',
       onStatus: (text, isError = false) => {
+        if (gameRunning) {
+          if (isError) showGameToast(text)
+          return
+        }
         gameStatus.textContent = text
         gameStatus.classList.toggle('is-error', isError)
         if (isError) gameLoadingProgress.textContent = text
@@ -377,8 +410,10 @@ async function enterGame(lobby: Lobby): Promise<void> {
         gameLoadingProgress.textContent = `${readyCount}/${totalPlayers} players ready`
       },
       onStarted: () => {
+        gameRunning = true
         gameLoading.hidden = true
       },
+      onDisconnected: () => showGameToast('Disconnected from the game server.', true),
       onCancelled: (text) => {
         stopActiveGame()
         gamePanel.hidden = true
@@ -409,6 +444,8 @@ function stopActiveGame(): void {
   isEnteringGame = false
   stopGame?.()
   stopGame = undefined
+  gameRunning = false
+  hideGameToast()
   gameContainer.hidden = true
   gameLoading.hidden = false
 }
@@ -448,6 +485,10 @@ async function returnFromGame(): Promise<void> {
 }
 copyButton.addEventListener('click', () => {
   if (!currentLobby) return
+  if (!navigator.clipboard) {
+    setLobbyMessage('Copying needs HTTPS; select the code and copy it instead.', true)
+    return
+  }
   void navigator.clipboard.writeText(currentLobby.code)
     .then(() => setLobbyMessage('Lobby code copied.'))
     .catch((error: unknown) => setLobbyMessage(`Could not copy code: ${errorMessage(error)}`, true))

@@ -1,11 +1,16 @@
 import {
+  DEFAULT_CHAMPION_ID,
   GAME_ARENA_HEIGHT,
   GAME_ARENA_WIDTH,
   FINALIZE_LAG,
+  GAME_DEATH_LEAD_TICKS,
   GAME_ORDER_VERDICT_RETENTION_MS,
+  GAME_RESPAWN_TICKS,
   GameStatusSchema,
+  getChampion,
   Simulator,
   type GameBroadcastOrder,
+  type GameDeath,
   type GameOrder,
   type GameOrderAck,
   type GameSnapshot,
@@ -48,6 +53,7 @@ export class ServerGameState {
           x: GAME_ARENA_WIDTH * (index + 1) / (roster.length + 1),
           y: GAME_ARENA_HEIGHT / 2,
         },
+        getChampion(DEFAULT_CHAMPION_ID),
       )
     })
   }
@@ -89,12 +95,32 @@ export class ServerGameState {
     return this.simulator.snapshot()
   }
 
-  advanceTick(): void {
+  // Returns the deaths confirmed this tick; the caller announces them to the players.
+  advanceTick(): GameDeath[] {
     this.simulator.advanceTo(this.simulator.tick + 1)
     const commitTick = Math.max(0, this.simulator.tick - FINALIZE_LAG)
     if (commitTick > this.simulator.commitTick) {
       this.simulator.setCommitTick(commitTick)
     }
+    return this.confirmDeaths()
+  }
+
+  // An entity at 0 health on a committed tick can no longer be saved by a late order, so
+  // its death is definitive. It takes effect a few ticks ahead so every client can still
+  // receive the message before the tick it names.
+  private confirmDeaths(): GameDeath[] {
+    const commitTick = this.simulator.commitTick
+    const committed = this.simulator.at(commitTick)
+    const deaths: GameDeath[] = []
+    for (const entity of this.simulator.entities.values()) {
+      const health = committed.get(entity.id)?.getHealthState()
+      if (!health || health.hp > 0 || health.deathTick !== undefined) continue
+      if (entity.deaths.some((death) => death.respawnTick > commitTick)) continue
+      const tick = this.simulator.tick + GAME_DEATH_LEAD_TICKS
+      const timing = { tick, respawnTick: tick + GAME_RESPAWN_TICKS }
+      if (this.simulator.addDeath(entity.id, timing)) deaths.push({ entityId: entity.id, ...timing })
+    }
+    return deaths
   }
 
   getEntityId(playerId: string): number | undefined {
@@ -127,29 +153,19 @@ export class ServerGameState {
     let reason: string | undefined
 
     if (entityId === undefined || !attacker) {
-      reason = order.type === 'attack' ? 'dead' : 'The player entity is not available.'
-    } else if (order.type === 'move') {
-      if (
-        order.tick <= this.simulator.commitTick
-        || order.tick < Math.max(0, serverTick - FINALIZE_LAG)
-        || order.tick > serverTick + FINALIZE_LAG
-      ) {
-        reason = 'stale'
-      } else if (!this.simulator.addOrder(entityId, order)) {
-        reason = 'duplicate'
-      }
-    } else {
-      const target = this.simulator.entities.get(order.targetId)
-      if (
-        order.tick <= this.simulator.commitTick
-        || order.tick < Math.max(0, serverTick - FINALIZE_LAG)
-        || order.tick > serverTick + FINALIZE_LAG
-      ) {
-        reason = 'stale'
-      } else {
-        if (!target || !attacker.attackStats) reason = 'target_unavailable'
-        else if (!this.simulator.addOrder(entityId, order)) reason = 'duplicate'
-      }
+      reason = order.type === 'move' ? 'The player entity is not available.' : 'dead'
+    } else if (
+      order.tick <= this.simulator.commitTick
+      || order.tick < Math.max(0, serverTick - FINALIZE_LAG)
+      || order.tick > serverTick + FINALIZE_LAG
+    ) {
+      reason = 'stale'
+    } else if (order.type === 'attack' && !this.simulator.entities.has(order.targetId)) {
+      reason = 'target_unavailable'
+    } else if (order.type === 'cast' && !attacker.champion.hasAbility(order.abilityId)) {
+      reason = 'unknown_ability'
+    } else if (!this.simulator.addOrder(entityId, order)) {
+      reason = 'duplicate'
     }
 
     const verdict: OrderVerdict = {

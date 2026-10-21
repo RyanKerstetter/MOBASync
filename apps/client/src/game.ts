@@ -3,19 +3,22 @@ import {
   GAME_ARENA_HEIGHT,
   GAME_ARENA_WIDTH,
   GAME_FPS,
-  GAME_MAX_SHIELD,
   GAME_ORDER_TIMEOUT_MS,
   GAME_PING_INTERVAL_MS,
-  GAME_PLAYER_RADIUS,
+  GAME_TPS,
   GameBroadcastOrderSchema,
+  GameDeathSchema,
   GameJoinedSchema,
   GameOrderAckSchema,
   GamePongSchema,
   GameSnapshotSchema,
   ReliableMessenger,
+  lagConfigFromQuery,
+  withLag,
   type GameOrder,
   type GameOrderAck,
   type GameSnapshot,
+  type LagConfig,
 } from '../../../packages/shared/src/index.ts'
 import { Application, Container, Graphics, Rectangle, Text } from 'pixi.js'
 import {
@@ -33,6 +36,7 @@ type GameOptions = {
   onReadyProgress: (readyCount: number, totalPlayers: number) => void
   onStarted: (snapshot: GameSnapshot) => void
   onCancelled: (message: string) => void
+  onDisconnected: () => void
   orderTimeoutMs?: number
 }
 
@@ -49,6 +53,14 @@ type FloatingDamage = {
   startedAt: number
 }
 
+type DisplayedHealth = {
+  total: number
+  hpSeq: number
+}
+
+const abilityKeys = ['KeyQ', 'KeyW', 'KeyE', 'KeyR']
+const START_PING_RETRY_MS = 250
+
 export async function startGame({
   container,
   lobbyCode,
@@ -57,6 +69,7 @@ export async function startGame({
   onReadyProgress,
   onStarted,
   onCancelled,
+  onDisconnected,
   orderTimeoutMs = GAME_ORDER_TIMEOUT_MS,
 }: GameOptions): Promise<() => void> {
   if (!Number.isFinite(orderTimeoutMs) || orderTimeoutMs <= 0) {
@@ -100,9 +113,10 @@ export async function startGame({
 
   const gameState = new ClientGameState()
   const actors = new Map<number, Actor>()
-  const projectileActors = new Map<number, Container>()
+  const projectileActors = new Map<string, Container>()
   const floatingDamage: FloatingDamage[] = []
-  const displayedHealth = new Map<number, number>()
+  const displayedHealth = new Map<number, DisplayedHealth>()
+  let pointer = { x: GAME_ARENA_WIDTH / 2, y: GAME_ARENA_HEIGHT / 2 }
   const attackRangeRing = new Graphics()
   attackRangeRing.alpha = 0.3
   attackRangeRing.visible = false
@@ -111,7 +125,7 @@ export async function startGame({
     const isLocal = entity.player?.playerId === sessionId
     const node = new Container()
     const shape = new Graphics()
-      .circle(0, 0, GAME_PLAYER_RADIUS)
+      .circle(0, 0, entity.champion.radius)
       .fill({
         color: isLocal ? '#79dfb1' : '#81b8ff',
       })
@@ -150,10 +164,18 @@ export async function startGame({
     const entities = gameState.getEntities(now)
     const activeIds = new Set(entities.map((entity) => entity.id))
     for (const entity of entities) {
-      const health = (entity.health?.hp ?? 0) + (entity.health?.shield ?? 0)
+      const health = {
+        total: (entity.health?.hp ?? 0) + entity.totalShield,
+        hpSeq: entity.health?.hpSeq ?? 0,
+      }
       const previousHealth = displayedHealth.get(entity.id)
-      if (previousHealth !== undefined && health < previousHealth) {
-        showFloatingDamage(entity.id, previousHealth - health)
+      // Only damage advances hpSeq, so an expiring shield is not shown as damage.
+      if (
+        previousHealth !== undefined
+        && health.hpSeq > previousHealth.hpSeq
+        && health.total < previousHealth.total
+      ) {
+        showFloatingDamage(entity.id, previousHealth.total - health.total)
       }
       displayedHealth.set(entity.id, health)
     }
@@ -168,27 +190,34 @@ export async function startGame({
     for (const entity of entities) {
       const actor = actors.get(entity.id) ?? addActor(entity)
       actor.label.text = entity.player?.name ?? ''
+      const radius = entity.champion.radius
       actor.node.position.set(entity.position.x, entity.position.y)
-      actor.label.position.set(0, -GAME_PLAYER_RADIUS - 25)
+      // A confirmed death leaves a faint ghost with no bars until the respawn.
+      actor.node.alpha = entity.dead ? 0.25 : 1
+      actor.healthBar.visible = !entity.dead
+      actor.shieldBar.visible = !entity.dead
+      actor.label.position.set(0, -radius - 25)
       drawBar(
         actor.healthBar,
-        -GAME_PLAYER_RADIUS - 15,
+        -radius - 15,
         entity.health ? entity.health.hp / entity.health.maxHp : 0,
         '#67d391',
       )
       drawBar(
         actor.shieldBar,
-        -GAME_PLAYER_RADIUS - 9,
-        Math.min(1, (entity.health?.shield ?? 0) / GAME_MAX_SHIELD),
+        -radius - 9,
+        entity.health ? entity.totalShield / entity.health.maxHp : 0,
         '#72c9ff',
         3,
       )
       const isLocal = entity.id === gameState.getLocalEntityId()
-      actor.cooldownBar.visible = isLocal
-      if (isLocal) {
-        drawBar(actor.cooldownBar, -GAME_PLAYER_RADIUS - 4, gameState.getAttackCooldownProgress(now), '#f2b66d', 2)
+      actor.cooldownBar.visible = isLocal && !entity.dead
+      if (isLocal && entity.dead) {
+        attackRangeRing.visible = false
+      } else if (isLocal) {
+        drawBar(actor.cooldownBar, -radius - 4, gameState.getAttackCooldownProgress(now), '#f2b66d', 2)
         attackRangeRing.clear()
-          .circle(0, 0, gameState.getLocalAttackRange())
+          .circle(0, 0, gameState.getLocalAttackRange() ?? 0)
           .stroke({ color: '#79dfb1', width: 2 })
         attackRangeRing.position.set(entity.position.x, entity.position.y)
         attackRangeRing.visible = true
@@ -198,7 +227,7 @@ export async function startGame({
       attackRangeRing.visible = false
     }
 
-    const projectiles = gameState.getProjectiles()
+    const projectiles = gameState.getProjectiles(now)
     const activeProjectileIds = new Set(projectiles.map((projectile) => projectile.id))
     for (const [id, actor] of projectileActors) {
       if (!activeProjectileIds.has(id)) {
@@ -215,7 +244,7 @@ export async function startGame({
 
   const addProjectileActor = (projectile: RenderedProjectile): Container => {
     const actor = new Container()
-    actor.addChild(new Graphics().circle(0, 0, 5).fill({ color: '#f2b66d' }))
+    actor.addChild(new Graphics().circle(0, 0, projectile.radius).fill({ color: '#f2b66d' }))
     scene.addChild(actor)
     projectileActors.set(projectile.id, actor)
     return actor
@@ -230,18 +259,26 @@ export async function startGame({
       style: { fill: '#ffd27a', fontSize: 16, fontFamily: 'Arial', fontWeight: 'bold' },
     })
     node.anchor.set(0.5)
-    node.position.set(entity.position.x, entity.position.y - GAME_PLAYER_RADIUS - 24)
+    node.position.set(entity.position.x, entity.position.y - entity.champion.radius - 24)
     scene.addChild(node)
     floatingDamage.push({ node, startedAt: performance.now() })
   }
 
   let started = false
+  let pendingStart: GameSnapshot | undefined
+  let startPingTimer: number | undefined
   let disconnected = false
   let connected = false
-  const channel = geckos({
-    url: `${window.location.protocol}//${window.location.hostname}`,
-    port: 9209,
-  })
+  // Open the page with ?lag=100&jitter=20&loss=0.05, or tweak window.lag live in the console.
+  const { channel, config: lagConfig } = withLag(
+    // The dev and preview servers proxy Geckos signaling (/.wrtc) on the page's own port.
+    geckos({
+      url: `${window.location.protocol}//${window.location.hostname}`,
+      port: Number(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80),
+    }),
+    lagConfigFromQuery(window.location.search),
+  )
+  ;(window as unknown as { lag: LagConfig }).lag = lagConfig
   const requestSnapshot = (): void => {
     channel.emit('game:resync', {}, { reliable: true })
   }
@@ -262,6 +299,7 @@ export async function startGame({
           cooldown: 'Attack is not ready yet.',
           dead: 'Attacker or target is dead.',
           stale: 'Order was too old or out of sequence.',
+          unknown_ability: 'Your champion does not have that ability.',
         }
         onStatus(reasonMessages[ack.reason ?? ''] ?? ack.reason ?? `Order ${ack.seq} was rejected.`, true)
       }
@@ -274,20 +312,15 @@ export async function startGame({
 
   scene.eventMode = 'static'
   scene.hitArea = new Rectangle(0, 0, GAME_ARENA_WIDTH, GAME_ARENA_HEIGHT)
+  scene.on('pointermove', (event) => {
+    const position = event.getLocalPosition(scene)
+    pointer = { x: position.x, y: position.y }
+  })
   scene.on('pointerdown', (event) => {
     const target = event.getLocalPosition(scene)
+    if (gameState.isLocalDead()) return
     if (event.button === 0 && started && !disconnected) {
-      const clickedEnemy = gameState.getEntities()
-        .filter((entity) => entity.player?.playerId !== sessionId)
-        .map((entity) => ({
-          entity,
-          distance: Math.hypot(
-            entity.position.x - target.x,
-            entity.position.y - target.y,
-          ),
-        }))
-        .filter(({ distance }) => distance <= GAME_PLAYER_RADIUS + 6)
-        .sort((left, right) => left.distance - right.distance)[0]?.entity
+      const clickedEnemy = gameState.getEnemyNear({ x: target.x, y: target.y })
       if (clickedEnemy) {
         const order = gameState.createAttackOrder(clickedEnemy.id, sessionId)
         if (order) reliableMessenger.send(order)
@@ -301,12 +334,20 @@ export async function startGame({
   const onContextMenu = (event: MouseEvent): void => event.preventDefault()
   app.canvas.addEventListener('contextmenu', onContextMenu)
   const onKeyDown = (event: KeyboardEvent): void => {
-    if (event.code !== 'Space' || event.repeat || !started || disconnected) return
+    const abilitySlot = abilityKeys.indexOf(event.code)
+    if (event.code !== 'Space' && abilitySlot < 0) return
+    if (event.repeat || !started || disconnected || gameState.isLocalDead()) return
     if (
       event.target instanceof HTMLElement
       && (event.target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(event.target.tagName))
     ) return
     event.preventDefault()
+    if (abilitySlot >= 0) {
+      const attempt = gameState.createCastOrder(abilitySlot, pointer, sessionId)
+      if (attempt.ok) reliableMessenger.send(attempt.order)
+      else onStatus(attempt.reason, true)
+      return
+    }
     const target = gameState.getClosestEnemyInRange()
     if (!target) return
     const order = gameState.createAttackOrder(target.id, sessionId)
@@ -359,13 +400,21 @@ export async function startGame({
       onStatus('The server sent invalid game state.', true)
       return
     }
+    if (started || pendingStart) return
     const snapshotResult = gameState.applySnapshot(parsed.data)
     for (const order of snapshotResult.confirmedOrders) {
       reliableMessenger.acknowledge(order.id, order.seq)
     }
-    started = true
-    onStarted(parsed.data)
-    onStatus('Game started. Right-click to move; click an enemy or press Space to attack.')
+    gameState.resetServerTickAnchor(parsed.data.tick)
+    // Stay on the loading screen until a ping round trip has synchronized the
+    // tick estimate, otherwise early orders are stamped outside the server's window.
+    pendingStart = parsed.data
+    onStatus('Synchronizing game clock…')
+    const sendStartPing = (): void => {
+      if (pendingStart && !disconnected) channel.emit('game:ping', { clientTime: performance.now() })
+    }
+    sendStartPing()
+    startPingTimer = window.setInterval(sendStartPing, START_PING_RETRY_MS)
   })
 
   channel.on('game:snapshot', (data) => {
@@ -398,6 +447,23 @@ export async function startGame({
       return
     }
     gameState.recordPong(parsed.data.clientTime, parsed.data.serverTick)
+    if (pendingStart && gameState.getAverageRttMs() > 0) {
+      const snapshot = pendingStart
+      pendingStart = undefined
+      window.clearInterval(startPingTimer)
+      started = true
+      onStarted(snapshot)
+      onStatus('Game started. Right-click to move; click an enemy or press Space to attack; Q/W/E/R cast at the cursor.')
+    }
+  })
+
+  channel.on('game:death', (data) => {
+    const parsed = GameDeathSchema.safeParse(data)
+    if (!parsed.success) {
+      onStatus('The server sent an invalid death.', true)
+      return
+    }
+    if (!gameState.applyDeath(parsed.data)) requestSnapshot()
   })
 
   channel.on('game:error', (data) => {
@@ -416,6 +482,7 @@ export async function startGame({
     connected = false
     disconnected = true
     onStatus('Disconnected from game server.', true)
+    onDisconnected()
   })
 
   const pingTimer = window.setInterval(() => {
@@ -425,6 +492,7 @@ export async function startGame({
   }, GAME_PING_INTERVAL_MS)
 
   let debugUpdateElapsedMs = 0
+  let debugText = ''
   let fpsFrameCount = 0
   let fpsSampleStartedAt = performance.now()
   let displayedFps = app.ticker.FPS
@@ -443,7 +511,7 @@ export async function startGame({
       debugUpdateElapsedMs %= 250
       const debugInfo = gameState.getDebugInfo()
       const position = debugInfo.localPosition
-      debugOverlay.textContent = [
+      debugText = [
         `FPS: ${displayedFps.toFixed(1)}`,
         `RTT: ${debugInfo.lastRttMs === undefined ? '—' : `${debugInfo.lastRttMs.toFixed(1)} ms`} (avg ${debugInfo.averageRttMs.toFixed(1)} ms, n=${debugInfo.rttSampleCount})`,
         `Tick: ${debugInfo.estimatedTick.toFixed(1)} (server ${debugInfo.serverTick}, update ${debugInfo.tickAnchorAgeMs.toFixed(0)} ms ago)`,
@@ -452,6 +520,12 @@ export async function startGame({
       ].join('\n')
     }
     const now = performance.now()
+    // Cooldowns refresh every frame so they count down smoothly.
+    debugOverlay.textContent = [
+      debugText,
+      ...gameState.getAbilityCooldowns(now).map(({ slot, abilityId, ticksRemaining }) =>
+        `${abilityKeys[slot]?.slice(3) ?? slot + 1} ${abilityId}: ${ticksRemaining === 0 ? 'ready' : `${(ticksRemaining / GAME_TPS).toFixed(2)} s`}`),
+    ].join('\n')
     renderState(now)
     for (let index = floatingDamage.length - 1; index >= 0; index -= 1) {
       const floating = floatingDamage[index]
@@ -470,6 +544,7 @@ export async function startGame({
   return () => {
     disconnected = true
     window.clearInterval(pingTimer)
+    window.clearInterval(startPingTimer)
     app.canvas.removeEventListener('contextmenu', onContextMenu)
     window.removeEventListener('keydown', onKeyDown)
     debugOverlay.remove()

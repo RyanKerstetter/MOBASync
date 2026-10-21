@@ -99,23 +99,23 @@ input {
   flex: 1;
 }
 
-.game-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-}
-
-.game-heading h2 {
+/* Once a game is open the page is only the game: no margins, headings or scrollbars. */
+body:has(#game-panel:not([hidden])) {
+  max-width: none;
   margin: 0;
+  padding: 0;
+  overflow: hidden;
 }
 
-.game-stage {
-  position: relative;
-  width: 100%;
-  min-height: 20rem;
-  aspect-ratio: 16 / 9;
-  overflow: hidden;
+body:has(#game-panel:not([hidden])) > main > h1 {
+  display: none;
+}
+
+#game-panel {
+  position: fixed;
+  z-index: 10;
+  inset: 0;
+  background: #101827;
 }
 
 #game-container {
@@ -123,7 +123,6 @@ input {
   inset: 0;
   width: 100%;
   height: 100%;
-  background: #101827;
 }
 
 #game-loading {
@@ -132,20 +131,35 @@ input {
   inset: 0;
   display: grid;
   place-content: center;
+  justify-items: center;
+  gap: 0.4rem;
   text-align: center;
-  background: #f0f5f3;
-  border: 1px solid #d4dfda;
-  border-radius: 0.75rem;
-  box-sizing: border-box;
+  color: #d9e6f2;
+  background: #101827;
 }
 
 #game-loading h3,
 #game-loading p {
-  margin: 0.4rem 1rem;
+  margin: 0;
 }
 
 #game-loading[hidden] {
   display: none;
+}
+
+#game-toast {
+  position: absolute;
+  z-index: 3;
+  bottom: 1rem;
+  left: 50%;
+  margin: 0;
+  padding: 0.4rem 0.8rem;
+  transform: translateX(-50%);
+  color: #d9e6f2;
+  background: rgb(8 14 24 / 82%);
+  border-radius: 0.35rem;
+  font-size: 0.9rem;
+  pointer-events: none;
 }
 
 #game-container canvas {
@@ -168,11 +182,6 @@ input {
   font: 0.72rem/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
   white-space: pre-wrap;
   pointer-events: none;
-}
-
-.game-instructions {
-  color: #536253;
-  font-size: 0.9rem;
 }
 
 [hidden] {

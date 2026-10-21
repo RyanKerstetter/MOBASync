@@ -13,7 +13,19 @@ import {
 } from '../../../packages/shared/src/index.js'
 import { ServerGameState } from './game-state.js'
 
-const port = 9208
+const port = readPort('LOBBY_API_PORT', 9208)
+const gamePort = readPort('GECKOS_PORT', 9209)
+// WebRTC media runs over UDP. Geckos multiplexes every connection onto one port, so
+// opening WEBRTC_PORT_MIN (or the whole range up to WEBRTC_PORT_MAX) in the firewall is enough.
+const webrtcPortMin = readPort('WEBRTC_PORT_MIN', 10_000)
+const webrtcPortMax = readPort('WEBRTC_PORT_MAX', webrtcPortMin)
+// A STUN server lets the game server learn its public address when the host sits behind
+// NAT (most clouds). Set WEBRTC_ICE_SERVERS to a comma-separated list, or empty to disable.
+const iceServers = (process.env.WEBRTC_ICE_SERVERS ?? 'stun:stun.l.google.com:19302')
+  .split(',')
+  .map((urls) => urls.trim())
+  .filter(Boolean)
+  .map((urls) => ({ urls }))
 const codeCharacters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const lobbyCodeLength = 6
 const playerTimeoutMs = 45_000
@@ -25,6 +37,17 @@ if (!Number.isInteger(maxPlayers) || maxPlayers < 1) {
 }
 if (!Number.isInteger(checkpointIntervalMs) || checkpointIntervalMs < 1) {
   throw new Error('GAME_CHECKPOINT_INTERVAL_MS must be a positive integer.')
+}
+if (webrtcPortMax < webrtcPortMin) {
+  throw new Error('WEBRTC_PORT_MAX must not be lower than WEBRTC_PORT_MIN.')
+}
+
+function readPort(name: string, fallback: number): number {
+  const value = Number(process.env[name] ?? fallback)
+  if (!Number.isInteger(value) || value < 1025 || value > 65_535) {
+    throw new Error(`${name} must be an integer from 1025 to 65535.`)
+  }
+  return value
 }
 
 type Player = {
@@ -68,7 +91,7 @@ type GameDeliveryClient = {
 }
 
 const lobbies = new Map<string, Lobby>()
-const gameServer = geckos()
+const gameServer = geckos({ portRange: { min: webrtcPortMin, max: webrtcPortMax }, iceServers })
 const gameDeliveryClients = new Map<string, GameDeliveryClient>()
 
 class HttpError extends Error {
@@ -295,7 +318,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     if (!lobby.players.has(sessionId)) throw new HttpError(404, 'You are no longer in this lobby.')
     if (lobby.game.status === 'starting') {
       lobby.game.cancelStart()
-      gameServer.room(lobby.code).emit('game:cancelled', { message: 'A player cancelled game start.' })
+      gameServer.room(lobby.code).emit('game:cancelled', { message: 'A player cancelled game start.' }, { reliable: true })
     }
     sendJson(response, 200, { lobby: toPublicLobby(lobby) })
     return
@@ -446,7 +469,9 @@ function runGameTick(): void {
   const now = performance.now()
   for (const lobby of lobbies.values()) {
     if (lobby.game.status === 'running') {
-      lobby.game.advanceTick()
+      for (const death of lobby.game.advanceTick()) {
+        gameServer.room(lobby.code).emit('game:death', death, { reliable: true })
+      }
     }
   }
 
@@ -479,18 +504,18 @@ gameServer.onConnection((channel) => {
   channel.on('game:join', (data) => {
     const parsed = GameJoinSchema.safeParse(data)
     if (!parsed.success) {
-      channel.emit('game:error', { message: 'A valid lobby code and session ID are required.' })
+      channel.emit('game:error', { message: 'A valid lobby code and session ID are required.' }, { reliable: true })
       return
     }
 
     const joinedLobby = lobbies.get(parsed.data.lobbyCode.toUpperCase())
     const player = joinedLobby?.players.get(parsed.data.sessionId)
     if (!joinedLobby || !player) {
-      channel.emit('game:error', { message: 'You are no longer in this lobby.' })
+      channel.emit('game:error', { message: 'You are no longer in this lobby.' }, { reliable: true })
       return
     }
     if (joinedLobby.game.status === 'idle') {
-      channel.emit('game:error', { message: 'The lobby leader has not started a game yet.' })
+      channel.emit('game:error', { message: 'The lobby leader has not started a game yet.' }, { reliable: true })
       return
     }
 
@@ -500,7 +525,7 @@ gameServer.onConnection((channel) => {
     channel.join(joinedLobby.code)
     deliveryChannelId = channel.id
     if (!deliveryChannelId) {
-      channel.emit('game:error', { message: 'The game connection is not available.' })
+      channel.emit('game:error', { message: 'The game connection is not available.' }, { reliable: true })
       return
     }
     deliveryClient = {
@@ -523,7 +548,7 @@ gameServer.onConnection((channel) => {
     gameDeliveryClients.set(deliveryChannelId, deliveryClient)
     const entityId = joinedLobby.game.getEntityId(player.id)
     if (entityId === undefined) {
-      channel.emit('game:error', { message: 'Your game entity is not available.' })
+      channel.emit('game:error', { message: 'Your game entity is not available.' }, { reliable: true })
       return
     }
     channel.emit('game:joined', {
@@ -564,18 +589,18 @@ gameServer.onConnection((channel) => {
 
   channel.on('game:order', (data) => {
     if (!lobby || !playerId || lobby.game.status !== 'running') {
-      channel.emit('game:error', { message: 'Orders are accepted only after the game starts.' })
+      channel.emit('game:error', { message: 'Orders are accepted only after the game starts.' }, { reliable: true })
       return
     }
     const activeLobby = lobby
     const activePlayerId = playerId
     if (!activeLobby.players.has(activePlayerId)) {
-      channel.emit('game:error', { message: 'You are no longer in this lobby.' })
+      channel.emit('game:error', { message: 'You are no longer in this lobby.' }, { reliable: true })
       return
     }
     const parsed = GameOrderSchema.safeParse(data)
     if (!parsed.success) {
-      channel.emit('game:error', { message: 'Order must be a valid move or attack order.' })
+      channel.emit('game:error', { message: 'Order must be a valid move, attack, or cast order.' }, { reliable: true })
       return
     }
 
@@ -609,5 +634,5 @@ gameServer.onConnection((channel) => {
     startGameWhenReady(lobby)
   })
 })
-gameServer.listen(9209)
-console.log('Game server listening on port 9209')
+gameServer.listen(gamePort)
+console.log(`Game server listening on port ${gamePort} (WebRTC UDP ${webrtcPortMin}-${webrtcPortMax})`)
