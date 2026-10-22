@@ -6,7 +6,7 @@ import type {
   Status,
   Vector2,
 } from './index.js'
-import { GAME_TPS } from './constants.js'
+import { GAME_ARENA_HEIGHT, GAME_ARENA_WIDTH, GAME_BURN_PULSE_TICKS, GAME_TPS } from './constants.js'
 import { boxTouchesCircle, type BoxShape } from './geometry.js'
 import type { SimCharacter } from './simulator.js'
 
@@ -25,6 +25,11 @@ export interface SimReader {
   // A unit's health and its statuses, as they stand before this tick's writes.
   healthOf(unitId: number): { hp: number; maxHp: number } | undefined
   statusesOn(unitId: number): Status[]
+  // The entities of this definition that this unit has out, as they stood before this tick's
+  // writes, and where each is. Entities are not targets, but a unit can look for its own.
+  entitiesOf(ownerId: number, defId: string): Array<{ id: string; position: Vector2 }>
+  // Whether the unit is in the game and alive. A confirmed death makes it a ghost.
+  isAlive(unitId: number): boolean
 }
 
 export interface SimWriter {
@@ -32,10 +37,26 @@ export interface SimWriter {
   addOrder(unitId: number, o: CharacterOrder): void
   addMarker(unitId: number, m: Marker): void
   // Removes every marker with this key that the owner placed on the unit (a pop).
-  removeMarkers(unitId: number, key: string, ownerId: number): void
+  // With `count`, only that many, the oldest first.
+  removeMarkers(unitId: number, key: string, ownerId: number, count?: number): void
   // Starts a dash toward `target` at `speed` (distance per second) from the next tick.
-  startDash(unitId: number, target: Vector2, speed: number): void
+  // With `through`, the unit passes through other characters on the way instead of pushing them.
+  // With `contact`, the dash runs a `DashDef`'s effects as it goes (see `dash`).
+  startDash(
+    unitId: number,
+    target: Vector2,
+    speed: number,
+    options?: {
+      through?: boolean
+      contact?: { defId: string; origin: Vector2; sourceId: string; orderId: string }
+    },
+  ): void
+  // Puts the unit at the point as the tick ends (held inside the arena). Unlike a dash, nothing
+  // happens on the way: it is somewhere else on the next frame.
+  blink(unitId: number, target: Vector2): void
   addEntity(p: SimEntity): void
+  // Takes every entity of this definition that the owner has out out of the world.
+  removeEntities(ownerId: number, defId: string): void
   emitEvent(e: GameEvent): void
 }
 
@@ -52,6 +73,11 @@ export type GameEvent =
   | { type: 'interrupt'; id: string; rootId: string; ownerId: number; unitId: number }
   // Takes `fraction` of the ability's full cooldown plus `ticks` off what remains.
   | { type: 'refund-cooldown'; id: string; rootId: string; ownerId: number; unitId: number; abilityId: string; fraction: number; ticks: number }
+  // Brings what is left of an ability's cooldown down to at most `ticks`. One with less left, or
+  // already ready, is untouched.
+  | { type: 'cap-cooldown'; id: string; rootId: string; ownerId: number; unitId: number; abilityId: string; ticks: number }
+  // Puts the ability on its full cooldown from now, whatever was left of it, or none.
+  | { type: 'start-cooldown'; id: string; rootId: string; ownerId: number; unitId: number; abilityId: string }
 
 // 2. Provenance: plain data, built by whoever runs the effects.
 export interface EffectSource {
@@ -82,13 +108,31 @@ interface EntityDefBase {
   id: string
   // Distance per second. 0 makes a stationary entity such as a field.
   speed: number
-  // A fixed timer. Leave it out when `landAtAim` is set, or when `stayWhile` is what ends it.
+  // A fixed timer. Leave it out when `landAtAim` is set, when `homing` or `stayWhile` is what
+  // ends it.
   lifetimeTicks?: number
+  // Flies at `speed` toward a unit and turns to follow it, instead of keeping to a straight line.
+  // With no `lifetimeTicks` it never gives up the chase, so it must be faster than its target to
+  // land. Needs a speed above 0 and a circular shape. `true` chases the unit it was aimed at (a
+  // unit aim), hits only that unit and ends on the hit, or when the unit dies or leaves the game.
+  // `'owner'` chases whoever fired it, such as a thrown stick coming back: it may `pierce`, hitting
+  // every enemy it passes once, and a `pickup` is what ends it when it gets home.
+  homing?: boolean | 'owner'
+  // Runs when the owner's body touches this entity, and ends it: the owner has picked it up. It
+  // takes the owner walking over a stationary entity, or the entity arriving at the owner. Needs a
+  // circular shape. The effects run for the owner, with the owner as the subject. The list may be
+  // empty, for an entity that simply ends on reaching its owner and gives nothing back.
+  pickup?: readonly Effect[]
   // Flies to the aimed point at `speed` and ends there on arrival, so its lifetime is the
   // travel time and grows with distance. Needs a point aim; use `lifetimeTicks` for a set timer.
   landAtAim?: boolean
   // Pierce hits every enemy once; otherwise the entity ends on its first hit.
   pierce?: boolean
+  // A straight shot that would leave the arena ends where its edge meets the wall instead, running
+  // its `onExpire` there, so what it leaves behind lands inside the map. Without it a shot flies on
+  // past the wall to the end of its lifetime. Needs a `lifetimeTicks` and a speed, a circular shape
+  // (the wall is met by its radius), and a straight path: it cannot also home, follow or land at an aim.
+  stopsAtWalls?: boolean
   // Runs once for each enemy the entity touches. Without it the entity never collides.
   onHit?: readonly Effect[]
   // Runs every tick the entity exists, at its position, with a stable source ID so
@@ -135,8 +179,11 @@ export function runEffects<C>(effects: readonly Effect<C>[], sim: C, src: Effect
   for (const effect of effects) effect(sim, src)
 }
 
+// Characters on different teams are enemies, and a character is no enemy of itself or its team. This
+// is the one place that decides who an attack, a cast, a hit or a blast can touch, so abilities that
+// hurt, push or disable only ever reach enemies, and the "allies" selectors reach teammates.
 export function areEnemies(left: SimCharacter, right: SimCharacter): boolean {
-  return left.player?.playerId !== right.player?.playerId
+  return left.team !== right.team
 }
 
 // Selectors
@@ -164,6 +211,13 @@ export const alongAim = (distance: number): Anchor => (sim, src) => {
 export const aimPoint = (): Anchor => (_sim, src) =>
   src.aim?.mode === 'point' ? { ...src.aim.point } : undefined
 
+// Where the caster's entity of this definition is, such as the stick it threw. If it has more
+// than one out, the first; if none, nothing, and an effect that needs the place does nothing.
+export const ownEntity = (defId: string): Anchor => (sim, src) => {
+  const position = sim.entitiesOf(src.ownerId, defId)[0]?.position
+  return position && { ...position }
+}
+
 export const alliesInRadius = (r: number, center: Anchor = castOrigin()): Selector => (sim, src) => {
   const at = center(sim, src)
   const owner = sim.character(src.ownerId)
@@ -182,6 +236,14 @@ export const enemiesInRadius = (r: number, center: Anchor = castOrigin()): Selec
     const unit = sim.character(unitId)
     return Boolean(unit && areEnemies(owner, unit))
   })
+}
+
+// The caster, if its body reaches into the circle, and no one otherwise. For a blast that throws
+// its thrower clear along with everyone else near it, such as a satchel the caster can stand next to.
+export const selfInRadius = (r: number, center: Anchor = castOrigin()): Selector => (sim, src) => {
+  const at = center(sim, src)
+  if (!at) return []
+  return sim.unitsInRadius(at, r, src.tick).filter((unitId) => unitId === src.ownerId)
 }
 
 // A unit vector along `dir`, or undefined for no direction.
@@ -365,11 +427,13 @@ export const when = <C extends SimReader>(
 
 // `shared` makes every haste of that name from the same cast one status per unit, so several
 // overlapping sources of one cast (the segments of a trail) refresh it instead of adding up.
+// With `fades`, the bonus starts at `fraction` and dies away in a straight line to nothing over the
+// duration, instead of holding steady until it ends.
 export const haste = (
   fraction: Amount,
   durationTicks: number,
   to: Selector = self(),
-  options: { shared?: string } = {},
+  options: { shared?: string; fades?: boolean } = {},
 ): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
   const amount = Math.max(0, resolveAmount(fraction, sim, src))
   if (amount === 0) return
@@ -382,6 +446,34 @@ export const haste = (
       startTick: src.tick,
       endTick: src.tick + durationTicks,
       amount,
+      ...(options.fades ? { fades: true } : {}),
+    })
+  }
+}
+
+// Sets units alight: they take `damagePerSecond` while the status lasts, in a chunk on every
+// GAME_BURN_PULSE_TICKS-th tick, as ordinary damage (resistance and shields apply) credited to
+// whoever lit them. Lighting a unit again from the same source refreshes the burn instead of
+// adding a second one, so a fire that re-applies it every tick keeps it burning for `durationTicks`
+// after the unit last stood in it; burns from different sources add together.
+export const burn = (
+  damagePerSecond: Amount,
+  durationTicks: number,
+  to: Selector = subject(),
+): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
+  for (const unitId of to(sim, src)) {
+    const perPulse = Math.max(0, Math.round(
+      resolveAmount(damagePerSecond, sim, { ...src, subject: unitId }) * GAME_BURN_PULSE_TICKS / GAME_TPS,
+    ))
+    if (perPulse === 0) continue
+    sim.addStatus(unitId, {
+      id: `${src.id}:burn`,
+      kind: 'burn',
+      rootId: src.rootId,
+      ownerId: src.ownerId,
+      startTick: src.tick,
+      endTick: src.tick + durationTicks,
+      amount: perPulse,
     })
   }
 }
@@ -466,8 +558,11 @@ export const subjectWithin = (range: number) => (sim: SimReader, src: EffectSour
 }
 
 // Crowd control. A root stops walking but not attacks or casts; a stun also stops those
-// and interrupts a windup. Neither stops a dash that is already under way.
-const crowdControl = (kind: 'root' | 'stun') => (
+// and interrupts a windup. Neither stops a dash that is already under way. A blind lets the
+// unit walk, attack and cast as usual, but its auto attacks miss: the windup and the cooldown are
+// spent and nothing lands or launches. A silence stops casting abilities, and nothing else: the
+// unit can still walk, attack, and finish a cast it had already begun.
+const crowdControl = (kind: 'root' | 'stun' | 'blind' | 'silence') => (
   durationTicks: number,
   to: Selector = subject(),
 ): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
@@ -486,6 +581,28 @@ const crowdControl = (kind: 'root' | 'stun') => (
 
 export const root = crowdControl('root')
 export const stun = crowdControl('stun')
+export const blind = crowdControl('blind')
+export const silence = crowdControl('silence')
+
+// Teleports the units to a point, at once: a blink. They are there on the next frame, with
+// nothing in between to hit them or be hit, and a root does not hold them. A character in the
+// way is no obstacle, but the two are pushed apart afterwards as usual if they end up overlapping.
+export const blink = (
+  to: Anchor,
+  who: Selector = self(),
+): Effect<SimReader & Pick<SimWriter, 'blink'>> => (sim, src) => {
+  const target = to(sim, src)
+  if (!target) return
+  for (const unitId of who(sim, src)) sim.blink(unitId, target)
+}
+
+// Takes the caster's entities of this definition out of the world, such as a stick that is being
+// called back. Entities it spawns on the same tick are not touched.
+export const removeEntities = (
+  defId: string,
+): Effect<SimReader & Pick<SimWriter, 'removeEntities'>> => (sim, src) => {
+  sim.removeEntities(src.ownerId, defId)
+}
 
 // Pushes units `distance` along the aim (a wave's travel direction), or away from the source
 // when there is no direction. It is the same forced movement as a dash, so the target cannot
@@ -576,39 +693,111 @@ export const attackRangeBonus = (
   }
 }
 
+// Where a dash that starts at `from` goes: toward the anchor if there is one, else toward the aim (a
+// point, a direction, or a unit), and never more than `maxDistance`. Nowhere if there is nothing to
+// go toward or it is already there.
+function dashEnd(
+  sim: SimReader,
+  src: EffectSource,
+  from: Vector2,
+  maxDistance: number,
+  toward?: Anchor,
+): Vector2 | undefined {
+  const aim = src.aim
+  const point = toward
+    ? toward(sim, src)
+    : aim?.mode === 'point'
+      ? aim.point
+      : aim?.mode === 'direction'
+        ? { x: from.x + aim.dir.x * maxDistance, y: from.y + aim.dir.y * maxDistance }
+        : aim?.mode === 'unit'
+          ? sim.posAt(aim.unitId, src.tick)
+          : undefined
+  if (!point) return undefined
+  const dx = point.x - from.x
+  const dy = point.y - from.y
+  const distance = Math.sqrt(dx * dx + dy * dy)
+  if (distance === 0) return undefined
+  if (distance <= maxDistance) return { x: point.x, y: point.y }
+  return { x: from.x + dx / distance * maxDistance, y: from.y + dy / distance * maxDistance }
+}
+
+// What a dash does as it goes. The effects run when the dash does, not when it is ordered: an enemy
+// is touched when the dasher's body reaches it along the way, each once, wherever it is by then.
+export interface DashDef {
+  id: string
+  // For each enemy touched, with that enemy as the subject, at the dasher's position.
+  onHit?: readonly Effect[]
+  // Once, the first time an enemy is touched, just after that enemy's `onHit`, at the point the dash
+  // started from. For what comes of a dash that connected, such as leaving something behind.
+  onConnect?: readonly Effect[]
+  // Once, when the dash ends having touched no one, at the point it started from.
+  onMiss?: readonly Effect[]
+}
+
+const dashDefs = new Map<string, DashDef>()
+
+export function getDashDef(id: string): DashDef | undefined {
+  return dashDefs.get(id)
+}
+
 // Dashes toward the aim (a point, a direction, or a unit), at most `maxDistance` from where the
-// unit stands when the effect runs. The dash itself runs in the simulator at a fixed speed.
+// unit stands when the effect runs, which can be `Infinity` for a dash that goes all the way. The dash
+// itself runs in the simulator at a fixed speed. A dash shoves the characters in its way along unless
+// it is `through`, which passes through them. With `toward`, it goes to that anchor instead, such as
+// an entity the caster left behind; with nothing there, it does not dash. With `on`, the dash has
+// effects of its own, run as it goes (`DashDef`), for the caster's dash only.
 export const dash = (
   speed: number,
   maxDistance: number,
   to: Selector = self(),
-): Effect<SimReader & Pick<SimWriter, 'startDash'>> => (sim, src) => {
+  options: { toward?: Anchor; through?: boolean; on?: DashDef } = {},
+): Effect<SimReader & Pick<SimWriter, 'startDash'>> => {
+  const def = options.on
+  if (def) {
+    const registered = dashDefs.get(def.id)
+    if (registered && registered !== def) throw new Error(`Dash definition "${def.id}" is already registered.`)
+    dashDefs.set(def.id, def)
+  }
+  return (sim, src) => {
+    for (const unitId of to(sim, src)) {
+      const from = sim.posAt(unitId, src.tick)
+      if (!from) continue
+      const end = dashEnd(sim, src, from, maxDistance, options.toward)
+      if (!end) continue
+      sim.startDash(unitId, end, speed, {
+        ...(options.through ? { through: true } : {}),
+        ...(def ? { contact: { defId: def.id, origin: { ...src.at }, sourceId: src.id, orderId: src.rootId } } : {}),
+      })
+    }
+  }
+}
+
+// The units dodge every auto attack aimed at them while it lasts: the swing, and any shot that
+// reaches them, is spent and nothing lands. Abilities are not dodged.
+export const dodge = (
+  durationTicks: number,
+  to: Selector = self(),
+): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
   for (const unitId of to(sim, src)) {
-    const from = sim.posAt(unitId, src.tick)
-    const aim = src.aim
-    if (!from || !aim) continue
-    const toward = aim.mode === 'point'
-      ? aim.point
-      : aim.mode === 'direction'
-        ? { x: from.x + aim.dir.x * maxDistance, y: from.y + aim.dir.y * maxDistance }
-        : aim.mode === 'unit'
-          ? sim.posAt(aim.unitId, src.tick)
-          : undefined
-    if (!toward) continue
-    const dx = toward.x - from.x
-    const dy = toward.y - from.y
-    const distance = Math.sqrt(dx * dx + dy * dy)
-    if (distance === 0) continue
-    const length = Math.min(distance, maxDistance)
-    sim.startDash(unitId, { x: from.x + dx / distance * length, y: from.y + dy / distance * length }, speed)
+    sim.addStatus(unitId, {
+      id: `${src.id}:dodge`,
+      kind: 'dodge',
+      rootId: src.rootId,
+      ownerId: src.ownerId,
+      startTick: src.tick,
+      endTick: src.tick + durationTicks,
+      amount: 1,
+    })
   }
 }
 
 export const popMarkers = (
   key: string,
   to: Selector = subject(),
+  options: { count?: number } = {},
 ): Effect<SimReader & Pick<SimWriter, 'removeMarkers'>> => (sim, src) => {
-  for (const unitId of to(sim, src)) sim.removeMarkers(unitId, key, src.ownerId)
+  for (const unitId of to(sim, src)) sim.removeMarkers(unitId, key, src.ownerId, options.count)
 }
 
 export const refundCooldown = (
@@ -628,6 +817,45 @@ export const refundCooldown = (
       abilityId,
       fraction: value,
       ticks: 0,
+    })
+  }
+}
+
+// Brings what is left of an ability's cooldown down to `ticks`, or leaves it if there is less left.
+// Where a refund takes a share off, this sets a ceiling: "no more than a second to go".
+export const capCooldown = (
+  abilityId: string,
+  ticks: number,
+  to: Selector = self(),
+): Effect<SimReader & Pick<SimWriter, 'emitEvent'>> => (sim, src) => {
+  for (const unitId of to(sim, src)) {
+    sim.emitEvent({
+      type: 'cap-cooldown',
+      id: `${src.id}:cap-cooldown:${abilityId}:u${unitId}`,
+      rootId: src.rootId,
+      ownerId: src.ownerId,
+      unitId,
+      abilityId,
+      ticks,
+    })
+  }
+}
+
+// Puts an ability on its full cooldown from now, even if it was ready or nearly so. For an ability
+// whose cooldown has been running while something else was in use in its place (a recast), which
+// should start over once that ends.
+export const startCooldown = (
+  abilityId: string,
+  to: Selector = self(),
+): Effect<SimReader & Pick<SimWriter, 'emitEvent'>> => (sim, src) => {
+  for (const unitId of to(sim, src)) {
+    sim.emitEvent({
+      type: 'start-cooldown',
+      id: `${src.id}:start-cooldown:${abilityId}:u${unitId}`,
+      rootId: src.rootId,
+      ownerId: src.ownerId,
+      unitId,
+      abilityId,
     })
   }
 }
@@ -675,8 +903,23 @@ export const spawnEntity = (
   if (registered && registered !== def) {
     throw new Error(`Entity definition "${def.id}" is already registered.`)
   }
-  if (def.lifetimeTicks === undefined && !def.landAtAim && !def.stayWhile) {
-    throw new Error(`Entity definition "${def.id}" needs lifetimeTicks, landAtAim or stayWhile.`)
+  if (def.lifetimeTicks === undefined && !def.landAtAim && !def.stayWhile && !def.homing) {
+    throw new Error(`Entity definition "${def.id}" needs lifetimeTicks, landAtAim, stayWhile or homing.`)
+  }
+  if (def.homing && !(
+    def.speed > 0 && def.radius !== undefined && !def.landAtAim && !def.follow
+    && (def.homing === 'owner' || !def.pierce)
+  )) {
+    throw new Error(`Entity definition "${def.id}" is homing, so it needs a speed above 0 and a radius, and cannot landAtAim, follow, or pierce unless it homes on its owner.`)
+  }
+  if (def.pickup && def.radius === undefined) {
+    throw new Error(`Entity definition "${def.id}" is picked up by its owner touching it, so it needs a radius.`)
+  }
+  if (def.stopsAtWalls && !(
+    def.lifetimeTicks !== undefined && def.speed > 0 && def.radius !== undefined
+    && !def.homing && !def.landAtAim && !def.follow
+  )) {
+    throw new Error(`Entity definition "${def.id}" stops at walls, so it needs a lifetimeTicks, a speed above 0 and a radius, and a straight path.`)
   }
   if ((def.radius === undefined) === (def.box === undefined)) {
     throw new Error(`Entity definition "${def.id}" needs either a radius or a box.`)
@@ -694,6 +937,11 @@ export const spawnEntity = (
   return (sim, src) => {
     const origin = options.at ? options.at(sim, src) : { ...src.at }
     if (!origin) return
+    // A homing entity chases the unit it was aimed at, or the one that fired it.
+    const targetId = def.homing === 'owner'
+      ? src.ownerId
+      : src.aim?.mode === 'unit' ? src.aim.unitId : undefined
+    if (def.homing && targetId === undefined) return
     // A rectangle needs a heading: the aimed direction, or east when there is none.
     let facing: Vector2 | undefined
     if (def.box) {
@@ -735,10 +983,16 @@ export const spawnEntity = (
         lifetimeTicks = Math.max(1, Math.round(distance / def.speed * GAME_TPS))
         velocity = { x: dx * GAME_TPS / lifetimeTicks, y: dy * GAME_TPS / lifetimeTicks }
       } else {
-        const dir = def.speed === 0 ? { x: 0, y: 0 } : aimDirection(sim, src)
+        const aimed = def.speed === 0 ? { x: 0, y: 0 } : aimDirection(sim, src)
+        // A homing entity fired from right on top of its target has no heading yet; it finds one
+        // on its first step.
+        const dir = aimed ?? (def.homing ? { x: 0, y: 0 } : undefined)
         if (!dir) return
         lifetimeTicks = def.lifetimeTicks
         velocity = { x: dir.x * def.speed, y: dir.y * def.speed }
+        if (def.stopsAtWalls && lifetimeTicks !== undefined) {
+          lifetimeTicks = Math.min(lifetimeTicks, ticksBeforeWall(place.at, velocity, def.radius ?? 0))
+        }
       }
       sim.addEntity({
         id: `${options.onePerOwner ? src.ownerId : src.id}:${def.id}${place.suffix}`,
@@ -751,9 +1005,25 @@ export const spawnEntity = (
         ...(lifetimeTicks !== undefined ? { lifetimeTicks } : {}),
         hitIds: [],
         ...(facing ? { facing: { ...facing } } : {}),
+        ...(def.homing && targetId !== undefined ? { targetId } : {}),
       })
     }
   }
+}
+
+// How many whole ticks a body of this radius can fly from `from` at `velocity` (per second) before
+// its edge would meet the arena's wall, and never fewer than one so there is always a flight. Only
+// additions, multiplications and a floor, so every peer gets the same answer.
+function ticksBeforeWall(from: Vector2, velocity: Vector2, radius: number): number {
+  let seconds = Infinity
+  for (const [position, speed, size] of [
+    [from.x, velocity.x, GAME_ARENA_WIDTH],
+    [from.y, velocity.y, GAME_ARENA_HEIGHT],
+  ] as const) {
+    if (speed > 0) seconds = Math.min(seconds, (size - radius - position) / speed)
+    else if (speed < 0) seconds = Math.min(seconds, (radius - position) / speed)
+  }
+  return Math.max(1, Math.floor(seconds * GAME_TPS))
 }
 
 function resolveAmount(amount: Amount, sim: SimReader, src: EffectSource): number {

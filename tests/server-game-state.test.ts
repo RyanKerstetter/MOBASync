@@ -7,12 +7,15 @@ import {
   GAME_DEATH_LEAD_TICKS,
   GAME_ARENA_HEIGHT,
   GAME_ARENA_WIDTH,
+  GAME_MAX_PLAYERS,
   GAME_RESPAWN_TICKS,
-  GAME_SPAWN_SPACING,
+  GAME_SPAWN_MARGIN,
+  GAME_SPAWN_RADIUS,
+  GAME_SPAWN_TEAMMATE_SPACING,
   GAME_TPS,
   type GameDeath,
 } from '../packages/shared/src/index.ts'
-import { brawler, cursebearer } from './fixtures.ts'
+import { brawler, cursebearer, trinketmaster } from './fixtures.ts'
 
 // Starts a game in which every player picked the same test champion, so these tests do not
 // depend on what the real roster or its default happens to be.
@@ -62,25 +65,109 @@ test('server derives attack damage through the shared simulator without health r
   assert.equal(target?.getHealth(), champion.maxHp - champion.attackDamage)
 })
 
-test('players start in a row across the middle of the map, evenly spaced', () => {
-  for (const count of [1, 2, 3, 5]) {
-    const game = new ServerGameState()
-    const players = Array.from({ length: count }, (_, index) => ({ id: `player-${index + 1}`, name: `P${index + 1}` }))
-    startGame(game, players, brawler.id)
-    const xs = players.map((player) => {
-      const id = game.getCharacterId(player.id)
-      assert.ok(id)
-      const position = game.simulator.at(0).get(id)?.getPosition()
-      assert.ok(position)
-      assert.equal(position.y, GAME_ARENA_HEIGHT / 2)
-      return position.x
-    })
+// Starts a game with a player on each of these teams and gives back where each began.
+function startTeams(teams: number[]): { game: ServerGameState; ids: number[]; at: Array<{ x: number; y: number }> } {
+  const game = new ServerGameState()
+  const players = teams.map((team, index) => ({ id: `player-${index + 1}`, name: `P${index + 1}`, team }))
+  startGame(game, players, brawler.id)
+  const ids = players.map((player) => game.getCharacterId(player.id) as number)
+  const at = ids.map((id) => game.simulator.at(0).get(id)?.getPosition() as { x: number; y: number })
+  return { game, ids, at }
+}
 
-    const middle = xs.reduce((sum, x) => sum + x, 0) / count
-    assert.equal(middle, GAME_ARENA_WIDTH / 2, `${count} players are centred on the map`)
-    xs.slice(1).forEach((x, index) => assert.equal(x - xs[index], GAME_SPAWN_SPACING, 'evenly spaced'))
-    assert.ok(xs[0] > 0 && xs[count - 1] < GAME_ARENA_WIDTH, 'all inside the map')
+const MIDDLE = { x: GAME_ARENA_WIDTH / 2, y: GAME_ARENA_HEIGHT / 2 }
+const apart = (left: { x: number; y: number }, right: { x: number; y: number }): number =>
+  Math.hypot(left.x - right.x, left.y - right.y)
+
+test('teams start spread round the middle of the map, and teammates start next to each other', () => {
+  const layouts = [
+    [1, 1, 2, 2],
+    [1, 2, 1, 2],
+    [1, 1, 1, 1, 2, 2, 2, 2],
+    [1, 1, 1, 2],
+    [1, 1, 2, 2, 3, 3],
+    [1, 2, 3, 4, 5, 6, 7, 8],
+    [3, 3, 1, 1, 2],
+  ]
+  for (const teams of layouts) {
+    const { at } = startTeams(teams)
+    const label = teams.join('')
+
+    // Everyone stands on the circle round the middle, well in from the edge of the map.
+    at.forEach((position) => {
+      assert.ok(Math.abs(apart(position, MIDDLE) - GAME_SPAWN_RADIUS) < 1, `${label}: on the circle`)
+      assert.ok(position.x >= GAME_SPAWN_MARGIN - 1 && position.x <= GAME_ARENA_WIDTH - GAME_SPAWN_MARGIN + 1)
+      assert.ok(position.y >= GAME_SPAWN_MARGIN - 1 && position.y <= GAME_ARENA_HEIGHT - GAME_SPAWN_MARGIN + 1)
+    })
+    // Nobody starts on top of anybody.
+    at.forEach((position, index) => at.slice(index + 1).forEach((other) => {
+      assert.ok(apart(position, other) > 2 * brawler.radius, `${label}: nobody overlaps`)
+    }))
+    // A player's nearest neighbour is a teammate, and teammates stand a set distance apart.
+    teams.forEach((team, index) => {
+      const mates = teams.flatMap((other, position) => (other === team && position !== index ? [position] : []))
+      const strangers = teams.flatMap((other, position) => (other !== team ? [position] : []))
+      if (mates.length === 0) return
+      const nearestMate = Math.min(...mates.map((position) => apart(at[index], at[position])))
+      const nearestStranger = Math.min(...strangers.map((position) => apart(at[index], at[position])))
+      assert.ok(nearestMate < nearestStranger, `${label}: player ${index + 1} starts next to a teammate`)
+      assert.ok(Math.abs(nearestMate - GAME_SPAWN_TEAMMATE_SPACING) < 3, `${label}: and a set distance from them`)
+    })
   }
+})
+
+test('each team gets an equal slice of the circle, in order, and a team is the same wherever its players are listed', () => {
+  // Two teams face each other across the middle, one on each side: the first to the west.
+  const two = startTeams([1, 1, 2, 2]).at
+  const meanX = (positions: Array<{ x: number }>) => positions.reduce((sum, position) => sum + position.x, 0) / positions.length
+  assert.ok(meanX(two.slice(0, 2)) < MIDDLE.x && meanX(two.slice(2)) > MIDDLE.x)
+  assert.ok(Math.abs(meanX(two.slice(0, 2)) + meanX(two.slice(2)) - 2 * MIDDLE.x) < 2, 'and they are opposite')
+
+  // Four teams of one are a quarter of the way round from each other.
+  const four = startTeams([1, 2, 3, 4]).at
+  const angle = (position: { x: number; y: number }) => Math.atan2(position.y - MIDDLE.y, position.x - MIDDLE.x)
+  for (let index = 0; index < 4; index += 1) {
+    const turn = (angle(four[(index + 1) % 4]) - angle(four[index]) + 4 * Math.PI) % (2 * Math.PI)
+    assert.ok(Math.abs(turn - Math.PI / 2) < 0.01, `team ${index + 1} to the next is a quarter turn`)
+  }
+
+  // Listing the players in a different order puts each team in the same place.
+  const grouped = startTeams([1, 1, 2, 2]).at
+  const mixed = startTeams([1, 2, 1, 2]).at
+  assert.ok(apart(grouped[0], mixed[0]) < 1.5 && apart(grouped[1], mixed[2]) < 1.5, 'team 1 is where it was')
+  assert.ok(apart(grouped[2], mixed[1]) < 1.5 && apart(grouped[3], mixed[3]) < 1.5, 'and so is team 2')
+})
+
+test('the server keeps each player\'s team on their character and in the snapshot, and a player with none is alone', () => {
+  const { game, ids } = startTeams([2, 2, 5])
+  assert.deepEqual(ids.map((id) => game.simulator.characters.get(id)?.team), [2, 2, 5])
+  assert.deepEqual(game.snapshot().characters.map((character) => character.team), [2, 2, 5])
+
+  // With no team given, each player is on a team of their own, so everyone is an enemy.
+  const alone = new ServerGameState()
+  startGame(alone, [{ id: 'player-1', name: 'One' }, { id: 'player-2', name: 'Two' }], brawler.id)
+  const teams = [1, 2].map((id) => alone.simulator.characters.get(id)?.team)
+  assert.equal(new Set(teams).size, 2)
+})
+
+test('a full lobby picks, loads and starts together, with every character in its own spot', () => {
+  const game = new ServerGameState()
+  const players = Array.from({ length: GAME_MAX_PLAYERS }, (_, index) => ({ id: `player-${index + 1}`, name: `P${index + 1}` }))
+  startGame(game, players, brawler.id)
+
+  const characterIds = players.map((player) => game.getCharacterId(player.id))
+  assert.equal(new Set(characterIds).size, GAME_MAX_PLAYERS, 'each player has a character of their own')
+  for (const player of players.slice(0, -1)) {
+    assert.equal(game.markReady(player.id), true)
+    assert.equal(game.startIfReady(), undefined, 'the game waits for the last player')
+  }
+  assert.equal(game.markReady(players[players.length - 1].id), true)
+  const snapshot = game.startIfReady()
+
+  assert.equal(game.status, 'running')
+  assert.equal(snapshot?.characters.length, GAME_MAX_PLAYERS)
+  const spots = new Set(snapshot?.characters.map(({ initialPosition }) => `${initialPosition.x},${initialPosition.y}`))
+  assert.equal(spots.size, GAME_MAX_PLAYERS, 'nobody starts on top of anybody')
 })
 
 test('server announces a death once, only after the lethal tick is committed', () => {
@@ -121,6 +208,23 @@ test('server announces a death once, only after the lethal tick is committed', (
     respawnTick: at + GAME_DEATH_LEAD_TICKS + GAME_RESPAWN_TICKS,
   })
   assert.equal(game.simulator.at(death.tick).get(targetId)?.isDead(), true)
+})
+
+test('the server accepts the recast of an ability the champion has, and still refuses ones it does not', () => {
+  const game = new ServerGameState()
+  startGame(game, [{ id: 'player-1', name: 'Player 1' }, { id: 'player-2', name: 'Player 2' }], trinketmaster.id)
+  const characterId = game.getCharacterId('player-1')
+  assert.ok(characterId)
+  const origin = game.simulator.at(0).get(characterId)?.getPosition()
+  assert.ok(origin)
+  const cast = (abilityId: string, seq: number) => game.acceptOrder('player-1', {
+    id: `player-1:${seq}`, seq, tick: seq, type: 'cast', abilityId, target: { mode: 'none' }, origin,
+  }).ack
+
+  // The recall is on no key, but it is the trinketmaster's.
+  assert.equal(cast('t-recall', 1).status, 'accepted')
+  const refused = cast('t-meteor', 2)
+  assert.deepEqual([refused.status, refused.reason], ['rejected', 'unknown_ability'])
 })
 
 test('champion select starts the game with each player\'s locked pick', () => {

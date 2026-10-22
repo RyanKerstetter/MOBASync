@@ -5,6 +5,8 @@ import {
   GameSnapshotSchema,
   GAME_ARENA_HEIGHT,
   GAME_ARENA_WIDTH,
+  GAME_COLLISION_STIFFNESS,
+  GAME_MAX_PLAYERS,
   GAME_TPS,
   Simulator,
   type ChampionDef,
@@ -31,7 +33,9 @@ function assertPositionClose(
 function createSimulator(orders: CharacterOrder[]): Simulator {
   const simulator = new Simulator()
   simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, brawler)
-  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 140, y: 100 }, brawler)
+  // Beside the line player 1 walks along (y = 100), not on it: characters are solid, so one in the
+  // way would stop the walker and push the tests' free-movement arithmetic off.
+  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 140, y: 160 }, brawler)
   for (const order of orders) simulator.addOrder(1, order)
   return simulator
 }
@@ -55,6 +59,204 @@ test('orders resolve identically regardless of arrival order', () => {
   )
 })
 
+test('a full lobby of eight fighting at once resolves identically in any arrival order', () => {
+  const ids = Array.from({ length: GAME_MAX_PLAYERS }, (_, index) => index + 1)
+  // A ring close enough that everyone reaches everyone; each attacks the next, then the previous.
+  const build = (arrival: number[]): Simulator => {
+    const simulator = new Simulator()
+    for (const id of ids) {
+      const angle = id / ids.length * Math.PI * 2
+      simulator.addPlayer(id, `player-${id}`, `Player ${id}`, {
+        x: 400 + Math.cos(angle) * 60,
+        y: 300 + Math.sin(angle) * 60,
+      }, brawler)
+    }
+    for (const id of arrival) {
+      const next = id % ids.length + 1
+      const previous = (id + ids.length - 2) % ids.length + 1
+      simulator.addOrder(id, { id: `p${id}:1`, seq: 1, tick: 1, type: 'attack', targetId: next })
+      // One full cooldown later, so the second attack is valid.
+      simulator.addOrder(id, { id: `p${id}:2`, seq: 2, tick: 1 + GAME_TPS, type: 'attack', targetId: previous })
+    }
+    return simulator
+  }
+  const record = (simulator: Simulator, tick: number): string => {
+    const frame = simulator.at(tick)
+    return JSON.stringify(ids.map((id) => [frame.get(id)?.getHealthState(), frame.get(id)?.getCooldown()]))
+  }
+  const forward = build(ids)
+  const reversed = build([...ids].reverse())
+
+  const hurt = (hits: number): number => brawler.maxHp - hits * brawler.attackDamage
+  for (const [tick, hits] of [[1, 1], [GAME_TPS, 1], [1 + GAME_TPS, 2]] as const) {
+    assert.equal(record(reversed, tick), record(forward, tick), `tick ${tick}`)
+    ids.forEach((id) => assert.equal(forward.at(tick).get(id)?.getHealth(), hurt(hits), `player ${id} on tick ${tick}`))
+  }
+})
+
+// Characters are solid. Brawlers are 18 across (radius), so two touch at 36 apart.
+
+const REACH = brawler.radius * 2
+const SPRING = GAME_COLLISION_STIFFNESS
+
+function createPair(first: [number, number], second: [number, number]): Simulator {
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', { x: first[0], y: first[1] }, brawler)
+  simulator.addPlayer(2, 'player-2', 'Player 2', { x: second[0], y: second[1] }, brawler)
+  return simulator
+}
+
+function gapAt(simulator: Simulator, tick: number): number {
+  const frame = simulator.at(tick)
+  const first = frame.get(1)?.getPosition()
+  const second = frame.get(2)?.getPosition()
+  assert.ok(first && second)
+  return Math.hypot(second.x - first.x, second.y - first.y)
+}
+
+test('overlapping characters are pushed apart like a spring and settle just touching', () => {
+  // 20 apart, so 16 deep. Each tick the overlap shrinks by the same share, the pair slides apart
+  // symmetrically about where they met, and they never get pushed farther than touching.
+  const simulator = createPair([500, 300], [520, 300])
+
+  for (let tick = 1; tick <= 5; tick += 1) {
+    const overlap = 16 * (1 - SPRING) ** tick
+    const frame = simulator.at(tick)
+    assertPositionClose(frame.get(1)?.getPosition(), { x: 510 - (REACH - overlap) / 2, y: 300 })
+    assertPositionClose(frame.get(2)?.getPosition(), { x: 510 + (REACH - overlap) / 2, y: 300 })
+  }
+  for (let tick = 6; tick <= 60; tick += 1) assert.ok(gapAt(simulator, tick) <= REACH + 1e-9, `tick ${tick}`)
+  assert.ok(Math.abs(gapAt(simulator, 60) - REACH) < 1e-9, 'and they come to rest touching')
+})
+
+test('the push runs along the line between the two bodies, equally on each', () => {
+  const simulator = createPair([500, 300], [510, 310])
+  const before = [simulator.at(0).get(1)?.getPosition(), simulator.at(0).get(2)?.getPosition()]
+  const after = [simulator.at(1).get(1)?.getPosition(), simulator.at(1).get(2)?.getPosition()]
+  assert.ok(before[0] && before[1] && after[0] && after[1])
+
+  const moved = after.map((position, index) => ({
+    x: position!.x - before[index]!.x,
+    y: position!.y - before[index]!.y,
+  }))
+  assert.ok(moved[0].x < 0 && moved[0].y < 0, 'the first is pushed away from the second')
+  assert.ok(Math.abs(moved[0].x - moved[0].y) < 1e-9, 'straight along the diagonal between them')
+  assert.ok(Math.abs(moved[0].x + moved[1].x) < 1e-9 && Math.abs(moved[0].y + moved[1].y) < 1e-9, 'and equally')
+})
+
+test('two characters on exactly the same spot are separated, the lower ID toward the left', () => {
+  const simulator = createPair([800, 300], [800, 300])
+
+  const frame = simulator.at(1)
+  assertPositionClose(frame.get(1)?.getPosition(), { x: 800 - REACH * SPRING / 2, y: 300 })
+  assertPositionClose(frame.get(2)?.getPosition(), { x: 800 + REACH * SPRING / 2, y: 300 })
+  assert.ok(Math.abs(gapAt(simulator, 60) - REACH) < 1e-9)
+})
+
+test('a walker is stopped by a character in its way and carries it along, never passing through', () => {
+  const simulator = createPair([100, 300], [300, 300])
+  simulator.addOrder(1, { id: 'move-1', seq: 1, tick: 1, type: 'move', target: { x: 700, y: 300 } })
+
+  // The walker keeps pressing, so it sinks in a little, but never more than one of its own steps.
+  for (let tick = 1; tick <= 200; tick += 1) {
+    assert.ok(gapAt(simulator, tick) > REACH - SPEED / GAME_TPS, `tick ${tick}`)
+    const frame = simulator.at(tick)
+    assert.ok((frame.get(1)?.getPosition().x ?? 0) < (frame.get(2)?.getPosition().x ?? 0), 'it never gets past')
+  }
+  const end = simulator.at(200)
+  assert.ok((end.get(2)?.getPosition().x ?? 0) > 400, 'the one in the way was shoved ahead of it')
+  assert.equal(end.get(2)?.getPosition().y, 300)
+  assert.ok((end.get(1)?.getPosition().x ?? 700) < 700, 'and the walker has not got through')
+})
+
+test('a walker aimed a little off-centre slides around a character in its way and arrives', () => {
+  const simulator = createPair([100, 300], [300, 300])
+  simulator.addOrder(1, { id: 'move-1', seq: 1, tick: 1, type: 'move', target: { x: 700, y: 320 } })
+
+  for (let tick = 1; tick <= 400; tick += 1) {
+    assert.ok(gapAt(simulator, tick) > REACH - SPEED / GAME_TPS, `tick ${tick}`)
+  }
+  assert.deepEqual(simulator.at(400).get(1)?.getPosition(), { x: 700, y: 320 })
+  assert.equal(simulator.at(400).get(1)?.getMoveTarget(), undefined, 'it finished the walk')
+})
+
+test('the edge of the map holds a character that is pushed against it', () => {
+  const radius = brawler.radius
+  const simulator = createPair([radius, 300], [radius + 12, 300])
+
+  const end = simulator.at(60)
+  assert.equal(end.get(1)?.getPosition().x, radius, 'the wall is not pushed through')
+  assert.ok(Math.abs((end.get(2)?.getPosition().x ?? 0) - (radius + REACH)) < 1e-6, 'so the other takes all of the room')
+})
+
+test('a dead character is a ghost others walk through, and a respawn on top of someone is pushed off', () => {
+  const simulator = createPair([100, 300], [400, 300])
+  simulator.addOrder(1, { id: 'move-1', seq: 1, tick: 1, type: 'move', target: { x: 400, y: 300 } })
+  simulator.addDeath(2, { tick: 5, respawnTick: 100 })
+
+  // The walker goes straight through the body and stops exactly on the spot it died on.
+  assert.equal(simulator.at(90).get(2)?.isDead(), true)
+  assert.deepEqual(simulator.at(90).get(1)?.getPosition(), { x: 400, y: 300 })
+  assert.deepEqual(simulator.at(99).get(1)?.getPosition(), { x: 400, y: 300 })
+  // It respawns exactly where the walker is standing; the pair slide apart from there.
+  const respawned = simulator.at(100)
+  assert.equal(respawned.get(2)?.isDead(), false)
+  assertPositionClose(respawned.get(1)?.getPosition(), { x: 400 - REACH * SPRING / 2, y: 300 })
+  assertPositionClose(respawned.get(2)?.getPosition(), { x: 400 + REACH * SPRING / 2, y: 300 })
+  assert.ok(Math.abs(gapAt(simulator, 140) - REACH) < 1e-9)
+})
+
+test('a crowd squeezing together resolves the same in any arrival order and after a checkpoint restore', () => {
+  const ids = Array.from({ length: GAME_MAX_PLAYERS }, (_, index) => index + 1)
+  // Eight characters ringed around a point, all sent to the middle of it.
+  const build = (arrival: number[]): Simulator => {
+    const simulator = new Simulator()
+    for (const id of ids) {
+      const angle = id / ids.length * Math.PI * 2
+      simulator.addPlayer(id, `player-${id}`, `Player ${id}`, {
+        x: 600 + Math.cos(angle) * 150,
+        y: 400 + Math.sin(angle) * 150,
+      }, brawler)
+    }
+    for (const id of arrival) {
+      simulator.addOrder(id, { id: `p${id}:1`, seq: 1, tick: 1, type: 'move', target: { x: 600, y: 400 } })
+    }
+    return simulator
+  }
+  const record = (simulator: Simulator, from: number, to: number): Map<number, string> => {
+    const frames = new Map<number, string>()
+    for (let tick = from; tick <= to; tick += 1) {
+      const frame = simulator.at(tick)
+      frames.set(tick, JSON.stringify(ids.map((id) => frame.get(id)?.getPosition())))
+    }
+    return frames
+  }
+  const expected = record(build(ids), 1, 200)
+
+  for (const [tick, frame] of record(build([...ids].reverse()), 1, 200)) {
+    assert.equal(frame, expected.get(tick), `arrival order, tick ${tick}`)
+  }
+  const original = build(ids)
+  original.advanceTo(100)
+  original.setCommitTick(90)
+  const restored = new Simulator()
+  restored.replaceFromSnapshot(original.snapshot())
+  for (const [tick, frame] of record(restored, 91, 200)) {
+    assert.equal(frame, expected.get(tick), `restored, tick ${tick}`)
+  }
+
+  // Squeezed by everyone at once they sink into each other, but only part of the way.
+  const last = original.at(200)
+  for (const first of ids) {
+    for (const second of ids.filter((id) => id > first)) {
+      const a = last.get(first)?.getPosition()
+      const b = last.get(second)?.getPosition()
+      assert.ok(a && b)
+      assert.ok(Math.hypot(a.x - b.x, a.y - b.y) > REACH / 2, `${first} and ${second} are not on top of each other`)
+    }
+  }
+})
+
 test('an attack stops movement at its derived position', () => {
   const simulator = createSimulator([
     { id: 'move-1', seq: 1, tick: 1, type: 'move', target: { x: 500, y: 100 } },
@@ -70,35 +272,117 @@ test('an attack stops movement at its derived position', () => {
   assert.deepEqual(simulator.at(20).get(1)?.getPosition(), attackFrame.get(1)?.getPosition())
 })
 
-test('an out-of-range attack does not stop movement or start cooldown', () => {
+test('an attack on a target out of reach walks up to it and swings as soon as it is in reach', () => {
   const simulator = new Simulator()
   simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, brawler)
-  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 400, y: 100 }, brawler)
-  simulator.addOrder(1, {
-    id: 'move-1', seq: 1, tick: 1, type: 'move', target: { x: 700, y: 100 },
-  })
-  simulator.addOrder(1, {
-    id: 'attack-2', seq: 2, tick: 3, type: 'attack', targetId: 2,
-  })
+  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 500, y: 100 }, brawler)
+  simulator.addOrder(1, { id: 'attack-1', seq: 1, tick: 1, type: 'attack', targetId: 2 })
 
-  const state = simulator.at(20).get(1)
-  assertPositionClose(state?.getPosition(), { x: 100 + SPEED * 19 / 60, y: 100 })
-  assert.equal(state?.getNextAttackTick(), 0)
-  assert.equal(simulator.at(20).get(2)?.getHealth(), 1000)
+  // 400 apart and a reach of 150: 250 px to walk at 3.67 a tick is 69 steps, so the swing is on
+  // tick 70, and an attack with no windup lands in the same tick.
+  const steps = Math.ceil((400 - brawler.attackRange) / (SPEED / GAME_TPS))
+  const swing = 1 + steps
+  assert.equal(simulator.at(swing - 1).get(2)?.getHealth(), 1000, 'not in reach yet')
+  assert.ok((simulator.at(swing - 1).get(1)?.getPosition().x ?? 0) > 100, 'but it is on its way')
+  assert.equal(simulator.at(swing - 1).get(1)?.getAttackTarget(), 2)
+  assert.equal(simulator.at(swing).get(2)?.getHealth(), 900)
+  // It stops where it is in reach, instead of walking on to the target.
+  const stoodAt = simulator.at(swing).get(1)?.getPosition()
+  assert.deepEqual(simulator.at(swing + 30).get(1)?.getPosition(), stoodAt)
+  assert.ok(Math.hypot(500 - (stoodAt?.x ?? 0), 0) <= brawler.attackRange)
 })
 
-test('an invalid cooldown attack does not stop a later movement order', () => {
+test('an attack goes on swinging, each time its cooldown is up, until the character is told to do something else', () => {
   const simulator = createSimulator([
     { id: 'attack-1', seq: 1, tick: 1, type: 'attack', targetId: 2 },
-    { id: 'move-2', seq: 2, tick: 2, type: 'move', target: { x: 700, y: 100 } },
-    { id: 'attack-3', seq: 3, tick: 2, type: 'attack', targetId: 2 },
+    { id: 'move-2', seq: 2, tick: 150, type: 'move', target: { x: 100, y: 100 } },
+  ])
+
+  // 100 a swing every 60 ticks from tick 1, with no further orders.
+  assert.equal(simulator.at(1).get(2)?.getHealth(), 900)
+  assert.equal(simulator.at(60).get(2)?.getHealth(), 900)
+  assert.equal(simulator.at(61).get(2)?.getHealth(), 800)
+  assert.equal(simulator.at(121).get(2)?.getHealth(), 700)
+  assert.equal(simulator.at(149).get(1)?.getAttackTarget(), 2)
+  // A move order ends it, and nothing swings again.
+  assert.equal(simulator.at(151).get(1)?.getAttackTarget(), undefined)
+  assert.equal(simulator.at(400).get(2)?.getHealth(), 700)
+})
+
+test('an attacker follows a target that walks away from it, and keeps swinging at the speed of its attack', () => {
+  // The target runs off along the line at 3 px a tick; the attacker is quicker, at 5.
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 300 }, new Champion({ ...championDef(brawler), moveSpeed: 300 }))
+  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 300, y: 300 }, new Champion({ ...championDef(brawler), moveSpeed: 180 }))
+  simulator.addOrder(1, { id: 'attack-1', seq: 1, tick: 1, type: 'attack', targetId: 2 })
+  simulator.addOrder(2, { id: 'run-1', seq: 1, tick: 1, type: 'move', target: { x: 2000, y: 300 } })
+
+  const hits: number[] = []
+  let previous = 1000
+  for (let tick = 1; tick <= 400; tick += 1) {
+    const health = simulator.at(tick).get(2)?.getHealth() ?? 0
+    if (health < previous) hits.push(tick)
+    previous = health
+  }
+  assert.ok(hits.length >= 5, `it caught it and kept hitting it: ${hits}`)
+  // Each swing comes as soon as the last one's cooldown is up and the target is in reach, which
+  // is a tick or two late at most for a target that never stops running.
+  hits.slice(1).forEach((tick, index) => {
+    const gap = tick - hits[index]
+    assert.ok(gap >= 60 && gap <= 64, `swings ${hits[index]} and ${tick} are ${gap} apart`)
+  })
+  assert.ok((simulator.at(400).get(1)?.getPosition().x ?? 0) > 800, 'it followed the target a long way')
+})
+
+test('a new attack order changes the target, and an order that cannot be carried out changes nothing', () => {
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, brawler, 1)
+  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 150, y: 100 }, brawler, 2)
+  simulator.addPlayer(3, 'player-3', 'Player 3', { x: 100, y: 160 }, brawler, 3)
+  simulator.addPlayer(4, 'player-4', 'Player 4', { x: 40, y: 100 }, brawler, 1)
+  simulator.addOrder(1, { id: 'attack-1', seq: 1, tick: 1, type: 'attack', targetId: 2 })
+  simulator.addOrder(1, { id: 'attack-2', seq: 2, tick: 70, type: 'attack', targetId: 3 })
+  // A teammate, a character that does not exist, and the attacker itself cannot be attacked.
+  simulator.addOrder(1, { id: 'attack-3', seq: 3, tick: 80, type: 'attack', targetId: 4 })
+  simulator.addOrder(1, { id: 'attack-4', seq: 4, tick: 81, type: 'attack', targetId: 99 })
+  simulator.addOrder(1, { id: 'attack-5', seq: 5, tick: 82, type: 'attack', targetId: 1 })
+
+  assert.equal(simulator.at(1).get(2)?.getHealth(), 900)
+  assert.equal(simulator.at(69).get(1)?.getAttackTarget(), 2)
+  assert.equal(simulator.at(70).get(1)?.getAttackTarget(), 3, 'the new order took over')
+  // The orders for what it cannot attack, on ticks 80 to 82, left the new target alone.
+  for (const tick of [81, 82, 83]) assert.equal(simulator.at(tick).get(1)?.getAttackTarget(), 3, `tick ${tick}`)
+  // It swung at the first target on tick 61, so its attack is not ready again until tick 121.
+  assert.equal(simulator.at(120).get(3)?.getHealth(), 1000)
+  assert.equal(simulator.at(121).get(3)?.getHealth(), 900, 'and then it swung at the new target')
+  assert.equal(simulator.at(121).get(2)?.getHealth(), 800, 'not at the old one again')
+  assert.equal(simulator.at(121).get(4)?.getHealth(), 1000, 'the teammate was left alone')
+})
+
+test('an attack order for an unreachable target does not interrupt a walk', () => {
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, brawler, 1)
+  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 150, y: 200 }, brawler, 1)
+  simulator.addOrder(1, { id: 'move-1', seq: 1, tick: 1, type: 'move', target: { x: 700, y: 100 } })
+  simulator.addOrder(1, { id: 'attack-2', seq: 2, tick: 3, type: 'attack', targetId: 2 })
+
+  // The target is a teammate, so the order does nothing and the walk goes on.
+  assertPositionClose(simulator.at(20).get(1)?.getPosition(), { x: 100 + SPEED * 19 / 60, y: 100 })
+  assert.equal(simulator.at(20).get(1)?.getAttackTarget(), undefined)
+})
+
+test('an attack ordered while the last one is still on cooldown waits for it instead of walking off', () => {
+  const simulator = createSimulator([
+    { id: 'attack-1', seq: 1, tick: 1, type: 'attack', targetId: 2 },
+    { id: 'attack-3', seq: 2, tick: 2, type: 'attack', targetId: 2 },
   ])
 
   assert.equal(simulator.at(1).get(1)?.getCooldown().ready, false)
   assert.equal(simulator.at(2).get(1)?.getCooldown().ticksRemaining, 59)
-  const state = simulator.at(20).get(1)
-  assertPositionClose(state?.getPosition(), { x: 100 + SPEED * 18 / 60, y: 100 })
-  assert.equal(state?.getNextAttackTick(), 61)
+  // It stays put and swings the moment it is ready, rather than dropping the second order.
+  assertPositionClose(simulator.at(40).get(1)?.getPosition(), { x: 100, y: 100 })
+  assert.equal(simulator.at(40).get(2)?.getHealth(), 900)
+  assert.equal(simulator.at(61).get(2)?.getHealth(), 800)
 })
 
 test('a late order invalidates and recomputes cached snapshots after its tick', () => {
@@ -209,15 +493,8 @@ function createKillSimulator(): Simulator {
     attackSpeed: GAME_TPS,
   }))
   simulator.addPlayer(2, 'player-2', 'Player 2', { x: 140, y: 100 }, brawler)
-  for (let index = 0; index < 12; index += 1) {
-    simulator.addOrder(1, {
-      id: `attack-${index + 1}`,
-      seq: index + 1,
-      tick: index + 1,
-      type: 'attack',
-      targetId: 2,
-    })
-  }
+  // One order: it attacks every tick (the attack speed is a swing a tick) until the target is dead.
+  simulator.addOrder(1, { id: 'attack-1', seq: 1, tick: 1, type: 'attack', targetId: 2 })
   return simulator
 }
 
@@ -242,7 +519,24 @@ test('a confirmed death stops the character and a later attack on it is rejected
   assert.equal(dead?.getHealth(), 0)
   assert.ok((dead?.getPosition().x ?? 0) > 140, 'it moved until it died')
   assert.deepEqual(simulator.at(30).get(2)?.getPosition(), dead?.getPosition())
-  assert.equal(simulator.at(20).get(1)?.getNextAttackTick(), 13)
+  // It swung every tick up to the one before the death took effect, on tick 13, and then had no one
+  // left to attack: the late order for a dead character changed nothing.
+  assert.equal(simulator.at(20).get(1)?.getNextAttackTick(), 14)
+  assert.equal(simulator.at(20).get(1)?.getAttackTarget(), undefined)
+})
+
+test('an attacker that dies stops going after its target, and does not go back to it when it respawns', () => {
+  const simulator = createSimulator([{ id: 'attack-1', seq: 1, tick: 1, type: 'attack', targetId: 2 }])
+  assert.equal(simulator.addDeath(1, { tick: 20, respawnTick: 80 }), true)
+
+  assert.equal(simulator.at(19).get(1)?.getAttackTarget(), 2)
+  const hurtAtDeath = simulator.at(19).get(2)?.getHealth()
+  assert.ok((hurtAtDeath ?? 1000) < 1000, 'it had been hitting its target')
+  assert.equal(simulator.at(20).get(1)?.getAttackTarget(), undefined)
+  assert.equal(simulator.at(79).get(2)?.getHealth(), hurtAtDeath, 'nothing lands while it is dead')
+  assert.equal(simulator.at(80).get(1)?.isDead(), false)
+  assert.equal(simulator.at(80).get(1)?.getAttackTarget(), undefined)
+  assert.equal(simulator.at(200).get(2)?.getHealth(), hurtAtDeath, 'and it never swings again')
 })
 
 test('a dead character respawns at its start with full health', () => {
@@ -339,4 +633,50 @@ test('the map is far bigger than one screen, and its edge stops a champion at it
   const arrival = Math.ceil(travel / brawler.moveSpeed * GAME_TPS) + 3
   assert.deepEqual(simulator.at(arrival).get(1)?.getPosition(), corner)
   assert.deepEqual(simulator.at(arrival + 120).get(1)?.getPosition(), corner, 'it stays at the edge')
+})
+
+test('by default every character is on a team of its own, so everyone is an enemy of everyone', () => {
+  const simulator = createSimulator([])
+  const teams = [1, 2].map((id) => simulator.characters.get(id)?.team)
+
+  assert.deepEqual(teams, [1, 2])
+  assert.equal(simulator.characters.get(1)?.snapshot().team, 1)
+})
+
+test('teammates are as solid as anyone: the push that keeps characters apart does not care who is on whose side', () => {
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', { x: 500, y: 300 }, brawler, 1)
+  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 510, y: 300 }, brawler, 1)
+
+  const gap = (tick: number): number => {
+    const first = simulator.at(tick).get(1)?.getPosition()
+    const second = simulator.at(tick).get(2)?.getPosition()
+    return Math.hypot((second?.x ?? 0) - (first?.x ?? 0), (second?.y ?? 0) - (first?.y ?? 0))
+  }
+  // 10 apart is 26 deep, and the overlap shrinks by the same share each tick as for anyone.
+  assert.ok(Math.abs(gap(1) - (REACH - (REACH - 10) * (1 - GAME_COLLISION_STIFFNESS))) < 1e-9)
+  assert.ok(Math.abs(gap(60) - REACH) < 1e-9, 'and they settle just touching')
+})
+
+test('teams travel in a snapshot, so a client that joins late knows who is on whose side', () => {
+  const original = new Simulator()
+  original.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, brawler, 3)
+  original.addPlayer(2, 'player-2', 'Player 2', { x: 400, y: 100 }, brawler, 3)
+  original.addPlayer(3, 'player-3', 'Player 3', { x: 700, y: 100 }, brawler, 5)
+  original.advanceTo(10)
+  original.setCommitTick(5)
+  const snapshot = original.snapshot()
+
+  assert.deepEqual(snapshot.characters.map((character) => character.team), [3, 3, 5])
+  assert.equal(GameSnapshotSchema.safeParse(snapshot).success, true)
+  const restored = new Simulator()
+  restored.replaceFromSnapshot(snapshot)
+  assert.deepEqual([1, 2, 3].map((id) => restored.characters.get(id)?.team), [3, 3, 5])
+
+  // A snapshot that leaves a character's team out is not one a client should take.
+  const withoutTeams = {
+    ...snapshot,
+    characters: snapshot.characters.map(({ team: _team, ...character }) => character),
+  }
+  assert.equal(GameSnapshotSchema.safeParse(withoutTeams).success, false)
 })

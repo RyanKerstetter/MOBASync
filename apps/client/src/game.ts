@@ -7,13 +7,13 @@ import {
   GAME_FPS,
   GAME_ORDER_TIMEOUT_MS,
   GAME_PING_INTERVAL_MS,
-  GAME_TPS,
   GameBroadcastOrderSchema,
   GameDeathSchema,
   GameJoinedSchema,
   GameOrderAckSchema,
   GamePongSchema,
   GameSnapshotSchema,
+  getTeam,
   ReliableMessenger,
   lagConfigFromQuery,
   withLag,
@@ -23,9 +23,13 @@ import {
   type LagConfig,
 } from '../../../packages/shared/src/index.ts'
 import { Application, Container, Graphics, Text } from 'pixi.js'
+import { ATTACK_MARKER_STYLE, chooseAttackMarkers, layoutAttackMarker } from './attack-marker.ts'
 import { computeCamera, screenToWorld, type Camera } from './camera.ts'
 import { CastControl, DEFAULT_CAST_MODE, type CastMode } from './cast-control.ts'
 import { layoutHealthBar } from './health-bar.ts'
+import { abilitySlotViews, healthReadout } from './hud.ts'
+import { layoutStackPips } from './stack-pips.ts'
+import { statusLabels } from './status-labels.ts'
 import {
   ClientGameState,
   type CastPreview,
@@ -50,7 +54,7 @@ type GameOptions = {
 
 type Actor = {
   node: Container
-  statusRing: Graphics
+  statusText: Text
   stackPips: Graphics
   label: Text
   healthBar: Graphics
@@ -110,6 +114,28 @@ export async function startGame({
   debugOverlay.textContent = 'Waiting for game diagnostics…'
   container.appendChild(debugOverlay)
 
+  // The bottom of the screen: the exact health with its shield, and a slot for each ability that
+  // fills up as its cooldown runs. Plain elements over the canvas, filled in by `updateHud` below.
+  const hud = document.createElement('div')
+  hud.className = 'game-hud'
+  hud.setAttribute('aria-label', 'Your health and abilities')
+  hud.hidden = true
+  const hudHealth = document.createElement('div')
+  hudHealth.className = 'hud-health'
+  const hudHealthFill = document.createElement('div')
+  hudHealthFill.className = 'hud-health-fill'
+  const hudHealthShield = document.createElement('div')
+  hudHealthShield.className = 'hud-health-shield'
+  const hudHealthText = document.createElement('div')
+  hudHealthText.className = 'hud-health-text'
+  hudHealth.append(hudHealthFill, hudHealthShield, hudHealthText)
+  const hudAbilities = document.createElement('div')
+  hudAbilities.className = 'hud-abilities'
+  hud.append(hudHealth, hudAbilities)
+  container.appendChild(hud)
+  type HudSlot = { root: HTMLElement; fill: HTMLElement; key: HTMLElement; name: HTMLElement; time: HTMLElement }
+  const hudSlots: HudSlot[] = []
+
   const scene = new Container()
   app.stage.addChild(scene)
   // The camera is locked on the champion being controlled, so the scene is moved so that champion
@@ -150,15 +176,18 @@ export async function startGame({
   const castControl = new CastControl(castMode)
   const castIndicator = new Graphics()
   scene.addChild(castIndicator)
+  // A reticle around the enemy a click would attack, and around the one the attack is locked on.
+  const attackMarkers = new Graphics()
+  scene.addChild(attackMarkers)
   const addActor = (character: RenderedCharacter): Actor => {
     const isLocal = character.player?.playerId === sessionId
     const node = new Container()
+    // Filled with the colour of its team. The champion you control has a thick white outline,
+    // since its colour is no longer different from every other player's.
     const shape = new Graphics()
       .circle(0, 0, character.champion.radius)
-      .fill({
-        color: isLocal ? '#79dfb1' : '#81b8ff',
-      })
-      .stroke({ color: '#e8f4ff', width: 3 })
+      .fill({ color: getTeam(character.team).color })
+      .stroke(isLocal ? { color: '#ffffff', width: 4 } : { color: '#0b1220', width: 2, alpha: 0.7 })
     const label = new Text({
       text: character.player?.name ?? '',
       style: { fill: '#e8f4ff', fontSize: 16, fontFamily: 'Arial' },
@@ -166,51 +195,34 @@ export async function startGame({
     label.anchor.set(0.5, 1)
     const healthBar = new Graphics()
     const cooldownBar = new Graphics()
-    const statusRing = new Graphics()
+    // What is affecting the champion, as small words above its name.
+    const statusText = new Text({
+      text: '',
+      style: {
+        fill: '#e8f4ff',
+        fontSize: 11,
+        fontFamily: 'Arial',
+        stroke: { color: '#0b1220', width: 3 },
+      },
+    })
+    statusText.anchor.set(0.5, 1)
     const stackPips = new Graphics()
-    node.addChild(shape, statusRing, stackPips, label, healthBar, cooldownBar)
+    node.addChild(shape, stackPips, label, statusText, healthBar, cooldownBar)
     scene.addChild(node)
-    const actor = { node, statusRing, stackPips, label, healthBar, cooldownBar }
+    const actor = { node, statusText, stackPips, label, healthBar, cooldownBar }
     actors.set(character.id, actor)
     return actor
   }
 
-  // A ring around the body shows crowd control and speed effects. The most disabling one wins:
-  // stun, then root, then slow, then haste.
-  const drawStatusRing = (graphics: Graphics, radius: number, character: RenderedCharacter): void => {
-    graphics.clear()
-    if (character.dead) return
-    const ring = character.stunned
-      ? { color: '#ffffff', width: 3 }
-      : character.rooted
-        ? { color: '#c98f5a', width: 3 }
-        : character.slowed
-          ? { color: '#6db7f2', width: 2 }
-          : character.hasted
-            ? { color: '#e8f26d', width: 2 }
-            : undefined
-    if (!ring) return
-    graphics.circle(0, 0, radius + 5).stroke({ ...ring, alpha: 0.9 })
-  }
-
-  // One pip per stack under the body, laid out in a single row: curse (purple) and gale (pale blue)
-  // sit on enemies; sword (gold) and empowered (cyan) sit on their owner.
-  const stackColors: Record<string, string> = {
-    curse: '#b36df2',
-    sword: '#f2c14e',
-    empowered: '#7fd6ff',
-    gale: '#bfe6ff',
-  }
+  // One pip per stack under the body. `layoutStackPips` decides where each goes and what it looks
+  // like: round pips for the champion's own stacks, diamonds for marks others put on it.
   const drawStackPips = (graphics: Graphics, radius: number, stacks: Record<string, number>): void => {
     graphics.clear()
-    const pips = Object.entries(stackColors).flatMap(([key, color]) =>
-      Array.from({ length: stacks[key] ?? 0 }, () => color))
-    pips.forEach((color, index) => {
-      graphics
-        .circle((index - (pips.length - 1) / 2) * 9, radius + 10, 3.5)
-        .fill({ color })
-        .stroke({ color: '#1c1c28', width: 1 })
-    })
+    for (const pip of layoutStackPips(stacks, radius)) {
+      if (pip.shape === 'circle') graphics.circle(pip.x, pip.y, 3.5)
+      else graphics.poly([pip.x, pip.y - 4.5, pip.x + 4.5, pip.y, pip.x, pip.y + 4.5, pip.x - 4.5, pip.y])
+      graphics.fill({ color: pip.color }).stroke({ color: '#1c1c28', width: 1 })
+    }
   }
 
   const drawBar = (
@@ -282,11 +294,24 @@ export async function startGame({
       if (width) castIndicator.moveTo(from.x, from.y).lineTo(end.x, end.y).stroke({ color, width, alpha: 0.18 })
       castIndicator.moveTo(from.x, from.y).lineTo(end.x, end.y).stroke({ color, width: 2, alpha: 0.7 })
     } else if (target?.mode === 'point') {
+      // A dash is drawn as the way it will go, a line from the caster to the point, as well as the point.
+      if (preview.indicator?.line) {
+        castIndicator.moveTo(from.x, from.y).lineTo(target.point.x, target.point.y).stroke({ color, width: 2, alpha: 0.7 })
+      }
       const radius = preview.indicator?.radius
       castIndicator
         .circle(target.point.x, target.point.y, radius ?? CAST_INDICATOR_MARKER_RADIUS)
         .fill({ color, alpha: radius ? 0.18 : 0 })
         .stroke({ color, width: 2, alpha: 0.8 })
+      // A second circle inside for an ability whose middle does something else: its own outline,
+      // and a second layer of fill that makes the core read darker than the ring around it.
+      const innerRadius = preview.indicator?.innerRadius
+      if (innerRadius) {
+        castIndicator
+          .circle(target.point.x, target.point.y, innerRadius)
+          .fill({ color, alpha: 0.18 })
+          .stroke({ color, width: 2, alpha: 0.8 })
+      }
     } else if (target?.mode === 'unit') {
       const unit = characters.find((character) => character.id === target.unitId)
       // Red when the enemy is past the ability's reach, so the ring tells whether it will cast.
@@ -298,8 +323,28 @@ export async function startGame({
     }
   }
 
+  const drawAttackMarkers = (
+    markers: ReturnType<typeof chooseAttackMarkers>,
+    characters: RenderedCharacter[],
+  ): void => {
+    attackMarkers.clear()
+    for (const marker of markers) {
+      const target = characters.find((character) => character.id === marker.targetId)
+      if (!target || target.dead) continue
+      const shape = layoutAttackMarker(target.champion.radius)
+      const { x, y } = target.position
+      for (const tick of shape.ticks) {
+        attackMarkers.moveTo(x + tick.from.x, y + tick.from.y).lineTo(x + tick.to.x, y + tick.to.y)
+      }
+      attackMarkers.stroke(ATTACK_MARKER_STYLE[marker.kind])
+    }
+  }
+
+  // The controlled champion's health as last drawn, for the HUD.
+  let localHealth: { hp: number; maxHp: number; shield: number } | undefined
   const renderState = (now = performance.now()): { x: number; y: number } | undefined => {
     const characters = gameState.getCharacters(now)
+    localHealth = undefined
     const activeIds = new Set(characters.map((character) => character.id))
     for (const character of characters) {
       const health = {
@@ -339,9 +384,17 @@ export async function startGame({
         maxHp: character.health?.maxHp ?? 0,
         shield: character.totalShield,
       })
-      drawStatusRing(actor.statusRing, radius, character)
+      actor.statusText.text = statusLabels(character).join(' · ')
+      actor.statusText.position.set(0, -radius - 43)
       drawStackPips(actor.stackPips, radius, character.dead ? {} : character.stacks)
       const isLocal = character.id === gameState.getLocalCharacterId()
+      if (isLocal) {
+        localHealth = {
+          hp: character.health?.hp ?? 0,
+          maxHp: character.health?.maxHp ?? 0,
+          shield: character.totalShield,
+        }
+      }
       actor.cooldownBar.visible = isLocal && !character.dead
       if (isLocal && character.dead) {
         attackRangeRing.visible = false
@@ -380,6 +433,18 @@ export async function startGame({
       localPosition,
       characters,
     )
+    // Only an enemy a plain click would attack is marked as hovered: not while an ability is being
+    // aimed (the click casts it), nor when dead or out of the game.
+    const canClick = started && !disconnected && aimed === undefined && !gameState.isLocalDead(now)
+    const hovered = canClick ? gameState.getEnemyNear(pointerInWorld(), now) : undefined
+    drawAttackMarkers(
+      chooseAttackMarkers({
+        hoveredId: hovered?.id,
+        lockedId: gameState.getLocalAttackTarget(now),
+      }),
+      characters,
+    )
+    app.canvas.style.cursor = hovered ? 'crosshair' : ''
     return localPosition
   }
 
@@ -708,6 +773,50 @@ export async function startGame({
     }
   }, GAME_PING_INTERVAL_MS)
 
+  const updateHud = (now: number): void => {
+    hud.hidden = !started
+    if (!started) return
+    hud.classList.toggle('is-dead', gameState.isLocalDead(now))
+    if (localHealth) {
+      const readout = healthReadout(localHealth)
+      hudHealthFill.style.width = `${readout.healthPercent}%`
+      hudHealthShield.style.left = `${readout.healthPercent}%`
+      hudHealthShield.style.width = `${readout.shieldPercent}%`
+      hudHealthText.textContent = readout.shield ? `${readout.health}  ${readout.shield}` : readout.health
+    }
+    const views = abilitySlotViews(
+      gameState.getAbilityCooldowns(now),
+      (slot) => abilityKeys[slot]?.slice(3) ?? String(slot + 1),
+    )
+    while (hudSlots.length < views.length) {
+      const slot: HudSlot = {
+        root: document.createElement('div'),
+        fill: document.createElement('div'),
+        key: document.createElement('span'),
+        name: document.createElement('span'),
+        time: document.createElement('span'),
+      }
+      slot.root.className = 'hud-slot'
+      slot.fill.className = 'hud-slot-fill'
+      slot.key.className = 'hud-slot-key'
+      slot.name.className = 'hud-slot-name'
+      slot.time.className = 'hud-slot-time'
+      slot.root.append(slot.fill, slot.key, slot.name, slot.time)
+      hudAbilities.append(slot.root)
+      hudSlots.push(slot)
+    }
+    hudSlots.forEach((slot, index) => {
+      const view = views[index]
+      slot.root.hidden = view === undefined
+      if (!view) return
+      slot.root.classList.toggle('is-ready', view.ready)
+      slot.fill.style.height = `${view.filled * 100}%`
+      slot.key.textContent = view.key
+      slot.name.textContent = view.abilityId
+      slot.time.textContent = view.secondsLeft
+    })
+  }
+
   let debugUpdateElapsedMs = 0
   let debugText = ''
   let fpsFrameCount = 0
@@ -734,16 +843,13 @@ export async function startGame({
         `Pending orders: ${debugInfo.pendingOrderCount}${debugInfo.oldestPendingOrderAgeMs === undefined ? '' : ` (oldest ${debugInfo.oldestPendingOrderAgeMs.toFixed(0)} ms)`}`,
         `Local position: ${position ? `${position.x.toFixed(1)}, ${position.y.toFixed(1)}` : 'unavailable'}`,
       ].join('\n')
+      debugOverlay.textContent = debugText
     }
     const now = performance.now()
-    // Cooldowns refresh every frame so they count down smoothly.
-    debugOverlay.textContent = [
-      debugText,
-      ...gameState.getAbilityCooldowns(now).map(({ slot, abilityId, ticksRemaining }) =>
-        `${abilityKeys[slot]?.slice(3) ?? slot + 1} ${abilityId}: ${ticksRemaining === 0 ? 'ready' : `${(ticksRemaining / GAME_TPS).toFixed(2)} s`}`),
-    ].join('\n')
     // The camera follows the position the champion was just drawn at, so the two never drift apart.
     updateCamera(renderState(now) ?? cameraCenter)
+    // The HUD reads what that frame drew, and the cooldowns refresh every frame so they fill smoothly.
+    updateHud(now)
     for (let index = floatingDamage.length - 1; index >= 0; index -= 1) {
       const floating = floatingDamage[index]
       const elapsed = now - floating.startedAt
@@ -767,6 +873,7 @@ export async function startGame({
     window.removeEventListener('keyup', onKeyUp)
     window.removeEventListener('blur', onBlur)
     debugOverlay.remove()
+    hud.remove()
     reliableMessenger.close()
     channel.close()
     app.destroy(true, { children: true })

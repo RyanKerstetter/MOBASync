@@ -2,15 +2,32 @@ import {
   abilityDefs,
   champions,
   GAME_TPS,
+  getTeam,
   type Champion,
 } from '../../../packages/shared/src/index.ts'
 
-export type SelectPlayer = { id: string; name: string }
+export type SelectPlayer = { id: string; name: string; team?: number }
 export type SelectionEntry = { playerId: string; championId: string; locked: boolean }
 export type ChampionSelectState = {
   localPlayerId: string
   players: SelectPlayer[]
   selections: SelectionEntry[]
+}
+
+export type TeamGroup = { team: number | undefined; players: SelectPlayer[] }
+
+// The players grouped by team, the teams in team order and the players of each in the order given. A
+// player with no team (a lobby from before teams) is put last, in a group of their own.
+export function groupPlayersByTeam(players: readonly SelectPlayer[]): TeamGroup[] {
+  const groups = new Map<number | undefined, SelectPlayer[]>()
+  for (const player of players) {
+    const members = groups.get(player.team)
+    if (members) members.push(player)
+    else groups.set(player.team, [player])
+  }
+  return [...groups]
+    .sort(([left], [right]) => (left ?? Infinity) - (right ?? Infinity))
+    .map(([team, members]) => ({ team, players: members }))
 }
 
 type ChampionSelectOptions = {
@@ -117,7 +134,7 @@ export function createChampionSelect({ root, onPick, onLock, onBack }: ChampionS
     if (champion.passive) {
       const item = document.createElement('li')
       const name = document.createElement('strong')
-      name.textContent = 'P � Passive'
+      name.textContent = 'P · Passive'
       const detail = document.createElement('span')
       detail.textContent = champion.passive
       item.append(name, detail)
@@ -163,14 +180,33 @@ export function createChampionSelect({ root, onPick, onLock, onBack }: ChampionS
       shownDetailsId = champion.id
     }
 
+    // Who is picking what, a group for each team under a heading with its colour and name.
     playerList.replaceChildren()
-    for (const player of state.players) {
-      const entry = entries.get(player.id)
-      const championName = entry ? champions.get(entry.championId)?.name ?? entry.championId : 'Choosing'
-      const item = document.createElement('li')
-      item.textContent = `${player.name}${player.id === state.localPlayerId ? ' (you)' : ''} — ${championName}, ${entry?.locked ? 'locked in' : 'choosing'}`
-      item.classList.toggle('is-locked', Boolean(entry?.locked))
-      playerList.append(item)
+    for (const group of groupPlayersByTeam(state.players)) {
+      const section = document.createElement('li')
+      section.className = 'team-group'
+      const members = document.createElement('ul')
+      if (group.team !== undefined) {
+        const team = getTeam(group.team)
+        const heading = document.createElement('span')
+        heading.className = 'team-heading'
+        const swatch = document.createElement('span')
+        swatch.className = 'team-swatch'
+        swatch.style.background = team.color
+        swatch.setAttribute('aria-hidden', 'true')
+        heading.append(swatch, document.createTextNode(`${team.name} team`))
+        section.append(heading)
+      }
+      for (const player of group.players) {
+        const entry = entries.get(player.id)
+        const championName = entry ? champions.get(entry.championId)?.name ?? entry.championId : 'Choosing'
+        const item = document.createElement('li')
+        item.textContent = `${player.name}${player.id === state.localPlayerId ? ' (you)' : ''} — ${championName}, ${entry?.locked ? 'locked in' : 'choosing'}`
+        item.classList.toggle('is-locked', Boolean(entry?.locked))
+        members.append(item)
+      }
+      section.append(members)
+      playerList.append(section)
     }
 
     lockButton.disabled = localLocked || selectedId === undefined

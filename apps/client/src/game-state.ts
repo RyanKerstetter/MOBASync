@@ -5,18 +5,22 @@ import {
   GAME_SNAPSHOT_HISTORY_TICKS,
   GAME_TPS,
   FINALIZE_LAG,
+  abilityOnKey,
   getAbilityDef,
   getEntityDef,
   entityPosAt,
+  meetsRequirement,
   quantizeDirection,
   Simulator,
   withinCastRange,
   type AbilityDef,
+  type AbilityIndicator,
   type CastOrder,
   type CastTarget,
   type BoxShape,
   type Champion,
   type CharacterOrder,
+  type CharacterTickSnapshot,
   type GameAttackOrder,
   type GameBroadcastOrder,
   type GameDeath,
@@ -41,6 +45,8 @@ export type RenderedCharacter =
   Pick<GameCharacterSnapshot, 'id' | 'player'>
   & {
     champion: Champion
+    // Who it is on: the same team is teammates, and it decides the colour it is drawn in.
+    team: number
     health?: GameHealthStats
     // Active shield statuses.
     totalShield: number
@@ -53,6 +59,11 @@ export type RenderedCharacter =
     slowed: boolean
     rooted: boolean
     stunned: boolean
+    burning: boolean
+    blinded: boolean
+    silenced: boolean
+    // Dodging every auto attack aimed at it.
+    dodging: boolean
     // Range and cooldown include active attack-range and attack-speed bonuses.
     attackRange: number
     attackCooldownTicks: number
@@ -83,7 +94,7 @@ export type CastPreview = {
   targeting: CastTarget['mode']
   range: number
   // The ability's own indicator size, when it has one.
-  indicator?: { radius?: number; width?: number }
+  indicator?: AbilityIndicator
   // Absent while the aim would not cast, such as a unit ability over empty ground.
   target?: CastTarget
   // A unit ability aimed at an enemy beyond its range: the target is shown, but it would not cast.
@@ -297,14 +308,19 @@ export class ClientGameState {
   ): CastAttempt {
     const ability = this.abilityInSlot(slot)
     if (!ability.ok) return ability
-    const { localCharacterId, def } = ability
+    const { localCharacterId } = ability
 
     const tick = this.nextOrderTick(now)
-    const state = this.simulator.at(tick).get(localCharacterId)
+    const frame = this.simulator.at(tick)
+    const state = frame.get(localCharacterId)
     if (!state) return { ok: false, reason: 'Your champion is not available.' }
-    if (!state.getAbilityCooldown(def.id).ready) return { ok: false, reason: `${def.id} is on cooldown.` }
+    // What the key does depends on the game: Q throws the stick, then calls it back.
+    const entityOut = this.entityOut(frame, localCharacterId)
+    const def = abilityOnKey(ability.def, entityOut)
+    const blocker = this.castBlocker(def, state, entityOut)
+    if (blocker) return { ok: false, reason: blocker }
     const origin = state.getPosition()
-    const aimed = this.castTarget(def, origin, aim, now, this.simulator.at(tick))
+    const aimed = this.castTarget(def, origin, aim, now, frame)
     if (!aimed.ok) return { ok: false, reason: aimed.reason }
     const { target } = aimed
 
@@ -326,10 +342,13 @@ export class ClientGameState {
     return { ok: true, order }
   }
 
-  // Whether the ability in a slot has something to aim; a self-cast does not.
-  abilityNeedsAim(slot: number): boolean {
+  // Whether the ability in a slot has something to aim; a self-cast does not. A key that has
+  // turned into its recast is judged as that: calling the stick back needs no aim.
+  abilityNeedsAim(slot: number, now = performance.now()): boolean {
     const ability = this.abilityInSlot(slot)
-    return ability.ok && ability.def.targeting !== 'none'
+    if (!ability.ok) return false
+    const frame = this.getSnapshotAtEstimatedTick(now)
+    return abilityOnKey(ability.def, this.entityOut(frame, ability.localCharacterId)).targeting !== 'none'
   }
 
   // Why the ability in a slot could not be cast now whatever the aim, such as a cooldown. Like the
@@ -337,10 +356,36 @@ export class ClientGameState {
   getCastBlocker(slot: number, now = performance.now()): string | undefined {
     const ability = this.abilityInSlot(slot)
     if (!ability.ok) return ability.reason
-    const state = this.getSnapshotAtEstimatedTick(now).get(ability.localCharacterId)
+    const frame = this.getSnapshotAtEstimatedTick(now)
+    const state = frame.get(ability.localCharacterId)
     if (!state) return 'Your champion is not available.'
-    if (!state.getAbilityCooldown(ability.def.id).ready) return `${ability.def.id} is on cooldown.`
+    const entityOut = this.entityOut(frame, ability.localCharacterId)
+    return this.castBlocker(abilityOnKey(ability.def, entityOut), state, entityOut)
+  }
+
+  // Why this ability cannot be started by this character right now, if it cannot: the things the
+  // simulator would quietly drop the order for.
+  private castBlocker(
+    def: AbilityDef,
+    state: CharacterTickSnapshot,
+    entityOut: (defId: string) => boolean,
+  ): string | undefined {
+    if (!state.getAbilityCooldown(def.id).ready) return `${def.id} is on cooldown.`
+    const statuses = state.getStatuses()
+    if (statuses.some((status) => status.kind === 'stun')) return 'You cannot cast while stunned.'
+    if (statuses.some((status) => status.kind === 'silence')) return 'You cannot cast while silenced.'
+    if (!meetsRequirement(def, entityOut) && def.requires) {
+      return def.requires.out
+        ? `${def.id} needs your ${def.requires.entity} out.`
+        : `${def.id} cannot be cast while your ${def.requires.entity} is out.`
+    }
     return undefined
+  }
+
+  // Whether the local champion has an entity of a definition out in this frame.
+  private entityOut(frame: GameTickSnapshot, localCharacterId: number): (defId: string) => boolean {
+    const mine = frame.getEntities().filter((entity) => entity.ownerId === localCharacterId)
+    return (defId) => mine.some((entity) => entity.defId === defId)
   }
 
   // Resolves the cast as createCastOrder would, without issuing anything. It is called every
@@ -349,8 +394,9 @@ export class ClientGameState {
   getCastPreview(slot: number, aim: Vector2, now = performance.now()): CastPreview | undefined {
     const ability = this.abilityInSlot(slot)
     if (!ability.ok) return undefined
-    const { localCharacterId, def } = ability
+    const { localCharacterId } = ability
     const frame = this.getSnapshotAtEstimatedTick(now)
+    const def = abilityOnKey(ability.def, this.entityOut(frame, localCharacterId))
     const origin = frame.get(localCharacterId)?.getPosition()
     if (!origin) return undefined
     const aimed = this.castTarget(def, origin, aim, now, frame)
@@ -415,15 +461,18 @@ export class ClientGameState {
     if (localCharacterId === undefined || !character) return []
     const snapshot = this.getSnapshotAtEstimatedTick(now)
     const state = snapshot.get(localCharacterId)
-    return character.champion.abilities.flatMap((abilityId, slot) => {
-      const def = getAbilityDef(abilityId)
-      if (!def) return []
+    const entityOut = this.entityOut(snapshot, localCharacterId)
+    return character.champion.abilities.flatMap((keyed, slot) => {
+      const keyedDef = getAbilityDef(keyed)
+      if (!keyedDef) return []
+      // A key that has turned into its recast shows that ability and its cooldown instead.
+      const def = abilityOnKey(keyedDef, entityOut)
       return [{
         slot,
-        abilityId,
+        abilityId: def.id,
         ticksRemaining: this.fractionalTicksRemaining(
           snapshot.tick,
-          state?.getAbilityCooldown(abilityId).ticksRemaining ?? 0,
+          state?.getAbilityCooldown(def.id).ticksRemaining ?? 0,
           now,
         ),
         cooldownTicks: def.cooldownTicks,
@@ -431,9 +480,17 @@ export class ClientGameState {
     })
   }
 
+  // The enemy under a point: the click that attacks, and the aim of an ability aimed at a unit.
+  // Teammates are never one, so clicking on one just walks there.
   getEnemyNear(point: Vector2, now = performance.now()): RenderedCharacter | undefined {
+    const localTeam = this.localCharacterId === undefined
+      ? undefined
+      : this.simulator.characters.get(this.localCharacterId)?.team
     return this.getCharacters(now)
-      .filter((character) => character.id !== this.localCharacterId && character.player && !character.dead)
+      .filter((character) => character.id !== this.localCharacterId
+        && character.player
+        && !character.dead
+        && character.team !== localTeam)
       .map((character) => ({
         character,
         distance: Math.hypot(character.position.x - point.x, character.position.y - point.y),
@@ -450,7 +507,7 @@ export class ClientGameState {
     let closest: RenderedCharacter | undefined
     let closestDistance = local.attackRange
     for (const character of characters) {
-      if (!character.player || character.dead || character.player.playerId === local.player?.playerId) continue
+      if (!character.player || character.dead || character.team === local.team) continue
       const distance = Math.hypot(
         character.position.x - local.position.x,
         character.position.y - local.position.y,
@@ -465,6 +522,13 @@ export class ClientGameState {
 
   getLocalCharacterId(): number | undefined {
     return this.localCharacterId
+  }
+
+  // Who the local champion is going after: set by an attack order, and kept (through walking up to
+  // them, and through every swing) until it moves, casts something with a windup, or the target goes.
+  getLocalAttackTarget(now = performance.now()): number | undefined {
+    if (this.localCharacterId === undefined) return undefined
+    return this.getSnapshotAtEstimatedTick(now).get(this.localCharacterId)?.getAttackTarget()
   }
 
   getLocalAttackRange(now = performance.now()): number | undefined {
@@ -539,6 +603,7 @@ export class ClientGameState {
         id: character.id,
         ...(character.player ? { player: { ...character.player } } : {}),
         champion: character.champion,
+        team: character.team,
         ...(health ? { health } : {}),
         totalShield: state?.getShield() ?? 0,
         stacks: countMarkers(state?.getMarkers() ?? []),
@@ -546,6 +611,10 @@ export class ClientGameState {
         slowed: state?.getStatuses().some((status) => status.kind === 'slow') ?? false,
         rooted: state?.getStatuses().some((status) => status.kind === 'root') ?? false,
         stunned: state?.getStatuses().some((status) => status.kind === 'stun') ?? false,
+        burning: state?.getStatuses().some((status) => status.kind === 'burn') ?? false,
+        blinded: state?.getStatuses().some((status) => status.kind === 'blind') ?? false,
+        silenced: state?.getStatuses().some((status) => status.kind === 'silence') ?? false,
+        dodging: state?.getStatuses().some((status) => status.kind === 'dodge') ?? false,
         attackRange: character.champion.attackRangeWith(state?.getStatuses() ?? []),
         attackCooldownTicks: character.champion.attackCooldownTicksWith(state?.getStatuses() ?? []),
         ...this.getRenderedCharacterView(character.id, now, snapshot),
@@ -564,10 +633,14 @@ export class ClientGameState {
       const def = getEntityDef(entity.defId)
       // The later copies of a volley wait at their origin until their turn.
       if (entity.startTick > Math.floor(renderTick)) return []
+      // A chaser's stored position is where it ended the snapshot's tick. Carry it on along its
+      // heading for the part of a tick the frame is ahead, so it glides instead of stepping.
+      const ahead = def?.homing && entity.position ? Math.max(0, renderTick - snapshot.tick) / GAME_TPS : 0
+      const position = entityPosAt(entity, renderTick)
       return def
         ? [{
           ...entity,
-          position: entityPosAt(entity, renderTick),
+          position: { x: position.x + entity.velocity.x * ahead, y: position.y + entity.velocity.y * ahead },
           radius: def.box ? Math.hypot(def.box.halfLength, def.box.halfWidth) : def.radius,
           visual: def.visual ?? 'bolt',
           // It runs one more tick than its lifetime, which is when its expiry effects fire.

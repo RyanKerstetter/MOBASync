@@ -7,10 +7,15 @@ import {
   attackDamage,
   attackRangeBonus,
   attackSpeedBonus,
+  blind,
+  blink,
+  burn,
+  capCooldown,
   Champion,
   champions,
   damage,
   dash,
+  dodge,
   enemiesInBox,
   enemiesInLine,
   enemiesInRadius,
@@ -22,17 +27,22 @@ import {
   loseHealth,
   mark,
   missingHealth,
+  ownEntity,
   popMarkers,
   reduceCooldown,
   refundCooldown,
+  removeEntities,
   resetAutoTimer,
   resist,
   root,
   self,
+  selfInRadius,
   shield,
+  silence,
   slow,
   spawnEntity,
   stacks,
+  startCooldown,
   stun,
   subject,
   subjectWithin,
@@ -40,8 +50,12 @@ import {
   when,
   type AbilityDef,
   type ChampionDef,
+  type CharacterOrder,
+  type DashDef,
   type EntityDef,
+  type Selector,
   type SimContext,
+  type Vector2,
 } from '../packages/shared/src/index.js'
 
 // The tests own their content. Everything here is a copy of how a kit behaved when it was
@@ -61,6 +75,28 @@ export function defineChampion(def: ChampionDef): Champion {
   const champion = new Champion(def)
   ;(champions as unknown as Map<string, Champion>).set(champion.id, champion)
   return champion
+}
+
+// An attack order keeps a character attacking until it is told to do something else, so a test
+// that wants a set number of autos has to end it. This tells the character to walk to where it is
+// already standing, which ends the attack and nothing else. A move order cancels a windup that is
+// under way, but windups launch before the orders of their tick, so giving it on the tick the last
+// auto launches (the tick it starts plus the champion's windup) lets that auto land and stops the
+// next. An attack with no windup launches as it starts, after that tick's orders, so its stop has
+// to come one tick later.
+export function stopAttacking(
+  simulator: { addOrder(characterId: number, order: CharacterOrder): boolean },
+  characterId: number,
+  tick: number,
+  standingAt: Vector2,
+): void {
+  simulator.addOrder(characterId, {
+    id: `stop:${characterId}:${tick}`,
+    seq: 100_000 + tick,
+    tick,
+    type: 'move',
+    target: { ...standingAt },
+  })
 }
 
 // ---------------------------------------------------------------------------- a plain fighter
@@ -213,6 +249,7 @@ defineAbility({
   backswingTicks: 0,
   cooldownTicks: seconds(8),
   movement: true,
+  indicator: { line: true },
   apply: [dash(600, 120)],
 })
 defineAbility({
@@ -225,13 +262,15 @@ defineAbility({
   apply: [attackSpeedBonus(0.4, seconds(4)), attackRangeBonus(120, seconds(4))],
 })
 
+// A trap left for 1 s that roots each enemy once, for 1.5 s, as its body touches it.
 const snareField: EntityDef = {
   id: 't-snare-field',
   speed: 0,
-  radius: 120,
-  lifetimeTicks: seconds(4),
+  radius: 70,
+  lifetimeTicks: seconds(1),
+  pierce: true,
   visual: 'field',
-  onTick: [slow(0.4, 2, enemiesInRadius(120))],
+  onHit: [root(seconds(1.5))],
 }
 defineAbility({
   id: 't-snare',
@@ -315,22 +354,28 @@ defineAbility({
     spawnEntity(lightBurst),
   ],
 })
+// Applied through an auto: with no windup, it resets the auto timer and readies the next auto,
+// which (within 5 s) stuns the target for 1 s if it was hit with three sword stacks, or roots it
+// for 1.5 s otherwise, and spends the stacks.
 defineAbility({
   id: 't-shackle',
-  targeting: 'unit',
-  range: 170,
-  windUpTicks: 3,
-  backswingTicks: 3,
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 0,
+  backswingTicks: 0,
   cooldownTicks: seconds(10),
-  apply: [
-    when<SimContext>(
-      (sim, src) => swordStacks(sim, src) >= 3,
-      [stun(seconds(1), targetUnit())],
-      [root(seconds(1.5), targetUnit())],
-    ),
-    popMarkers('sword', self()),
-    resetAutoTimer(),
-  ],
+  empowerAttack: {
+    ticks: seconds(5),
+    effects: [
+      when<SimContext>(
+        (sim, src) => swordStacks(sim, src) >= 3,
+        [stun(seconds(1))],
+        [root(seconds(1.5))],
+      ),
+      popMarkers('sword', self()),
+    ],
+  },
+  apply: [resetAutoTimer()],
 })
 
 export const swordsman = defineChampion({
@@ -600,6 +645,388 @@ export const soldier = defineChampion({
       [damage(attackDamage())],
     ),
   ],
+})
+
+// ---------------------------------------------------------------------------- grenadier kit
+// A grenade lobbed to a point that explodes there, throwing everything within 100 straight away
+// from the middle (enemies are hurt for 100, the thrower is thrown too if it is inside) and
+// handing back half its cooldown if it caught an enemy; a lob that leaves a fire that slows and
+// burns; a flashbang lobbed to a point whose flash stuns whoever is within 50 of the middle and
+// blinds whoever is within 120 but not 50; and a passive that pays out move speed that fades on
+// the third auto at the same enemy. Its autos are instant, to keep the timing plain. Every lob
+// flies 10 px a tick.
+
+const grenadeBurst: EntityDef = {
+  id: 't-grenade-burst',
+  speed: 0,
+  radius: 100,
+  lifetimeTicks: 8,
+  visual: 'field',
+}
+defineAbility({
+  id: 't-grenade',
+  targeting: 'point',
+  range: 400,
+  windUpTicks: 4,
+  backswingTicks: 4,
+  cooldownTicks: seconds(10),
+  apply: [
+    spawnEntity({
+      id: 't-grenade-shot',
+      speed: 600,
+      radius: 8,
+      landAtAim: true,
+      onExpire: [
+        damage(100, enemiesInRadius(100)),
+        knockback(150, 600, enemiesInRadius(100)),
+        knockback(100, 600, selfInRadius(100)),
+        when<SimContext>(
+          (sim, src) => enemiesInRadius(100)(sim, src).length > 0,
+          [refundCooldown('t-grenade', 0.5)],
+        ),
+        spawnEntity(grenadeBurst),
+      ],
+    }),
+  ],
+})
+
+// 100 across, 4 s, slowing 30% and burning 40 a second for 3 s after the last tick inside it.
+const molotovFire: EntityDef = {
+  id: 't-molotov-fire',
+  speed: 0,
+  radius: 100,
+  lifetimeTicks: seconds(4),
+  visual: 'field',
+  onTick: [
+    slow(0.3, 2, enemiesInRadius(100)),
+    burn(40, seconds(3), enemiesInRadius(100)),
+  ],
+}
+defineAbility({
+  id: 't-molotov',
+  targeting: 'point',
+  range: 400,
+  windUpTicks: 4,
+  backswingTicks: 4,
+  cooldownTicks: seconds(12),
+  apply: [
+    spawnEntity({
+      id: 't-molotov-shot',
+      speed: 600,
+      radius: 6,
+      landAtAim: true,
+      onExpire: [spawnEntity(molotovFire)],
+    }),
+  ],
+})
+
+const flashBurst: EntityDef = {
+  id: 't-flash-burst',
+  speed: 0,
+  radius: 120,
+  lifetimeTicks: 8,
+  visual: 'field',
+}
+// The core of the flash stuns for a second; the ring around it blinds for 1.5 s instead.
+const enemiesInFlashRing: Selector = (sim, src) => {
+  const core = new Set(enemiesInRadius(50)(sim, src))
+  return enemiesInRadius(120)(sim, src).filter((unitId) => !core.has(unitId))
+}
+defineAbility({
+  id: 't-flashbang',
+  targeting: 'point',
+  range: 400,
+  // Drawn as two circles: the whole flash and the core inside it.
+  indicator: { radius: 120, innerRadius: 50 },
+  windUpTicks: 4,
+  backswingTicks: 3,
+  cooldownTicks: seconds(14),
+  apply: [
+    spawnEntity({
+      id: 't-flashbang-shot',
+      speed: 600,
+      radius: 6,
+      landAtAim: true,
+      onExpire: [
+        stun(60, enemiesInRadius(50)),
+        blind(90, enemiesInFlashRing),
+        spawnEntity(flashBurst),
+      ],
+    }),
+  ],
+})
+
+// Sets a unit alight for two seconds at 60 a second (30 on each pulse), with no windup.
+defineAbility({
+  id: 't-ignite',
+  targeting: 'unit',
+  range: 300,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: seconds(10),
+  apply: [burn(60, 120, targetUnit())],
+})
+
+export const grenadier = defineChampion({
+  id: 't-grenadier',
+  name: 'Test Grenadier',
+  maxHp: 800,
+  moveSpeed: 150,
+  radius: 16,
+  attackDamage: 60,
+  attackSpeed: 1,
+  attackRange: 250,
+  attackWindupTicks: 3,
+  abilities: ['t-grenade', 't-molotov', 't-flashbang', 't-ignite'],
+  // Markers on the target count its autos for 5 s; the third pops them for +50% move speed that
+  // fades to nothing over 2 s.
+  onAttackHit: [
+    damage(attackDamage()),
+    when<SimContext>(
+      (sim, src) => stacks('sighted', subject())(sim, src) >= 2,
+      [popMarkers('sighted'), haste(0.5, 120, self(), { fades: true })],
+      [mark('sighted', 300, subject(), { cap: 2 })],
+    ),
+  ],
+})
+
+// ---------------------------------------------------------------------------- trinketmaster kit
+// A stick thrown in a straight line, 300 px, that hurts every enemy it passes through (60 damage)
+// and then lands where its flight ends and stays, with no timer, until its owner walks over it,
+// which caps what is left of the throw's cooldown at 1 s, or calls it back, which does not touch
+// the cooldown at all. The key does the throw while no stick is out and the recall while one is:
+// the recall flies the stick home through enemies (60 damage, 40% slow for 1.5 s) and the stick
+// ends on arrival with nothing refunded. A silence that also resets the auto attack, and a blink to
+// the stick, whose walked-over pickup then happens by itself because the owner is standing on it.
+// The throw and the recall fly 10 px a tick.
+
+const stickEntity: EntityDef = {
+  id: 't-stick',
+  speed: 0,
+  radius: 16,
+  stayWhile: (sim, src) => sim.isAlive(src.ownerId),
+  pickup: [capCooldown('t-stick', 60)],
+}
+// The passive, for every ability hit the trinketmaster lands, the stick either way or the auto that hush
+// readies, but not a plain auto: the first two on the same enemy, each within 5 s of the last, mark it,
+// and the third deals 50 more damage on top of its own, pops the marks, and gives the trinketmaster 30%
+// move speed for 2 s.
+const trinketTrick = [
+  when<SimContext>(
+    (sim, src) => stacks('trick', subject())(sim, src) >= 2,
+    [damage(50), popMarkers('trick'), haste(0.3, seconds(2), self())],
+    [mark('trick', seconds(5), subject(), { cap: 2 })],
+  ),
+]
+const stickRecall: EntityDef = {
+  id: 't-stick-recall',
+  speed: 600,
+  radius: 14,
+  homing: 'owner',
+  pierce: true,
+  onHit: [damage(60), slow(0.4, 90), ...trinketTrick],
+  // It ends on arriving home, and gives nothing back.
+  pickup: [],
+}
+defineAbility({
+  id: 't-stick',
+  targeting: 'direction',
+  range: 300,
+  indicator: { width: 16 },
+  windUpTicks: 4,
+  backswingTicks: 4,
+  cooldownTicks: seconds(8),
+  requires: { entity: 't-stick', out: false },
+  recast: 't-recall',
+  apply: [
+    spawnEntity({
+      id: 't-stick-shot',
+      speed: 600,
+      radius: 8,
+      lifetimeTicks: 30,
+      pierce: true,
+      stopsAtWalls: true,
+      onHit: [damage(60), ...trinketTrick],
+      onExpire: [spawnEntity(stickEntity, { onePerOwner: true })],
+    }),
+  ],
+})
+defineAbility({
+  id: 't-recall',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 2,
+  backswingTicks: 2,
+  cooldownTicks: 30,
+  requires: { entity: 't-stick', out: true },
+  apply: [spawnEntity(stickRecall, { at: ownEntity('t-stick') }), removeEntities('t-stick')],
+})
+// Applied through an auto: with no windup, it resets the auto timer and readies the next auto,
+// which (within 5 s) silences its target for 1.5 s, and counts for the passive.
+defineAbility({
+  id: 't-hush',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: seconds(8),
+  empowerAttack: { ticks: seconds(5), effects: [silence(90), ...trinketTrick] },
+  apply: [resetAutoTimer()],
+})
+defineAbility({
+  id: 't-warp',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 3,
+  backswingTicks: 2,
+  cooldownTicks: seconds(10),
+  requires: { entity: 't-stick', out: true },
+  apply: [blink(ownEntity('t-stick'))],
+})
+
+export const trinketmaster = defineChampion({
+  id: 't-trinketmaster',
+  name: 'Test Trinketmaster',
+  maxHp: 900,
+  moveSpeed: 150,
+  radius: 17,
+  attackDamage: 60,
+  attackSpeed: 1,
+  attackRange: 90,
+  attackWindupTicks: 3,
+  abilities: ['t-stick', 't-hush', 't-warp'],
+})
+
+// ---------------------------------------------------------------------------- ninja kit
+// Q dashes 300 px at 1200 px/s (20 px a tick), through anyone in the way. Each enemy the dash passes
+// through takes 60 damage and a 40% slow for 1.5 s as the ninja's body reaches it. The first one it
+// passes also gives the ninja a shadow stack (at most two, six seconds, refreshed together) and 75% of
+// Q's cooldown back, starts the dash back's 1 s cooldown, and leaves a shadow where the dash was cast
+// from. While the shadow is out, the key dashes back to it instead, from any distance, and does the
+// same for the enemies it passes; if it finishes having passed none, the shadow is lost and Q starts
+// its whole 8 s over, whatever had run down while the shadow was out. A shadow has no timer. Each
+// shadow stack is an enhanced auto: an auto spends one for 60 bonus damage. W is a piercing kunai
+// (60 damage and a 40% slow for 1.5 s), or, if the ninja has a shadow stack, which it spends one of,
+// 110 damage and a 1 s root instead. E is a 40% haste for 1.5 s and a dodge of every auto for 1.2 s.
+
+const shadowEntity: EntityDef = {
+  id: 't-shadow',
+  speed: 0,
+  radius: 14,
+  visual: 'field',
+  color: '#7a5cff',
+  stayWhile: (sim, src) => sim.isAlive(src.ownerId),
+}
+const ninjaDashHit = [damage(60), slow(0.4, seconds(1.5))]
+const ninjaDashConnect = [
+  mark('shadow', seconds(6), self(), { cap: 2 }),
+  refundCooldown('t-shadowstep', 0.75),
+  startCooldown('t-shadowreturn'),
+  spawnEntity(shadowEntity, { onePerOwner: true }),
+]
+const ninjaStepDash: DashDef = { id: 't-shadowstep-dash', onHit: ninjaDashHit, onConnect: ninjaDashConnect }
+const ninjaReturnDash: DashDef = {
+  id: 't-shadowreturn-dash',
+  onHit: ninjaDashHit,
+  onConnect: ninjaDashConnect,
+  onMiss: [removeEntities('t-shadow'), startCooldown('t-shadowstep')],
+}
+defineAbility({
+  id: 't-shadowstep',
+  targeting: 'point',
+  range: 300,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: seconds(8),
+  movement: true,
+  indicator: { line: true },
+  requires: { entity: 't-shadow', out: false },
+  recast: 't-shadowreturn',
+  apply: [dash(1200, 300, self(), { through: true, on: ninjaStepDash })],
+})
+defineAbility({
+  id: 't-shadowreturn',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: seconds(1),
+  movement: true,
+  requires: { entity: 't-shadow', out: true },
+  apply: [dash(1200, Infinity, self(), { toward: ownEntity('t-shadow'), through: true, on: ninjaReturnDash })],
+})
+defineAbility({
+  id: 't-kunai',
+  targeting: 'direction',
+  range: 462,
+  indicator: { width: 20 },
+  windUpTicks: 4,
+  backswingTicks: 3,
+  cooldownTicks: seconds(7),
+  apply: [
+    when<SimContext>(
+      (sim, src) => stacks('shadow', self())(sim, src) > 0,
+      [
+        popMarkers('shadow', self(), { count: 1 }),
+        spawnEntity({
+          id: 't-kunai-enhanced', speed: 840, radius: 10, lifetimeTicks: 33, pierce: true,
+          onHit: [damage(110), root(seconds(1))],
+        }),
+      ],
+      [
+        spawnEntity({
+          id: 't-kunai-shot', speed: 840, radius: 10, lifetimeTicks: 33, pierce: true,
+          onHit: [damage(60), slow(0.4, seconds(1.5))],
+        }),
+      ],
+    ),
+  ],
+})
+defineAbility({
+  id: 't-dodge',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: seconds(12),
+  apply: [haste(0.4, seconds(1.5)), dodge(seconds(1.2))],
+})
+
+export const ninja = defineChampion({
+  id: 't-ninja',
+  name: 'Test Ninja',
+  maxHp: 800,
+  moveSpeed: 160,
+  radius: 16,
+  attackDamage: 50,
+  attackSpeed: 1,
+  attackRange: 90,
+  attackWindupTicks: 4,
+  abilities: ['t-shadowstep', 't-kunai', 't-dodge'],
+  // The auto spends one shadow stack, if there is one, for 60 bonus damage.
+  onAttackHit: [
+    damage(linear(attackDamage(), 60, (sim, src) => Math.min(1, stacks('shadow', self())(sim, src)))),
+    popMarkers('shadow', self(), { count: 1 }),
+  ],
+})
+
+// ---------------------------------------------------------------------------- projectile autos
+// A ranged auto that fires a shot instead of landing at once: it chases its target at 600 px/s
+// (10 px per tick), is 8 px across, and deals the hit when it arrives. A copy without
+// `attackProjectile` hits the same target the moment its windup finishes.
+
+export const gunner = defineChampion({
+  id: 't-gunner',
+  name: 'Test Gunner',
+  maxHp: 1000,
+  moveSpeed: 200,
+  radius: 18,
+  attackDamage: 100,
+  attackSpeed: 1,
+  attackRange: 300,
+  attackWindupTicks: 3,
+  attackProjectile: { speed: 600, radius: 8, color: '#ffffff' },
+  abilities: [],
 })
 
 // Odds and ends for pinning one behaviour at a time.

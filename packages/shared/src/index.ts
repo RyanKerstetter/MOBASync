@@ -127,6 +127,8 @@ export const GameCharacterSchema = z.object({
   deaths: z.array(GameDeathTimingSchema).default([]),
   highestOrderSequence: TickSchema,
   championId: z.string().min(1).max(64),
+  // Who it is on. Characters with the same team are teammates; anyone else is an enemy.
+  team: z.number().int().positive(),
   player: z.object({
     playerId: z.string(),
     name: z.string(),
@@ -143,17 +145,32 @@ export const GameFrameMovementSchema = z.object({
 export const GameFrameDashSchema = z.object({
   target: Vector2Schema,
   speed: z.number().finite().positive(),
+  // A dash that passes through other characters instead of shoving them along.
+  through: z.boolean().optional(),
+  // A dash whose effects happen as it goes: the definition that has them, where it started from, the
+  // cast that made it (which its effects are credited to), and the enemies it has already touched.
+  contact: z.object({
+    defId: z.string().min(1),
+    origin: Vector2Schema,
+    sourceId: z.string().min(1),
+    orderId: z.string().min(1),
+    hitIds: z.array(z.number().int().positive()),
+  }).optional(),
 })
 
 // Statuses are active for frames in [startTick, endTick).
 export const StatusSchema = z.object({
   id: z.string().min(1),
-  kind: z.enum(['slow', 'haste', 'attackspeed', 'attackrange', 'resist', 'root', 'stun', 'shield']),
+  kind: z.enum(['slow', 'haste', 'attackspeed', 'attackrange', 'resist', 'root', 'stun', 'shield', 'burn', 'blind', 'silence', 'dodge']),
   rootId: z.string(),
   ownerId: z.number().int().positive(),
   startTick: TickSchema,
   endTick: TickSchema,
+  // A burn's damage for each pulse; a blind has no amount of its own.
   amount: z.number().finite().nonnegative(),
+  // A haste that dies away: its amount is full when it starts and falls in a straight line to
+  // nothing at endTick, instead of staying the same until it ends.
+  fades: z.boolean().optional(),
 })
 
 // Markers are inert tags that later effects can read, active in [startTick, endTick).
@@ -192,12 +209,22 @@ export const GameFrameActionSchema = z.discriminatedUnion('kind', [
   }),
 ])
 
+// Who a character is going after. An attack order sets it, and it stays until the character is
+// told to do something else or the target is gone: the character walks up to it and attacks it
+// again and again.
+export const GameFrameAttackTargetSchema = z.object({
+  targetId: z.number().int().positive(),
+  // The order that set it, which the attacks it makes are credited to.
+  orderId: z.string().min(1),
+})
+
 export const GameFrameCharacterSchema = z.object({
   characterId: z.number().int().positive(),
   position: Vector2Schema,
   health: GameHealthStatsSchema.optional(),
   nextAttackTick: TickSchema,
   movement: GameFrameMovementSchema.optional(),
+  attackTarget: GameFrameAttackTargetSchema.optional(),
   dash: GameFrameDashSchema.optional(),
   action: GameFrameActionSchema.optional(),
   // Ready tick per ability ID.
@@ -224,6 +251,9 @@ export const GameFrameEntitySchema = z.object({
   // Where an entity that follows its owner is now. Its path is not a straight line, so it cannot
   // be worked out from the origin and velocity; once it has moved it is stored each tick.
   position: Vector2Schema.optional(),
+  // The unit a homing entity is chasing. Like `position`, it is stored because it cannot be worked
+  // out from the origin and velocity.
+  targetId: z.number().int().positive().optional(),
 })
 
 export const GameFrameSchema = z.object({
@@ -260,6 +290,7 @@ export type GameDeath = z.infer<typeof GameDeathSchema>
 export type GameFrame = z.infer<typeof GameFrameSchema>
 export type GameFrameCharacter = z.infer<typeof GameFrameCharacterSchema>
 export type GameFrameMovement = z.infer<typeof GameFrameMovementSchema>
+export type GameFrameAttackTarget = z.infer<typeof GameFrameAttackTargetSchema>
 export type GameFrameDash = z.infer<typeof GameFrameDashSchema>
 export type GameFrameAction = z.infer<typeof GameFrameActionSchema>
 export type SimEntity = z.infer<typeof GameFrameEntitySchema>
@@ -287,12 +318,18 @@ export {
   attackDamage,
   attackRangeBonus,
   attackSpeedBonus,
+  blind,
+  blink,
+  burn,
+  capCooldown,
   castOrigin,
   damage,
   dash,
+  dodge,
   enemiesInBox,
   enemiesInLine,
   enemiesInRadius,
+  getDashDef,
   getEntityDef,
   haste,
   heal,
@@ -302,18 +339,23 @@ export {
   loseHealth,
   mark,
   missingHealth,
+  ownEntity,
   popMarkers,
   reduceCooldown,
   refundCooldown,
+  removeEntities,
   resetAutoTimer,
   resist,
   root,
   runEffects,
   self,
+  selfInRadius,
   shield,
+  silence,
   slow,
   spawnEntity,
   stacks,
+  startCooldown,
   stun,
   subject,
   subjectWithin,
@@ -323,6 +365,7 @@ export {
 export type {
   Amount,
   Anchor,
+  DashDef,
   Effect,
   EffectSource,
   GameEvent,
@@ -332,10 +375,19 @@ export type {
   SimReader,
   SimWriter,
 } from './effects.js'
-export { abilityDefs, getAbilityDef, quantizeDirection, withinCastRange } from './abilities.js'
-export type { AbilityDef } from './abilities.js'
+export {
+  abilityDefs,
+  abilityOnKey,
+  getAbilityDef,
+  meetsRequirement,
+  quantizeDirection,
+  withinCastRange,
+} from './abilities.js'
+export type { AbilityDef, AbilityIndicator } from './abilities.js'
+export { balancedTeam, GAME_TEAMS, getTeam, isTeamId, teamSpawnPositions } from './teams.js'
+export type { TeamDef } from './teams.js'
 export { Champion, champions, DEFAULT_CHAMPION_ID, getChampion } from './champions.js'
-export type { ChampionDef } from './champions.js'
+export type { AttackProjectileDef, ChampionDef } from './champions.js'
 export {
   CharacterTickSnapshot,
   GameTickSnapshot,

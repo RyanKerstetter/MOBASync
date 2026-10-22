@@ -3,19 +3,26 @@ import test from 'node:test'
 import { ClientGameState } from '../apps/client/src/game-state.ts'
 import { ServerGameState } from '../apps/server/src/game-state.ts'
 import {
+  abilityOnKey,
   attackDamage,
+  blind,
   boxTouchesCircle,
   Champion,
   damage,
   enemiesInRadius,
   entityPosAt,
+  GAME_ARENA_WIDTH,
   GAME_TPS,
   GameSnapshotSchema,
   getAbilityDef,
   getChampion,
+  GAME_BURN_PULSE_TICKS,
   getEntityDef,
   knockback,
+  mark,
+  root,
   runEffects,
+  self,
   SimCharacter,
   Simulator,
   spawnEntity,
@@ -29,7 +36,20 @@ import {
   type SimWriter,
   type Vector2,
 } from '../packages/shared/src/index.js'
-import { bigHitter, brawler, cutter, soldier, spouter } from './fixtures.js'
+import {
+  bigHitter,
+  brawler,
+  cursebearer,
+  cutter,
+  defineAbility,
+  grenadier,
+  gunner,
+  ninja,
+  soldier,
+  spouter,
+  stopAttacking,
+  trinketmaster,
+} from './fixtures.js'
 
 const ORIGIN = { x: 100, y: 100 }
 
@@ -220,7 +240,8 @@ test('effects write only through the context they are given', () => {
   const units = new Map([
     [1, new SimCharacter(1, ORIGIN, [], champion, { playerId: 'player-1', name: 'One' })],
     [2, new SimCharacter(2, { x: 130, y: 100 }, [], champion, { playerId: 'player-2', name: 'Two' })],
-    [3, new SimCharacter(3, { x: 110, y: 100 }, [], champion, { playerId: 'player-1', name: 'Ally' })],
+    // On the same team as unit 1, so no enemy of it, though it is a different player.
+    [3, new SimCharacter(3, { x: 110, y: 100 }, [], champion, { playerId: 'player-3', name: 'Ally' }, 0, [], 1)],
   ])
   const events: GameEvent[] = []
   const sim: SimReader & Pick<SimWriter, 'emitEvent'> = {
@@ -286,10 +307,11 @@ function createCurseDuel(enemyPosition: Vector2 = { x: 100 + CURSE_GAP, y: 100 }
   return simulator
 }
 
+// One attack order keeps the cursebearer attacking, every 50 ticks (AUTO_TICKS), so this orders it
+// once and then stops it when the last of `count` autos has landed.
 function autoAttacks(simulator: Simulator, count: number): void {
-  AUTO_TICKS.slice(0, count).forEach((tick, index) => {
-    simulator.addOrder(1, { id: `player-1:${index + 1}`, seq: index + 1, tick, type: 'attack', targetId: 2 })
-  })
+  simulator.addOrder(1, { id: 'player-1:1', seq: 1, tick: AUTO_TICKS[0], type: 'attack', targetId: 2 })
+  stopAttacking(simulator, 1, AUTO_TICKS[count - 1] + getChampion('t-cursebearer').attackWindupTicks, ORIGIN)
 }
 
 function curseStacks(simulator: Simulator, tick: number, unitId = 2): number {
@@ -557,9 +579,199 @@ test('attackDamage() makes an auto deal whatever the champion stat says', () => 
   }
 })
 
+// Projectile autos, against the gunner in fixtures.ts: windup 3, a shot at 10 px per tick that is
+// 8 px across, hitting a brawler (18 px across) once the two are within 8 + 18 = 26 px.
+
+const GUNNER_STEP = 600 / GAME_TPS
+const GUNNER_LAUNCH = 1 + gunner.attackWindupTicks
+
+function createGunnerDuel(targetAt: Vector2, shooter: Champion = gunner): Simulator {
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', ORIGIN, shooter)
+  simulator.addPlayer(2, 'player-2', 'Player 2', targetAt, brawler)
+  simulator.addOrder(1, attack(1, 1))
+  // One shot: an attack order keeps attacking, so it is stopped on the tick the shot leaves.
+  stopAttacking(simulator, 1, GUNNER_LAUNCH, ORIGIN)
+  return simulator
+}
+
+test('a projectile auto launches when its windup finishes and lands when the shot arrives', () => {
+  const simulator = createGunnerDuel({ x: 300, y: 100 })
+
+  const launched = simulator.at(GUNNER_LAUNCH)
+  assert.equal(launched.getEntities().length, 1)
+  assert.deepEqual(launched.getEntities()[0]?.origin, ORIGIN, 'it starts on the shooter')
+  assert.equal(launched.get(2)?.getHealth(), 1000, 'nothing lands at launch')
+  // 200 px apart, 10 px per tick, touching inside 26 px: 17 steps leave 30 px, the 18th leaves 20.
+  const landing = GUNNER_LAUNCH + 18
+  assert.equal(simulator.at(landing - 1).get(2)?.getHealth(), 1000)
+  assert.equal(simulator.at(landing - 1).getEntities().length, 1)
+  assert.equal(simulator.at(landing).get(2)?.getHealth(), 900)
+  assert.equal(simulator.at(landing).getEntities().length, 0, 'the shot is spent')
+  assert.equal(simulator.at(landing + 40).get(2)?.getHealth(), 900, 'and it lands only once')
+})
+
+test('a target touching the shooter is hit on the shot\'s first step', () => {
+  // 36 apart is as close as two 18 px bodies can stand, and the shot's step leaves it within reach.
+  const simulator = createGunnerDuel({ x: 136, y: 100 })
+
+  assert.equal(simulator.at(GUNNER_LAUNCH).get(2)?.getHealth(), 1000)
+  assert.equal(simulator.at(GUNNER_LAUNCH + 1).get(2)?.getHealth(), 900)
+})
+
+test('the shot turns to follow its target and lands later the farther the target runs', () => {
+  // The target sets off sideways (3.7 px per tick) once the shot is already in the air.
+  const createRunner = (): Simulator => {
+    const simulator = createGunnerDuel({ x: 300, y: 100 })
+    simulator.addOrder(2, { id: 'player-2:1', seq: 1, tick: GUNNER_LAUNCH, type: 'move', target: { x: 300, y: 600 } })
+    return simulator
+  }
+  const landingTick = (simulator: Simulator): number => {
+    for (let tick = GUNNER_LAUNCH; tick < GUNNER_LAUNCH + 200; tick += 1) {
+      if ((simulator.at(tick).get(2)?.getHealth() ?? 1000) < 1000) return tick
+    }
+    return -1
+  }
+  const heading = createRunner()
+  const headingAt = (tick: number): number => {
+    const velocity = heading.at(tick).getEntities()[0]?.velocity ?? { x: 0, y: 0 }
+    return Math.atan2(velocity.y, velocity.x)
+  }
+
+  const early = headingAt(GUNNER_LAUNCH + 1)
+  const late = headingAt(GUNNER_LAUNCH + 12)
+  assert.ok(late > early + 0.05, `the heading swings toward the target: ${early} then ${late}`)
+  assert.equal(landingTick(createGunnerDuel({ x: 300, y: 100 })), GUNNER_LAUNCH + 18)
+  const runner = createRunner()
+  const chased = landingTick(runner)
+  assert.ok(chased > GUNNER_LAUNCH + 18 && chased < GUNNER_LAUNCH + 60, `it caught the runner on tick ${chased}`)
+  assert.equal(runner.at(chased).get(2)?.getHealth(), 900)
+  assert.equal(runner.at(chased).getEntities().length, 0)
+})
+
+test('a shot flies through other enemies and hits only the unit it was fired at', () => {
+  const simulator = createGunnerDuel({ x: 300, y: 100 })
+  simulator.addPlayer(3, 'player-3', 'Player 3', { x: 200, y: 100 }, brawler)
+
+  const landing = GUNNER_LAUNCH + 18
+  assert.equal(simulator.at(landing).get(2)?.getHealth(), 900)
+  assert.equal(simulator.at(landing).get(3)?.getHealth(), 1000, 'the enemy in its path is untouched')
+})
+
+test('a shot has no timer: a slow one keeps chasing and still lands', () => {
+  const slow = new Champion({ ...gunner, attackProjectile: { speed: 60, radius: 8 } })
+  const simulator = createGunnerDuel({ x: 300, y: 100 }, slow)
+
+  // 1 px per tick, 200 px apart, touching inside 26 px: it lands on the 174th step.
+  const landing = GUNNER_LAUNCH + 174
+  assert.equal(simulator.at(landing - 1).get(2)?.getHealth(), 1000)
+  assert.equal(simulator.at(landing - 1).getEntities().length, 1, 'still chasing nearly three seconds on')
+  assert.equal(simulator.at(landing).get(2)?.getHealth(), 900)
+})
+
+test('a shot is dropped without damage when its target dies, and does not hit the respawned one', () => {
+  const simulator = createGunnerDuel({ x: 300, y: 100 })
+  simulator.addDeath(2, { tick: 10, respawnTick: 130 })
+
+  assert.equal(simulator.at(9).getEntities().length, 1)
+  assert.equal(simulator.at(10).get(2)?.isDead(), true)
+  assert.equal(simulator.at(10).getEntities().length, 0, 'the shot has nothing left to chase')
+  assert.equal(simulator.at(130).get(2)?.getHealth(), 1000, 'the respawned unit is whole')
+  assert.equal(simulator.at(160).get(2)?.getHealth(), 1000)
+})
+
+test('a ranged champion without a projectile still lands the moment its windup finishes', () => {
+  const instant = new Champion({ ...gunner, attackProjectile: undefined })
+  const simulator = createGunnerDuel({ x: 300, y: 100 }, instant)
+
+  const launched = simulator.at(GUNNER_LAUNCH)
+  assert.equal(launched.get(2)?.getHealth(), 900, '200 px away, hit at once')
+  assert.equal(launched.getEntities().length, 0)
+})
+
+test('the arriving shot runs its shooter\'s own attack effects, even in a copy of the champion', () => {
+  const branding = new Champion({
+    ...gunner,
+    onAttackHit: [damage(attackDamage()), mark('t-brand', 600, subject(), { cap: 3 })],
+  })
+  const simulator = createGunnerDuel({ x: 300, y: 100 }, branding)
+
+  const shot = simulator.at(GUNNER_LAUNCH).getEntities()[0]
+  assert.equal(getEntityDef(shot?.defId ?? '')?.homing, true, 'the shot is a homing entity')
+  const landing = GUNNER_LAUNCH + 18
+  assert.deepEqual(simulator.at(landing - 1).get(2)?.getMarkers(), [])
+  const landed = simulator.at(landing).get(2)
+  assert.equal(landed?.getHealth(), 900)
+  assert.deepEqual(landed?.getMarkers().map(({ key }) => key), ['t-brand'])
+})
+
+test('a shot in flight survives a checkpoint restore and lands on the same tick', () => {
+  const build = (): Simulator => {
+    const simulator = createGunnerDuel({ x: 300, y: 100 })
+    simulator.addOrder(2, { id: 'player-2:1', seq: 1, tick: 2, type: 'move', target: { x: 300, y: 600 } })
+    return simulator
+  }
+  const record = (simulator: Simulator, from: number, to: number): Map<number, string> => {
+    const frames = new Map<number, string>()
+    for (let tick = from; tick <= to; tick += 1) {
+      const frame = simulator.at(tick)
+      frames.set(tick, JSON.stringify([frame.get(2)?.getHealth(), frame.getEntities()]))
+    }
+    return frames
+  }
+  const expected = record(build(), 1, 60)
+
+  const original = build()
+  original.advanceTo(12)
+  original.setCommitTick(10)
+  const snapshot = original.snapshot()
+  assert.equal(GameSnapshotSchema.safeParse(snapshot).success, true)
+  assert.equal(snapshot.checkpoint.entities.length, 1, 'the shot travels in the checkpoint')
+  assert.equal(snapshot.checkpoint.entities[0]?.targetId, 2, 'and remembers who it is chasing')
+
+  const restored = new Simulator()
+  restored.replaceFromSnapshot(snapshot)
+  for (const [tick, frame] of record(restored, 11, 60)) assert.equal(frame, expected.get(tick), `tick ${tick}`)
+})
+
+test('a homing entity with a lifetime gives up the chase when it runs out', () => {
+  const seeker = spawnEntity({
+    id: 'test-seeker',
+    speed: 30,
+    radius: 5,
+    homing: true,
+    lifetimeTicks: 20,
+    onHit: [damage(50)],
+  })
+  const caster = new Champion({ ...brawler, onAttackHit: [seeker] })
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', ORIGIN, caster)
+  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 180, y: 100 }, brawler)
+  simulator.addOrder(1, attack(1, 1))
+
+  assert.equal(simulator.at(10).getEntities().length, 1)
+  assert.equal(simulator.at(30).getEntities().length, 0, 'half a pixel a tick never reaches 80 px')
+  assert.equal(simulator.at(30).get(2)?.getHealth(), 1000)
+})
+
+test('a projectile or a homing entity must be able to fly', () => {
+  assert.throws(() => new Champion({ ...gunner, attackProjectile: { speed: 0, radius: 8 } }), /positive speed and radius/)
+  assert.throws(() => new Champion({ ...gunner, attackProjectile: { speed: 600, radius: -1 } }), /positive speed and radius/)
+  assert.throws(() => spawnEntity({ id: 'test-homing-still', speed: 0, radius: 5, homing: true }), /homing/)
+  assert.throws(() => spawnEntity({ id: 'test-homing-pierce', speed: 100, radius: 5, homing: true, pierce: true }), /homing/)
+  assert.throws(
+    () => spawnEntity({ id: 'test-homing-box', speed: 100, box: { halfLength: 5, halfWidth: 5 }, homing: true }),
+    /homing/,
+  )
+})
+
 // Archer kit
 
-function createArcherDuel(enemyPosition: Vector2 = { x: 140, y: 100 }): Simulator {
+// The enemy stands beside the line the archer leaps along (y = 100), not on it: characters are
+// solid, so one in the way would stop the leap short.
+const ARCHER_ENEMY_AT: Vector2 = { x: 140, y: 160 }
+
+function createArcherDuel(enemyPosition: Vector2 = ARCHER_ENEMY_AT): Simulator {
   const simulator = new Simulator()
   simulator.addPlayer(1, 'player-1', 'Player 1', ORIGIN, getChampion('t-archer'))
   simulator.addPlayer(2, 'player-2', 'Player 2', enemyPosition, brawler)
@@ -609,7 +821,7 @@ test('a dash ignores slows, and its speed does not depend on haste or slow', () 
   // Player 2 slows the archer with lash before the leap.
   simulator.addOrder(2, {
     id: 'player-2:1', seq: 1, tick: 1, type: 'cast', abilityId: 't-lash',
-    target: { mode: 'unit', unitId: 1 }, origin: { x: 140, y: 100 },
+    target: { mode: 'unit', unitId: 1 }, origin: ARCHER_ENEMY_AT,
   })
   simulator.addOrder(1, cast(1, 12, 't-leap', { mode: 'point', point: LEAP_TARGET }))
 
@@ -620,7 +832,8 @@ test('a dash ignores slows, and its speed does not depend on haste or slow', () 
 })
 
 test('attacks and casts are rejected during a dash, and a move order waits for it to end', () => {
-  const simulator = createArcherDuel({ x: 200, y: 100 })
+  // Clear of both the leap along y = 100 and the walk south from where it lands.
+  const simulator = createArcherDuel({ x: 120, y: 160 })
   simulator.addOrder(1, cast(1, 1, 't-leap', { mode: 'point', point: LEAP_TARGET }))
   // A cast must name where the caster really is, so the rejection is about the dash alone.
   const midDash = simulator.at(6).get(1)?.getPosition()
@@ -707,6 +920,8 @@ test('focus adds attack speed and range for its duration only', () => {
   const simulator = createArcherDuel({ x: 100 + archer.attackRange + 60, y: 100 })
   simulator.addOrder(1, cast(1, 1, 't-focus', { mode: 'none' }))
   simulator.addOrder(1, attack(2, 5))
+  // Stopped as the first auto lands, or it would go on attacking for as long as focus lasts.
+  stopAttacking(simulator, 1, 5 + archer.attackWindupTicks, ORIGIN)
   simulator.addOrder(1, attack(3, 250))
 
   const status = simulator.at(2).get(1)?.getStatuses() ?? []
@@ -717,7 +932,11 @@ test('focus adds attack speed and range for its duration only', () => {
   assert.equal(simulator.at(9).get(1)?.getNextAttackTick(), 5 + 43)
 
   assert.deepEqual(simulator.at(249).get(1)?.getStatuses(), [], 'focus has worn off')
-  assert.equal(simulator.at(260).get(2)?.getHealth(), 1000 - archer.attackDamage, 'the later auto is out of range')
+  // Without the extra reach the enemy is 60 px out of range, so the attack ordered on tick 250 has
+  // to walk up to it first, at 2.5 px a tick, and lands only once it has.
+  assert.equal(simulator.at(260).get(2)?.getHealth(), 1000 - archer.attackDamage, 'not in reach yet')
+  assert.ok((simulator.at(260).get(1)?.getPosition().x ?? 0) > ORIGIN.x, 'the archer is walking up to it')
+  assert.equal(simulator.at(290).get(2)?.getHealth(), 1000 - 2 * archer.attackDamage, 'and the auto lands once it has')
 })
 
 test('snare flies to the point and bursts into a field, taking longer the farther it goes', () => {
@@ -734,15 +953,87 @@ test('snare flies to the point and bursts into a field, taking longer the farthe
   assert.equal(spawnTick(400), 5 + 40 + 1)
 })
 
-test('snare lands exactly on the aimed point and the field slows enemies inside it', () => {
+// The trap is 70 across and a brawler 18, so a brawler's body touches it from 88 away. The lob to a
+// point 400 out lands on tick 45 and the trap is there on tick 46, active from tick 47 and gone
+// after tick 106 (it stays one second). It roots for 90 ticks.
+const SNARE_POINT: Vector2 = { x: 500, y: 100 }
+const SNARE_TOUCH = 70 + brawler.radius
+const SNARE_UP = 46
+const SNARE_ROOT = 90
+
+function rootOn(simulator: Simulator, tick: number, characterId = 2) {
+  return simulator.at(tick).get(characterId)?.getStatuses().find((status) => status.kind === 'root')
+}
+
+test('snare lands exactly on the aimed point and roots an enemy it lands on, once', () => {
   const simulator = createArcherDuel({ x: 500, y: 100 })
-  simulator.addOrder(1, cast(1, 1, 't-snare', { mode: 'point', point: { x: 500, y: 100 } }))
+  simulator.addOrder(1, cast(1, 1, 't-snare', { mode: 'point', point: SNARE_POINT }))
 
   assert.equal(simulator.at(25).getEntities()[0]?.defId, 't-snare-shot')
-  const field = simulator.at(46).getEntities()
+  const field = simulator.at(SNARE_UP).getEntities()
   assert.deepEqual(field.map((entity) => entity.defId), ['t-snare-field'])
-  assert.deepEqual(field[0]?.origin, { x: 500, y: 100 })
-  assertClose(simulator.at(48).get(2)?.getStatuses().find((s) => s.kind === 'slow')?.amount ?? 0, 0.4)
+  assert.deepEqual(field[0]?.origin, SNARE_POINT)
+  assert.equal(rootOn(simulator, SNARE_UP), undefined, 'it springs on the tick after it lands')
+  const rooted = rootOn(simulator, SNARE_UP + 1)
+  assert.equal(rooted?.endTick, SNARE_UP + 1 + SNARE_ROOT)
+  // It does not slow, and standing in it does not renew the root: it was caught once.
+  assert.equal(simulator.at(SNARE_UP + 1).get(2)?.getStatuses().some((status) => status.kind === 'slow'), false)
+  assert.equal(rootOn(simulator, SNARE_UP + 40)?.startTick, SNARE_UP + 1)
+  assert.equal(rootOn(simulator, SNARE_UP + 1 + SNARE_ROOT - 1)?.endTick, SNARE_UP + 1 + SNARE_ROOT)
+  assert.equal(rootOn(simulator, SNARE_UP + 1 + SNARE_ROOT), undefined, 'and it wears off on schedule')
+  assert.deepEqual(simulator.at(SNARE_UP + 1 + SNARE_ROOT).get(2)?.getPosition(), SNARE_POINT)
+})
+
+test('snare stays on the ground for a second and roots whoever walks into it, where it touches', () => {
+  const simulator = createArcherDuel({ x: 500, y: 260 })
+  simulator.addOrder(1, cast(1, 1, 't-snare', { mode: 'point', point: SNARE_POINT }))
+  // Walking up the line through the middle of the trap, starting from outside it.
+  simulator.addOrder(2, { id: 'player-2:1', seq: 1, tick: 50, type: 'move', target: { x: 500, y: 0 } })
+
+  assert.equal(rootOn(simulator, 49), undefined, 'nobody is in it yet')
+  let caught = -1
+  for (let tick = 50; tick <= SNARE_UP + 60 && caught < 0; tick += 1) {
+    if (rootOn(simulator, tick)) caught = tick
+  }
+  assert.ok(caught > 50, `it caught the walker on tick ${caught}`)
+  const stopped = simulator.at(caught).get(2)?.getPosition()
+  assert.ok(stopped)
+  // It is stopped at the trap's edge, not carried in to the middle.
+  assert.ok(Math.hypot(stopped.x - SNARE_POINT.x, stopped.y - SNARE_POINT.y) <= SNARE_TOUCH)
+  assert.ok(Math.hypot(stopped.x - SNARE_POINT.x, stopped.y - SNARE_POINT.y) > SNARE_TOUCH - 5)
+  assert.equal(rootOn(simulator, caught)?.endTick, caught + SNARE_ROOT)
+  // The root holds it for its full length, even though the trap itself is long gone by then.
+  assert.equal(simulator.at(SNARE_UP + 61).getEntities().length, 0, 'the trap lasted only a second')
+  assert.deepEqual(simulator.at(caught + SNARE_ROOT - 1).get(2)?.getPosition(), stopped)
+  assert.notDeepEqual(simulator.at(caught + SNARE_ROOT + 10).get(2)?.getPosition(), stopped, 'then it walks on')
+})
+
+test('snare does nothing to someone who walks over the spot after it has gone', () => {
+  const simulator = createArcherDuel({ x: 500, y: 260 })
+  simulator.addOrder(1, cast(1, 1, 't-snare', { mode: 'point', point: SNARE_POINT }))
+  simulator.addOrder(2, { id: 'player-2:1', seq: 1, tick: SNARE_UP + 62, type: 'move', target: { x: 500, y: 0 } })
+
+  assert.equal(simulator.at(SNARE_UP + 61).getEntities().length, 0)
+  for (let tick = SNARE_UP + 62; tick <= SNARE_UP + 62 + 80; tick += 1) {
+    assert.equal(rootOn(simulator, tick), undefined, `tick ${tick}`)
+  }
+  assert.ok((simulator.at(SNARE_UP + 62 + 80).get(2)?.getPosition().y ?? 999) < SNARE_POINT.y, 'it walked right across')
+})
+
+test('snare roots everyone caught in it, but never the archer who laid it', () => {
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', ORIGIN, getChampion('t-archer'))
+  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 200, y: 150 }, brawler)
+  simulator.addPlayer(3, 'player-3', 'Player 3', { x: 200, y: 50 }, brawler)
+  // Lobbed 100 along, the trap lands between the two enemies and 100 from the archer, who then
+  // walks straight into it.
+  simulator.addOrder(1, cast(1, 1, 't-snare', { mode: 'point', point: { x: 200, y: 100 } }))
+  simulator.addOrder(1, { id: 'player-1:2', seq: 2, tick: 12, type: 'move', target: { x: 200, y: 100 } })
+
+  assert.ok(rootOn(simulator, 40, 2), 'one enemy is caught')
+  assert.ok(rootOn(simulator, 40, 3), 'and so is the other')
+  for (let tick = 41; tick <= 100; tick += 1) assert.equal(rootOn(simulator, tick, 1), undefined, `tick ${tick}`)
+  assert.ok((simulator.at(100).get(1)?.getPosition().x ?? 0) > 150, 'the archer walked into the trap')
 })
 
 test('an entity can spawn another after a set timer instead of a distance', () => {
@@ -757,7 +1048,7 @@ test('an entity can spawn another after a set timer instead of a distance', () =
   assert.deepEqual(simulator.at(5).getEntities().map((entity) => entity.defId), ['test-timer-first'])
   assert.deepEqual(simulator.at(11).getEntities().map((entity) => entity.defId), ['test-timer-first'])
   assert.deepEqual(simulator.at(12).getEntities().map((entity) => entity.defId), ['test-timer-follow'])
-  assert.throws(() => spawnEntity({ id: 'test-no-lifetime', speed: 0, radius: 5 }), /needs lifetimeTicks, landAtAim or stayWhile/)
+  assert.throws(() => spawnEntity({ id: 'test-no-lifetime', speed: 0, radius: 5 }), /needs lifetimeTicks, landAtAim, stayWhile or homing/)
 })
 
 // Swordsman kit, against the copy in fixtures.ts. Positions and timings come from that champion.
@@ -765,7 +1056,8 @@ test('an entity can spawn another after a set timer instead of a distance', () =
 const sword = getChampion('t-swordsman')
 // Close enough to auto in melee, whatever the range is tuned to.
 const SWORD_GAP = sword.attackRange - 30
-const SWORD_AUTO_SPACING = sword.attackCooldownTicks + 5
+// A locked attack swings again the moment its cooldown is up.
+const SWORD_AUTO_SPACING = sword.attackCooldownTicks
 
 function swordAutoTicks(count: number): number[] {
   return Array.from({ length: count }, (_, index) => 1 + index * SWORD_AUTO_SPACING)
@@ -781,8 +1073,11 @@ function createSwordDuel(
   return simulator
 }
 
+// One attack order keeps the swordsman attacking at the speed of its attack, so this orders it
+// once and stops it when the last of `count` autos has landed.
 function swordAutos(simulator: Simulator, count: number): void {
-  swordAutoTicks(count).forEach((tick, index) => simulator.addOrder(1, attack(index + 1, tick)))
+  simulator.addOrder(1, attack(1, 1))
+  stopAttacking(simulator, 1, swordAutoTicks(count)[count - 1] + sword.attackWindupTicks, ORIGIN)
 }
 
 // A tick well after the last of `count` autos has landed (0 autos: the start).
@@ -901,62 +1196,73 @@ test('radiance spends the stacks: damage and haste scale with how many there wer
   assert.equal(one.flashes, 1)
 })
 
-test('shackle roots with fewer than three stacks, resets the auto, and a rooted enemy can still attack', () => {
-  const shackle = getAbilityDef('t-shackle')
-  assert.ok(shackle)
+test('shackle readies the next auto, which roots its target and spends the stacks, and the cast resets the auto timer', () => {
   const simulator = createSwordDuel()
   swordAutos(simulator, 1)
   const castTick = afterAutos(1)
-  simulator.addOrder(1, cast(100, castTick, 't-shackle', { mode: 'unit', unitId: 2 }))
-  const launch = castTick + shackle.windUpTicks
-  // A rooted enemy can still attack; a valid attack stops its walk, so it asks to walk afterward.
-  simulator.addOrder(2, enemyOrder(1, launch + 4, { type: 'attack', targetId: 1 }))
-  simulator.addOrder(2, enemyOrder(2, launch + 8, { type: 'move', target: { x: 700, y: 100 } }))
+  // The cast has no windup, so it is up in the same tick, and the auto ordered just after it, which
+  // is ready at once because the cast reset the timer, is the one that carries it.
+  simulator.addOrder(1, cast(100, castTick, 't-shackle', { mode: 'none' }))
+  simulator.addOrder(1, attack(101, castTick + 1))
+  const landing = castTick + 1 + sword.attackWindupTicks
+  stopAttacking(simulator, 1, landing, ORIGIN)
+  // A rooted enemy can still attack; it then asks to walk away, which the root holds it from.
+  simulator.addOrder(2, enemyOrder(1, landing + 4, { type: 'attack', targetId: 1 }))
+  simulator.addOrder(2, enemyOrder(2, landing + 8, { type: 'move', target: { x: 700, y: 100 } }))
 
-  assert.equal(swordStacksOn(simulator, launch - 1), 1)
-  const frame = simulator.at(launch)
+  assert.equal(swordStacksOn(simulator, castTick - 1), 1)
+  const cast1 = simulator.at(castTick)
+  assert.equal(cast1.get(1)?.getNextAttackTick(), castTick, 'the auto timer was reset')
+  assert.equal(markerCount(simulator, castTick, 'ready:t-shackle', 1), 1, 'the next auto is readied')
+  assert.equal(cast1.get(2)?.getStatuses().length, 0, 'but nothing has happened to the enemy yet')
+
+  assert.equal(simulator.at(landing - 1).get(2)?.getStatuses().length, 0)
+  const frame = simulator.at(landing)
   const root = frame.get(2)?.getStatuses().find((status) => status.kind === 'root')
-  assert.ok(root, 'the enemy is rooted')
+  assert.ok(root, 'the auto roots the enemy')
+  assert.equal(root.endTick, landing + 90)
   assert.equal(frame.get(2)?.getStatuses().some((status) => status.kind === 'stun'), false)
-  assert.equal(swordStacksOn(simulator, launch), 0, 'the stack was spent')
-  assert.equal(frame.get(1)?.getNextAttackTick(), launch, 'the auto timer was reset')
+  assert.equal(markerCount(simulator, landing, 'ready:t-shackle', 1), 0, 'and spends the readiness')
+  // It read the one stack there was and popped it; the auto still adds its own, which stays.
+  const stacks = frame.get(1)?.getMarkers().filter((marker) => marker.key === 'sword') ?? []
+  assert.deepEqual(stacks.map((marker) => marker.startTick), [landing])
 
   assert.equal(
-    simulator.at(launch + 4).get(1)?.getHealth(),
+    simulator.at(landing + 4).get(1)?.getHealth(),
     sword.maxHp - brawler.attackDamage,
     'the rooted enemy still attacked',
   )
-
-  // It wants to walk away but cannot until the root runs out.
-  const held = simulator.at(launch + 9).get(2)?.getPosition()
+  const held = simulator.at(landing + 9).get(2)?.getPosition()
   assert.ok(held)
   assert.equal(simulator.at(root.endTick).get(2)?.getPosition().x, held.x)
   assert.ok((simulator.at(root.endTick + 5).get(2)?.getPosition().x ?? 0) > held.x, 'it walks once freed')
 })
 
 test('shackle with three stacks stuns instead: no attacks, no casts, and a windup is cancelled', () => {
-  const shackle = getAbilityDef('t-shackle')
   const lash = getAbilityDef('t-lash')
-  assert.ok(shackle && lash)
+  assert.ok(lash)
   const simulator = createSwordDuel()
   swordAutos(simulator, 3)
   const castTick = afterAutos(3)
-  simulator.addOrder(1, cast(100, castTick, 't-shackle', { mode: 'unit', unitId: 2 }))
-  const launch = castTick + shackle.windUpTicks
+  simulator.addOrder(1, cast(100, castTick, 't-shackle', { mode: 'none' }))
+  simulator.addOrder(1, attack(101, castTick + 1))
+  const landing = castTick + 1 + sword.attackWindupTicks
+  stopAttacking(simulator, 1, landing, ORIGIN)
   // The enemy starts a lash just before the stun lands, then tries to act while stunned.
-  simulator.addOrder(2, enemyOrder(1, launch - 2, {
+  simulator.addOrder(2, enemyOrder(1, landing - 2, {
     type: 'cast', abilityId: 't-lash', target: { mode: 'unit', unitId: 1 }, origin: { x: 100 + SWORD_GAP, y: 100 },
   }))
-  simulator.addOrder(2, enemyOrder(2, launch + 10, { type: 'attack', targetId: 1 }))
+  simulator.addOrder(2, enemyOrder(2, landing + 10, { type: 'attack', targetId: 1 }))
 
-  assert.equal(swordStacksOn(simulator, launch - 1), 3)
-  assert.equal(simulator.at(launch - 1).get(2)?.getAction()?.kind, 'cast', 'the lash is winding up')
-  const frame = simulator.at(launch)
+  assert.equal(swordStacksOn(simulator, landing - 1), 3)
+  assert.equal(simulator.at(landing - 1).get(2)?.getAction()?.kind, 'cast', 'the lash is winding up')
+  const frame = simulator.at(landing)
   const stun = frame.get(2)?.getStatuses().find((status) => status.kind === 'stun')
   assert.ok(stun, 'three stacks stun')
+  assert.equal(stun.endTick, landing + 60)
   assert.equal(frame.get(2)?.getStatuses().some((status) => status.kind === 'root'), false)
   assert.equal(frame.get(2)?.getAction(), undefined, 'the windup was cancelled')
-  assert.equal(swordStacksOn(simulator, launch), 0)
+  assert.equal(swordStacksOn(simulator, landing), 1, 'the three were spent, and the auto added one')
 
   const hpWhileStunned = simulator.at(stun.endTick - 1).get(1)?.getHealth()
   assert.equal(hpWhileStunned, sword.maxHp, 'neither the lash nor the attack landed')
@@ -965,24 +1271,25 @@ test('shackle with three stacks stuns instead: no attacks, no casts, and a windu
 
 test('a rooted character cannot leap but can still attack', () => {
   const archer = getChampion('t-archer')
-  const shackle = getAbilityDef('t-shackle')
-  assert.ok(shackle)
   const archerAt = { x: 100 + SWORD_GAP, y: 100 }
   const simulator = createSwordDuel(archerAt, archer)
-  simulator.addOrder(1, cast(100, 1, 't-shackle', { mode: 'unit', unitId: 2 }))
-  const launch = 1 + shackle.windUpTicks
-  simulator.addOrder(2, enemyOrder(1, launch + 5, {
+  // The swordsman readies shackle and roots the archer with its auto, which lands on tick 5.
+  simulator.addOrder(1, cast(100, 1, 't-shackle', { mode: 'none' }))
+  simulator.addOrder(1, attack(101, 2))
+  const landing = 2 + sword.attackWindupTicks
+  stopAttacking(simulator, 1, landing, ORIGIN)
+  simulator.addOrder(2, enemyOrder(1, landing + 5, {
     type: 'cast', abilityId: 't-leap', target: { mode: 'point', point: { x: archerAt.x + 50, y: 100 } }, origin: archerAt,
   }))
-  simulator.addOrder(2, enemyOrder(2, launch + 8, { type: 'attack', targetId: 1 }))
+  simulator.addOrder(2, enemyOrder(2, landing + 8, { type: 'attack', targetId: 1 }))
 
-  assert.ok(simulator.at(launch).get(2)?.getStatuses().some((status) => status.kind === 'root'))
-  const afterLeapTry = simulator.at(launch + 7).get(2)
+  assert.ok(simulator.at(landing).get(2)?.getStatuses().some((status) => status.kind === 'root'))
+  const afterLeapTry = simulator.at(landing + 7).get(2)
   assert.equal(afterLeapTry?.isDashing(), false)
   assert.deepEqual(afterLeapTry?.getPosition(), archerAt)
   assert.equal(afterLeapTry?.getAbilityCooldown('t-leap').ready, true, 'the leap was refused, not spent')
   assert.equal(
-    simulator.at(launch + 8 + archer.attackWindupTicks).get(1)?.getHealth(),
+    simulator.at(landing + 8 + archer.attackWindupTicks).get(1)?.getHealth(),
     sword.maxHp - archer.attackDamage,
     'the rooted archer still attacks',
   )
@@ -992,7 +1299,11 @@ test('stuns, roots, trails and stacks survive checkpoint restores', () => {
   const build = (): Simulator => {
     const simulator = createSwordDuel()
     swordAutos(simulator, 3)
-    simulator.addOrder(1, cast(100, 141, 't-shackle', { mode: 'unit', unitId: 2 }))
+    // Shackle readied on tick 141 and the auto that carries it begun on tick 142, so the checkpoint
+    // committed on tick 142 holds the sword mid-swing, locked on its target and with shackle readied.
+    simulator.addOrder(1, cast(100, 141, 't-shackle', { mode: 'none' }))
+    simulator.addOrder(1, attack(102, 142))
+    stopAttacking(simulator, 1, 142 + sword.attackWindupTicks, ORIGIN)
     simulator.addOrder(1, cast(101, 200, 't-slash', { mode: 'direction', dir: { x: 1, y: 0 } }))
     return simulator
   }
@@ -1009,12 +1320,18 @@ test('stuns, roots, trails and stacks survive checkpoint restores', () => {
   const reference = build()
   const expected = new Map<number, string>()
   for (let tick = 1; tick <= 280; tick += 1) expected.set(tick, frameOf(reference, tick))
+  assert.equal(build().at(150).get(2)?.getStatuses().some((status) => status.kind === 'stun'), true, 'the stun happened')
 
   // One checkpoint while the stun is active, one after the trail is out.
   const original = build()
   original.advanceTo(150)
   original.setCommitTick(142)
   const duringStun = original.snapshot()
+  assert.equal(
+    duringStun.checkpoint.characters.find((character) => character.characterId === 1)?.attackTarget?.targetId,
+    2,
+    'the checkpoint holds the attack lock',
+  )
   original.advanceTo(215)
   original.setCommitTick(208)
   const withTrail = original.snapshot()
@@ -1066,11 +1383,15 @@ test('the next auto after a spell deals bonus damage once, and casting twice doe
   assert.ok(gale)
   const simulator = createCapricornDuel()
   simulator.addOrder(1, castHarmlessGale(1, 1))
-  simulator.addOrder(1, attack(2, 20))
-  simulator.addOrder(1, attack(3, 100))
   const launch = 1 + gale.windUpTicks
   const firstLanding = 20 + capricorn.attackWindupTicks
   const secondLanding = 100 + capricorn.attackWindupTicks
+  // One auto on tick 20, then another on tick 100: the first is stopped as it lands, or the lock
+  // would swing again before the second is ordered.
+  simulator.addOrder(1, attack(2, 20))
+  stopAttacking(simulator, 1, firstLanding, ORIGIN)
+  simulator.addOrder(1, attack(3, 100))
+  stopAttacking(simulator, 1, secondLanding, ORIGIN)
 
   assert.equal(markerCount(simulator, launch - 1, 'empowered', 1), 0)
   assert.equal(markerCount(simulator, launch, 'empowered', 1), 1, 'the cast empowers the caster')
@@ -1797,7 +2118,9 @@ test('the soldier\'s bolt pierces everything in its line, slows it, and hurts th
   const nearer = { x: 300, y: 100 }
   const farther = { x: 500, y: 100 }
   const simulator = createSoldierDuel([nearer, farther])
-  for (const tick of [1, 51, 101, 151]) simulator.addOrder(1, attack(tick, tick))
+  // One attack order, which keeps attacking every cooldown, stopped as the fourth auto lands.
+  simulator.addOrder(1, attack(1, 1))
+  stopAttacking(simulator, 1, 1 + 3 * soldier.attackCooldownTicks + soldier.attackWindupTicks, ORIGIN)
   const rail = getAbilityDef('t-rail')
   assert.ok(rail)
   simulator.addOrder(1, cast(100, 220, 't-rail', { mode: 'direction', dir: { x: 1, y: 0 } }))
@@ -1836,8 +2159,9 @@ test('medic shields the soldier and heals it over time, and healing never goes p
   const medic = getAbilityDef('t-medic')
   assert.ok(medic)
   const simulator = createSoldierDuel([{ x: 160, y: 100 }])
-  // Wounded first, so there is something to heal: the brawler's hit takes 100.
+  // Wounded first, so there is something to heal: the brawler's hit takes 100, and only one.
   simulator.addOrder(2, enemyOrder(1, 1, { type: 'attack', targetId: 1 }))
+  stopAttacking(simulator, 2, 2, { x: 160, y: 100 })
   simulator.addOrder(1, cast(1, 10, 't-medic', { mode: 'none' }))
   const launch = 10 + medic.windUpTicks
 
@@ -1878,6 +2202,7 @@ test('casting medic again replaces the bot and refreshes the shield instead of a
   const simulator = createSoldierDuel([{ x: 160, y: 100 }])
   simulator.addOrder(1, cast(1, 1, 't-medic', { mode: 'none' }))
   simulator.addOrder(2, enemyOrder(1, 200, { type: 'attack', targetId: 1 }))
+  stopAttacking(simulator, 2, 201, { x: 160, y: 100 })
   simulator.addOrder(1, cast(2, 1500, 't-medic', { mode: 'none' }))
   const second = 1500 + medic.windUpTicks
 
@@ -1902,6 +2227,7 @@ test('a medic whose shield is broken is gone, and heals nothing more', () => {
   const launch = 1 + medic.windUpTicks
   // One 400 hit: the 250 shield takes 250 of it and the soldier takes the other 150.
   simulator.addOrder(2, enemyOrder(1, 20, { type: 'attack', targetId: 1 }))
+  stopAttacking(simulator, 2, 21, { x: 160, y: 100 })
 
   assert.equal(simulator.at(19).get(1)?.getShield(), 250)
   const broken = simulator.at(20)
@@ -2060,4 +2386,1835 @@ test('the medic bot\'s rest point is kept inside the arena', () => {
   // The rest point is the bot's own radius (9) in from the wall.
   assert.ok(Math.abs(last.bot.y - 9) < 0.5, `settled at ${last.bot.y}`)
   assert.ok(track.every(({ bot }) => bot.y > -5), 'and never far outside')
+})
+
+// Grenadier kit, against the copy in fixtures.ts. Shots fly 10 px a tick, a brawler is 18 across
+// and the grenadier 16, and every duel is laid out along y = 300 with bystanders off to the side.
+
+function createGrenadierDuel(enemies: Array<[number, number]>, at: [number, number] = [300, 300]): Simulator {
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', { x: at[0], y: at[1] }, grenadier)
+  enemies.forEach(([x, y], index) => {
+    simulator.addPlayer(index + 2, `player-${index + 2}`, `Player ${index + 2}`, { x, y }, brawler)
+  })
+  return simulator
+}
+
+const GRENADIER_AT: Vector2 = { x: 300, y: 300 }
+const statusOf = (simulator: Simulator, tick: number, id: number, kind: string) =>
+  simulator.at(tick).get(id)?.getStatuses().find((status) => status.kind === kind)
+
+test('a grenade explodes where it lands, throwing every enemy in the blast straight away from the middle', () => {
+  // Lobbed 300 px to (600, 300): it launches on tick 5, flies 30 ticks and goes off on tick 36.
+  // East and north of the middle, 50 away each, are caught; 140 south is outside the 100 blast
+  // (a brawler's body reaches 18 into it, so 118 is as far as anyone is touched).
+  const simulator = createGrenadierDuel([[650, 300], [600, 250], [600, 440]])
+  simulator.addOrder(1, cast(1, 1, 't-grenade', { mode: 'point', point: { x: 600, y: 300 } }, GRENADIER_AT))
+  const grenade = getAbilityDef('t-grenade')
+  assert.ok(grenade)
+
+  const launch = 1 + grenade.windUpTicks
+  const blast = launch + 30 + 1
+  assert.equal(simulator.at(blast - 1).get(2)?.getHealth(), 1000, 'nothing happens while it flies')
+  assert.equal(simulator.at(blast).get(2)?.getHealth(), 900)
+  assert.equal(simulator.at(blast).get(3)?.getHealth(), 900)
+  assert.equal(simulator.at(blast).get(4)?.getHealth(), 1000, 'out of reach of the blast')
+  assert.equal(simulator.at(blast).getEntities().some((entity) => entity.defId === 't-grenade-burst'), true)
+  // Half of the cooldown, which began when the grenade left, is handed back for catching someone.
+  assert.equal(
+    simulator.at(blast).get(1)?.getAbilityCooldown('t-grenade').ticksRemaining,
+    launch + grenade.cooldownTicks - grenade.cooldownTicks / 2 - blast,
+  )
+
+  // Each goes straight away from the middle of the blast, not along the throw: the one to the east
+  // is thrown east and the one to the north is thrown north, 150 px each.
+  assert.deepEqual(simulator.at(blast + 60).get(2)?.getPosition(), { x: 800, y: 300 })
+  assert.deepEqual(simulator.at(blast + 60).get(3)?.getPosition(), { x: 600, y: 100 })
+  assert.deepEqual(simulator.at(blast + 60).get(4)?.getPosition(), { x: 600, y: 440 })
+  // The thrower is 300 from the middle, nowhere near it, and stays put.
+  assert.deepEqual(simulator.at(blast + 60).get(1)?.getPosition(), GRENADIER_AT)
+})
+
+test('a grenadier standing in its own blast is thrown clear too, away from the middle of it', () => {
+  // Lobbed 30 px to (330, 300), landing on tick 9: the grenadier at x = 300 is 30 from the middle
+  // and the enemy at x = 380 is 50 from it, on the other side.
+  const simulator = createGrenadierDuel([[380, 300]])
+  simulator.addOrder(1, cast(1, 1, 't-grenade', { mode: 'point', point: { x: 330, y: 300 } }, GRENADIER_AT))
+  const blast = 1 + 4 + 3 + 1
+
+  assert.equal(simulator.at(blast - 1).get(1)?.isDashing(), false)
+  assert.equal(simulator.at(blast).get(2)?.getHealth(), 900)
+  assert.equal(simulator.at(blast + 1).get(1)?.isDashing(), true, 'the thrower is thrown too')
+  assert.equal(simulator.at(blast + 1).get(2)?.isDashing(), true)
+  assert.deepEqual(simulator.at(blast + 60).get(1)?.getPosition(), { x: 200, y: 300 }, '100 away from the middle')
+  assert.deepEqual(simulator.at(blast + 60).get(2)?.getPosition(), { x: 530, y: 300 }, 'and the enemy 150 the other way')
+})
+
+test('a grenade that catches no enemy refunds nothing, but still throws a grenadier standing in it', () => {
+  const simulator = createGrenadierDuel([[700, 300]])
+  simulator.addOrder(1, cast(1, 1, 't-grenade', { mode: 'point', point: { x: 330, y: 300 } }, GRENADIER_AT))
+  const grenade = getAbilityDef('t-grenade')
+  assert.ok(grenade)
+  const blast = 1 + grenade.windUpTicks + 3 + 1
+
+  assert.equal(simulator.at(blast).get(2)?.getHealth(), 1000)
+  assert.equal(
+    simulator.at(blast).get(1)?.getAbilityCooldown('t-grenade').ticksRemaining,
+    1 + grenade.windUpTicks + grenade.cooldownTicks - blast,
+    'the whole cooldown is still to run',
+  )
+  assert.deepEqual(simulator.at(blast + 60).get(1)?.getPosition(), { x: 200, y: 300 })
+  assert.deepEqual(simulator.at(blast + 60).get(2)?.getPosition(), { x: 700, y: 300 })
+})
+
+test('a flashbang stuns an enemy it lands right on, blinds one at the edge of the flash, and spares the rest', () => {
+  // Lobbed 300 px to (600, 300), going off on tick 36. The core of the flash is 50 across and the
+  // whole of it 120 (each reaching 18 further into a brawler): the first enemy is 20 from the
+  // middle, the second 90 and the third 180.
+  const simulator = createGrenadierDuel([[620, 300], [600, 390], [600, 480]])
+  simulator.addOrder(1, cast(1, 1, 't-flashbang', { mode: 'point', point: { x: 600, y: 300 } }, GRENADIER_AT))
+  const blast = 36
+
+  assert.equal(statusOf(simulator, blast - 1, 2, 'stun'), undefined, 'nothing happens while it flies')
+  assert.equal(statusOf(simulator, blast, 2, 'stun')?.endTick, blast + 60)
+  assert.equal(statusOf(simulator, blast, 2, 'blind'), undefined, 'a direct hit is stunned, not blinded')
+  assert.equal(statusOf(simulator, blast, 3, 'blind')?.endTick, blast + 90)
+  assert.equal(statusOf(simulator, blast, 3, 'stun'), undefined, 'the edge of the flash only blinds')
+  assert.equal(statusOf(simulator, blast, 4, 'stun'), undefined)
+  assert.equal(statusOf(simulator, blast, 4, 'blind'), undefined, 'and the third is too far to be touched')
+  assert.equal(simulator.at(blast).getEntities().some((entity) => entity.defId === 't-flash-burst'), true)
+  // The stun is a second, the blind a second and a half.
+  assert.notEqual(statusOf(simulator, blast + 59, 2, 'stun'), undefined)
+  assert.equal(statusOf(simulator, blast + 60, 2, 'stun'), undefined)
+  assert.notEqual(statusOf(simulator, blast + 89, 3, 'blind'), undefined)
+  assert.equal(statusOf(simulator, blast + 90, 3, 'blind'), undefined)
+})
+
+test('a blinded enemy\'s autos miss and still use up its cooldown, while it can walk and cast', () => {
+  // Lobbed 120 px to (420, 300), going off on tick 18. The enemy is at (420, 380), 80 below the
+  // middle: outside the core, inside the flash, and 144 from the thrower, inside its reach of 150.
+  const simulator = createGrenadierDuel([[420, 380]])
+  simulator.addOrder(1, cast(1, 1, 't-flashbang', { mode: 'point', point: { x: 420, y: 300 } }, GRENADIER_AT))
+  // While blinded, the enemy swings at the thrower, then casts, then swings again once it can see.
+  simulator.addOrder(2, { id: 'player-2:1', seq: 1, tick: 20, type: 'attack', targetId: 1 })
+  simulator.addOrder(2, {
+    id: 'player-2:2', seq: 2, tick: 30, type: 'cast', abilityId: 't-lash',
+    target: { mode: 'unit', unitId: 1 }, origin: { x: 420, y: 380 },
+  })
+  simulator.addOrder(2, { id: 'player-2:3', seq: 3, tick: 120, type: 'attack', targetId: 1 })
+
+  const went = 18
+  assert.equal(statusOf(simulator, went - 1, 2, 'blind'), undefined)
+  assert.equal(statusOf(simulator, went, 2, 'blind')?.endTick, went + 90)
+  assert.equal(statusOf(simulator, went, 2, 'stun'), undefined)
+
+  // The swing is spent: the cooldown runs, but the thrower is unhurt.
+  assert.equal(simulator.at(21).get(1)?.getHealth(), grenadier.maxHp, 'the blind auto missed')
+  assert.equal(simulator.at(21).get(2)?.getNextAttackTick(), 20 + 60)
+  // A blind unit can still cast, so its lash (300) lands.
+  assert.equal(simulator.at(40).get(1)?.getHealth(), grenadier.maxHp - 300)
+  // The blind wears off after a second and a half, and the next auto lands.
+  assert.equal(statusOf(simulator, went + 89, 2, 'blind') !== undefined, true)
+  assert.equal(statusOf(simulator, went + 90, 2, 'blind'), undefined)
+  assert.equal(simulator.at(120).get(1)?.getHealth(), grenadier.maxHp - 300 - brawler.attackDamage)
+})
+
+test('a molotov coats the ground in fire that slows, and burns in chunks that outlast the fire', () => {
+  const simulator = createGrenadierDuel([[600, 300]])
+  simulator.addOrder(1, cast(1, 1, 't-molotov', { mode: 'point', point: { x: 600, y: 300 } }, GRENADIER_AT))
+
+  // Lobbed 300 px at 10 a tick: it launches on tick 5, lands on tick 35 and the fire is out on 36,
+  // active from 37 and ending after tick 276 (4 s). The enemy stands in the middle throughout.
+  assert.equal(simulator.at(36).getEntities()[0]?.defId, 't-molotov-fire')
+
+  // One pass forward, since frames are only kept for a few ticks behind the newest.
+  const losses = new Map<number, number>()
+  const seen = new Map<number, { slow?: number; burn?: number }>()
+  let previous = 1000
+  for (let tick = 37; tick <= 500; tick += 1) {
+    const health = simulator.at(tick).get(2)?.getHealth() ?? 0
+    if (health < previous) losses.set(tick, previous - health)
+    previous = health
+    seen.set(tick, { slow: statusOf(simulator, tick, 2, 'slow')?.amount, burn: statusOf(simulator, tick, 2, 'burn')?.amount })
+  }
+  assertClose(seen.get(100)?.slow ?? 0, 0.3)
+  assert.equal(seen.get(100)?.burn, 20, '40 a second, in two chunks a second')
+  // The first chunk is on the first pulse tick after it was lit, and every chunk is on a pulse tick.
+  assert.equal([...losses.keys()][0], 2 * GAME_BURN_PULSE_TICKS)
+  for (const [tick, lost] of losses) {
+    assert.equal(tick % GAME_BURN_PULSE_TICKS, 0, `tick ${tick} is a pulse tick`)
+    assert.equal(lost, 20)
+  }
+  // The fire is refreshed every tick it stands in it, until tick 276; the burn then lasts 180 more
+  // ticks, so the last pulse is on 450 and none follow. Pulses on 60, 90 ... 450 make 14.
+  assert.equal(losses.size, 14)
+  assert.equal([...losses.keys()].at(-1), 450)
+  assert.equal(seen.get(278)?.slow, undefined, 'the slow is gone with the fire')
+  assert.notEqual(seen.get(400)?.burn, undefined, 'but the burn goes on')
+  assert.equal(seen.get(456)?.burn, undefined)
+  assert.equal(simulator.at(500).get(2)?.getHealth(), 1000 - 14 * 20)
+})
+
+test('an enemy that walks out of the fire keeps burning for the burn\'s length, and not for longer', () => {
+  const simulator = createGrenadierDuel([[600, 300]])
+  simulator.addOrder(1, cast(1, 1, 't-molotov', { mode: 'point', point: { x: 600, y: 300 } }, GRENADIER_AT))
+  simulator.addOrder(2, { id: 'player-2:1', seq: 1, tick: 100, type: 'move', target: { x: 600, y: 900 } })
+
+  let lastSlowed = -1
+  let lastBurning = -1
+  for (let tick = 100; tick <= 400; tick += 1) {
+    if (statusOf(simulator, tick, 2, 'slow')) lastSlowed = tick
+    if (statusOf(simulator, tick, 2, 'burn')) lastBurning = tick
+  }
+  assert.ok(lastSlowed > 110 && lastSlowed < 250, `it was slowed until it was clear of the fire, on tick ${lastSlowed}`)
+  // The 2-tick slow and the 180-tick burn were last renewed on the same tick.
+  assert.equal(lastBurning - lastSlowed, 180 - 2)
+})
+
+test('a burn deals damage on every pulse, in the owner\'s name, and resistance cuts each chunk', () => {
+  const plain = createGrenadierDuel([[400, 300]])
+  plain.addOrder(1, cast(1, 1, 't-ignite', { mode: 'unit', unitId: 2 }, GRENADIER_AT))
+  // Lit on tick 1 for 120 ticks, so it burns on ticks 30, 60, 90 and 120 and is out by tick 121.
+  assert.equal(plain.at(29).get(2)?.getHealth(), 1000)
+  assert.equal(plain.at(30).get(2)?.getHealth(), 970)
+  const pulse = plain.at(30).events.find((event) => event.type === 'damage')
+  assert.deepEqual(
+    pulse && 'targetId' in pulse ? [pulse.ownerId, pulse.targetId, pulse.amount] : undefined,
+    [1, 2, 30],
+    'the chunk is damage credited to whoever lit it',
+  )
+  assert.equal(plain.at(90).get(2)?.getHealth(), 910)
+  assert.equal(plain.at(120).get(2)?.getHealth(), 880)
+  assert.equal(statusOf(plain, 121, 2, 'burn'), undefined)
+  assert.equal(plain.at(200).get(2)?.getHealth(), 880, 'and nothing more once it has run out')
+
+  // 80% resistance cuts each 30 down to 6.
+  const guarded = new Simulator()
+  guarded.addPlayer(1, 'player-1', 'Player 1', GRENADIER_AT, grenadier)
+  guarded.addPlayer(2, 'player-2', 'Player 2', { x: 400, y: 300 }, new Champion({ ...brawler, abilities: ['t-guard'] }))
+  guarded.addOrder(2, {
+    id: 'player-2:1', seq: 1, tick: 1, type: 'cast', abilityId: 't-guard', target: { mode: 'none' }, origin: { x: 400, y: 300 },
+  })
+  guarded.addOrder(1, cast(1, 2, 't-ignite', { mode: 'unit', unitId: 2 }, GRENADIER_AT))
+  assert.equal(guarded.at(121).get(2)?.getHealth(), 1000 - 4 * 6)
+})
+
+test('three autos on one enemy give move speed that fades to nothing, and others do not count', () => {
+  const simulator = createGrenadierDuel([[450, 300], [450, 380]])
+  const auto = (seq: number, tick: number, targetId: number): CharacterOrder =>
+    ({ id: `player-1:${seq}`, seq, tick, type: 'attack', targetId })
+  // Enemy 2, then 3, then 2: the third auto overall, but only the second at enemy 2.
+  simulator.addOrder(1, auto(1, 1, 2))
+  simulator.addOrder(1, auto(2, 61, 3))
+  simulator.addOrder(1, auto(3, 121, 2))
+  simulator.addOrder(1, auto(4, 181, 2))
+
+  const markers = (tick: number, id: number) => simulator.at(tick).get(id)?.getMarkers().length
+  assert.equal(markers(4, 2), 1, 'each auto marks its target')
+  assert.equal(markers(64, 3), 1, 'and the other enemy keeps its own count')
+  assert.equal(markers(124, 2), 2)
+  assert.equal(statusOf(simulator, 124, 1, 'haste'), undefined, 'three autos in all, but not on one enemy')
+  // Autos land 3 ticks after they are ordered: the third at enemy 2 is on tick 184.
+  assert.equal(statusOf(simulator, 183, 1, 'haste'), undefined)
+  const haste = statusOf(simulator, 184, 1, 'haste')
+  assert.deepEqual([haste?.amount, haste?.fades, haste?.endTick], [0.5, true, 184 + 120])
+  assert.equal(markers(184, 2), 0, 'the marks are spent')
+  assert.equal(markers(184, 3), 1, 'but the other enemy keeps its own')
+})
+
+test('the fading speed starts at its full bonus, falls in a straight line and ends at the base speed', () => {
+  const simulator = createGrenadierDuel([[450, 300]])
+  for (const [seq, tick] of [[1, 1], [2, 61], [3, 121]]) {
+    simulator.addOrder(1, { id: `player-1:${seq}`, seq, tick, type: 'attack', targetId: 2 })
+  }
+  // Heads away along y once the third auto has landed, on tick 124; the haste runs to tick 244.
+  simulator.addOrder(1, { id: 'player-1:4', seq: 4, tick: 125, type: 'move', target: { x: 300, y: 1000 } })
+
+  const step = (tick: number): number => {
+    const before = simulator.at(tick - 1).get(1)?.getPosition()
+    const after = simulator.at(tick).get(1)?.getPosition()
+    assert.ok(before && after)
+    return Math.hypot(after.x - before.x, after.y - before.y)
+  }
+  const base = grenadier.moveSpeed / GAME_TPS
+  // The step over (t - 1, t] uses the share of the haste still ahead at t - 1.
+  const expected = (tick: number): number => base * (1 + 0.5 * Math.max(0, Math.min(1, (244 - (tick - 1)) / 120)))
+
+  const sampled = [126, 150, 186, 220, 243]
+  const steps = sampled.map(step)
+  sampled.forEach((tick, index) => assertClose(steps[index], expected(tick)))
+  assert.ok(steps[0] > base * 1.4, 'it starts near the full 50%')
+  assert.ok(steps.every((value, index) => index === 0 || value < steps[index - 1]), 'and only falls')
+  assert.ok(steps[steps.length - 1] < base * 1.01, 'to almost nothing')
+  assertClose(step(245), base)
+  assertClose(step(300), base)
+})
+
+test('burn, fading haste and blind survive a checkpoint restore', () => {
+  const build = (): Simulator => {
+    const simulator = createGrenadierDuel([[450, 300]])
+    for (const [seq, tick] of [[1, 1], [2, 61], [3, 121]]) {
+      simulator.addOrder(1, { id: `player-1:${seq}`, seq, tick, type: 'attack', targetId: 2 })
+    }
+    simulator.addOrder(1, cast(4, 130, 't-ignite', { mode: 'unit', unitId: 2 }, GRENADIER_AT))
+    simulator.addOrder(1, { id: 'player-1:5', seq: 5, tick: 135, type: 'move', target: { x: 300, y: 1000 } })
+    return simulator
+  }
+  const record = (simulator: Simulator, from: number, to: number): Map<number, string> => {
+    const frames = new Map<number, string>()
+    for (let tick = from; tick <= to; tick += 1) {
+      const frame = simulator.at(tick)
+      frames.set(tick, JSON.stringify([frame.get(1)?.getPosition(), frame.get(2)?.getHealthState(), frame.get(1)?.getStatuses()]))
+    }
+    return frames
+  }
+  const expected = record(build(), 1, 280)
+
+  const original = build()
+  original.advanceTo(160)
+  original.setCommitTick(150)
+  const snapshot = original.snapshot()
+  const parsed = GameSnapshotSchema.safeParse(snapshot)
+  assert.equal(parsed.success, true)
+  const statuses = (parsed.success ? parsed.data.checkpoint.characters : []).flatMap((character) => character.statuses)
+  assert.equal(statuses.some((status) => status.kind === 'burn'), true, 'the burn travels in the checkpoint')
+  assert.equal(statuses.some((status) => status.kind === 'haste' && status.fades === true), true, 'and so does the fading')
+
+  const restored = new Simulator()
+  restored.replaceFromSnapshot(snapshot)
+  for (const [tick, frame] of record(restored, 151, 280)) assert.equal(frame, expected.get(tick), `tick ${tick}`)
+})
+
+// Trinketmaster kit, against the copy in fixtures.ts. The trinketmaster is 17 across and a brawler
+// 18, the stick and its recall fly 10 px a tick and the stick can be picked up from 16 + 17 away.
+
+const TRINKET_AT: Vector2 = { x: 300, y: 300 }
+const STICK_AT: Vector2 = { x: 600, y: 300 }
+const EAST: CastTarget = { mode: 'direction', dir: { x: 1, y: 0 } }
+// Thrown east on tick 1, the stick leaves on tick 5, flies its 300 px in 30 ticks and is down on tick 36.
+const STICK_DOWN = 36
+const STICK_PICKUP_REACH = 16 + trinketmaster.radius
+
+function createStickDuel(enemies: Array<[number, number, Champion?]> = []): Simulator {
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', TRINKET_AT, trinketmaster)
+  enemies.forEach(([x, y, champion], index) => {
+    simulator.addPlayer(index + 2, `player-${index + 2}`, `Player ${index + 2}`, { x, y }, champion ?? brawler)
+  })
+  return simulator
+}
+
+function throwStick(simulator: Simulator): void {
+  simulator.addOrder(1, cast(1, 1, 't-stick', EAST, TRINKET_AT))
+}
+
+const sticksOut = (simulator: Simulator, tick: number) =>
+  simulator.at(tick).getEntities().filter((entity) => entity.defId === 't-stick')
+const throwCooldown = (simulator: Simulator, tick: number) =>
+  simulator.at(tick).get(1)?.getAbilityCooldown('t-stick')
+
+defineAbility({
+  id: 't-root-test',
+  targeting: 'unit',
+  range: 300,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: 600,
+  apply: [root(300, targetUnit())],
+})
+
+test('a stick lands where its flight ends, and stays there with no timer', () => {
+  const simulator = createStickDuel()
+  throwStick(simulator)
+
+  assert.deepEqual(simulator.at(STICK_DOWN - 1).getEntities().map((entity) => entity.defId), ['t-stick-shot'])
+  assert.deepEqual(sticksOut(simulator, STICK_DOWN).map((entity) => entity.origin), [STICK_AT])
+  assert.equal(throwCooldown(simulator, STICK_DOWN)?.ticksRemaining, 5 + 480 - STICK_DOWN)
+  // Long after the throw could be used again, it is still lying there.
+  assert.equal(sticksOut(simulator, 536).length, 1)
+  assert.equal(throwCooldown(simulator, 536)?.ready, true)
+})
+
+test('walking over the stick picks it up, and the throw then has no more than a second left', () => {
+  const simulator = createStickDuel()
+  throwStick(simulator)
+  simulator.addOrder(1, { id: 'player-1:2', seq: 2, tick: 40, type: 'move', target: STICK_AT })
+
+  let pickedUp: { tick: number; remaining: number; distance: number } | undefined
+  for (let tick = 40; tick <= 250 && !pickedUp; tick += 1) {
+    if (sticksOut(simulator, tick).length > 0) continue
+    const position = simulator.at(tick).get(1)?.getPosition() ?? { x: 0, y: 0 }
+    pickedUp = {
+      tick,
+      remaining: throwCooldown(simulator, tick)?.ticksRemaining ?? -1,
+      distance: Math.hypot(position.x - STICK_AT.x, position.y - STICK_AT.y),
+    }
+  }
+
+  assert.ok(pickedUp, 'it was picked up')
+  // The moment the two bodies touch, not when the walker reaches the middle of it.
+  assert.ok(pickedUp.distance <= STICK_PICKUP_REACH && pickedUp.distance > STICK_PICKUP_REACH - 3, `${pickedUp.distance}`)
+  assert.equal(pickedUp.remaining, 60, 'hundreds of ticks were left, now one second')
+  assert.equal(throwCooldown(simulator, pickedUp.tick + 59)?.ready, false)
+  assert.equal(throwCooldown(simulator, pickedUp.tick + 60)?.ready, true)
+})
+
+test('a pickup never lengthens a throw that had less than a second left', () => {
+  const simulator = createStickDuel()
+  throwStick(simulator)
+  // The throw is ready again on tick 485; the walk starts after that, so it is ready on arrival.
+  simulator.addOrder(1, { id: 'player-1:2', seq: 2, tick: 460, type: 'move', target: STICK_AT })
+
+  let remaining: number | undefined
+  for (let tick = 460; tick <= 700 && remaining === undefined; tick += 1) {
+    if (sticksOut(simulator, tick).length === 0) remaining = throwCooldown(simulator, tick)?.ticksRemaining
+  }
+  assert.equal(remaining, 0)
+})
+
+test('pressing the key again calls the stick back through enemies, hurting and slowing each once, and refunds nothing', () => {
+  // The enemy is 150 px along the line the stick flies, so it is hit on the way out and again on
+  // the way back.
+  const simulator = createStickDuel([[450, 300]])
+  throwStick(simulator)
+  simulator.addOrder(1, {
+    id: 'player-1:2', seq: 2, tick: 40, type: 'cast', abilityId: 't-recall', target: { mode: 'none' }, origin: TRINKET_AT,
+  })
+
+  // Going out, 10 px a tick from x = 300 on tick 5: it touches the enemy at x = 450 (26 apart) after
+  // 13 steps, on tick 18. That hurts but does not slow.
+  assert.equal(simulator.at(17).get(2)?.getHealth(), 1000)
+  assert.equal(simulator.at(18).get(2)?.getHealth(), 940)
+  assert.equal(simulator.at(18).get(2)?.getStatuses().some((status) => status.kind === 'slow'), false)
+
+  // Called back, it is launched on tick 42 from where the stick lay, and the stick is no longer on
+  // the ground.
+  const flying = simulator.at(42).getEntities()
+  assert.deepEqual(flying.map((entity) => entity.defId), ['t-stick-recall'])
+  assert.deepEqual(flying[0].origin, STICK_AT)
+  assert.equal(flying[0].targetId, 1, 'bound for its owner')
+  // Coming home from x = 600, it touches the enemy at x = 450 (32 apart) after 12 steps, on tick 54,
+  // and this time it hurts and slows.
+  assert.equal(simulator.at(53).get(2)?.getHealth(), 940)
+  assert.equal(simulator.at(54).get(2)?.getHealth(), 880)
+  const slowed = simulator.at(54).get(2)?.getStatuses().find((status) => status.kind === 'slow')
+  assert.deepEqual([slowed?.amount, slowed?.endTick], [0.4, 54 + 90])
+  // And it touches its owner at x = 300 (31 apart) after 27 steps, on tick 69, and is gone. Unlike
+  // walking over the stick, that does nothing for the throw: it is 480 ticks from tick 5 as before.
+  assert.equal(simulator.at(68).getEntities().length, 1)
+  assert.equal(simulator.at(69).getEntities().length, 0)
+  assert.equal(throwCooldown(simulator, 69)?.ticksRemaining, 5 + 480 - 69)
+  assert.equal(simulator.at(100).get(2)?.getHealth(), 880, 'hit once each way and no more')
+})
+
+test('the stick hurts every enemy in its line on the way out, once each, and none beside it or beyond it', () => {
+  // Along y = 300 the stick flies from x = 300 on tick 5 and comes down at x = 600 on tick 36. It
+  // touches within 8 + 18 = 26: the first enemy after 8 steps (tick 13), the second after 18 (tick
+  // 23). The third is 80 beside its path and the fourth 100 past where it comes down.
+  const simulator = createStickDuel([[400, 300], [500, 300], [500, 380], [700, 300]])
+  throwStick(simulator)
+
+  assert.equal(simulator.at(12).get(2)?.getHealth(), 1000)
+  assert.equal(simulator.at(13).get(2)?.getHealth(), 940)
+  assert.equal(simulator.at(22).get(3)?.getHealth(), 1000)
+  assert.equal(simulator.at(23).get(3)?.getHealth(), 940, 'it goes on through the first and hits the second')
+  assert.equal(sticksOut(simulator, STICK_DOWN).length, 1, 'and then comes down')
+  for (const id of [2, 3]) {
+    assert.equal(simulator.at(STICK_DOWN + 20).get(id)?.getHealth(), 940, `enemy ${id} was hit once`)
+    assert.equal(simulator.at(STICK_DOWN + 20).get(id)?.getStatuses().length, 0, 'and not slowed')
+  }
+  assert.equal(simulator.at(STICK_DOWN + 20).get(4)?.getHealth(), 1000, 'beside the path is not hit')
+  assert.equal(simulator.at(STICK_DOWN + 20).get(5)?.getHealth(), 1000, 'past where it lands is not hit')
+})
+
+test('a stick thrown at a wall comes down against it, inside the map, instead of flying out of it', () => {
+  const shotRadius = 8
+  // 92 px from the east wall: the stick's edge meets it after 9 whole steps of 10, so it comes down
+  // at x = 2390 on tick 5 + 9 + 1, not 300 px on at x = 2600 off the map.
+  const east = new Simulator()
+  east.addPlayer(1, 'player-1', 'Player 1', { x: 2300, y: 300 }, trinketmaster)
+  east.addOrder(1, cast(1, 1, 't-stick', EAST, { x: 2300, y: 300 }))
+  const eastStick = sticksOut(east, 15)[0]
+  assert.deepEqual(eastStick?.origin, { x: 2390, y: 300 })
+  assert.ok((eastStick?.origin.x ?? Infinity) <= GAME_ARENA_WIDTH - shotRadius)
+
+  // And the same up the page against the top wall: 32 px from it, so 3 steps, at y = 10.
+  const north = new Simulator()
+  north.addPlayer(1, 'player-1', 'Player 1', { x: 300, y: 40 }, trinketmaster)
+  north.addOrder(1, cast(1, 1, 't-stick', { mode: 'direction', dir: { x: 0, y: -1 } }, { x: 300, y: 40 }))
+  const northStick = sticksOut(north, 9)[0]
+  assert.deepEqual(northStick?.origin, { x: 300, y: 10 })
+
+  // Far from any wall it flies its whole length, so nothing changes there.
+  const open = createStickDuel()
+  throwStick(open)
+  assert.deepEqual(sticksOut(open, STICK_DOWN)[0]?.origin, STICK_AT)
+
+  // A stick against a wall can still be picked up by walking to it.
+  east.addOrder(1, { id: 'player-1:2', seq: 2, tick: 20, type: 'move', target: { x: 2392, y: 300 } })
+  let pickedUp = -1
+  for (let tick = 20; tick <= 100 && pickedUp < 0; tick += 1) {
+    if (sticksOut(east, tick).length === 0) pickedUp = tick
+  }
+  assert.ok(pickedUp > 0, 'it was picked up')
+})
+
+test('the stick called back follows an owner who walks away from it', () => {
+  const simulator = createStickDuel()
+  throwStick(simulator)
+  simulator.addOrder(1, {
+    id: 'player-1:2', seq: 2, tick: 40, type: 'cast', abilityId: 't-recall', target: { mode: 'none' }, origin: TRINKET_AT,
+  })
+  simulator.addOrder(1, { id: 'player-1:3', seq: 3, tick: 43, type: 'move', target: { x: 300, y: 900 } })
+
+  let headingSouth = 0
+  let home: { tick: number; y: number } | undefined
+  for (let tick = 43; tick <= 250 && !home; tick += 1) {
+    const frame = simulator.at(tick)
+    const stick = frame.getEntities()[0]
+    if (tick === 55) headingSouth = stick?.velocity.y ?? 0
+    if (!stick) home = { tick, y: frame.get(1)?.getPosition().y ?? 0 }
+  }
+
+  assert.ok(headingSouth > 0, 'it bent toward where its owner had got to')
+  assert.ok(home && home.tick > 69 && home.tick < 150, `it caught up on tick ${home?.tick}`)
+  assert.ok((home?.y ?? 0) > 300, 'while the owner was still walking')
+  assert.equal(throwCooldown(simulator, home?.tick ?? 0)?.ticksRemaining, 5 + 480 - (home?.tick ?? 0), 'and no refund')
+})
+
+test('warp blinks to the stick in a single tick, wherever it is, and the pickup follows on the next', () => {
+  const simulator = createStickDuel()
+  throwStick(simulator)
+  simulator.addOrder(1, cast(2, 40, 't-warp', { mode: 'none' }, TRINKET_AT))
+  const warp = getAbilityDef('t-warp')
+  assert.ok(warp)
+  const landed = 40 + warp.windUpTicks
+
+  assert.deepEqual(simulator.at(landed - 1).get(1)?.getPosition(), TRINKET_AT)
+  assert.deepEqual(simulator.at(landed).get(1)?.getPosition(), STICK_AT, 'there in a single tick')
+  assert.equal(simulator.at(landed).get(1)?.isDashing(), false, 'it is a blink, not a dash')
+  assert.equal(sticksOut(simulator, landed).length, 1, 'the stick is still down on the tick it arrives')
+  assert.equal(sticksOut(simulator, landed + 1).length, 0, 'and picked up on the next')
+  assert.equal(throwCooldown(simulator, landed + 1)?.ticksRemaining, 60)
+  assert.equal(
+    simulator.at(landed + 1).get(1)?.getAbilityCooldown('t-warp').ticksRemaining,
+    landed + warp.cooldownTicks - (landed + 1),
+    'warp itself is spent',
+  )
+})
+
+test('a blink is not held by a root, but is stopped by a silence, and needs a stick to blink to', () => {
+  // A root holds a walker but not a blink: the root lands on tick 41 and the blink on tick 48.
+  const rooted = createStickDuel([[400, 300, new Champion({ ...brawler, abilities: ['t-root-test'] })]])
+  throwStick(rooted)
+  rooted.addOrder(2, {
+    id: 'player-2:1', seq: 1, tick: 41, type: 'cast', abilityId: 't-root-test',
+    target: { mode: 'unit', unitId: 1 }, origin: { x: 400, y: 300 },
+  })
+  rooted.addOrder(1, cast(2, 45, 't-warp', { mode: 'none' }, TRINKET_AT))
+  assert.equal(rooted.at(47).get(1)?.getStatuses().some((status) => status.kind === 'root'), true)
+  assert.deepEqual(rooted.at(48).get(1)?.getPosition(), STICK_AT)
+
+  // The enemy readies a hush on tick 41 and autos on tick 42, so the silence is on from tick 45 and the
+  // cast on tick 50 is dropped: no blink, and nothing is spent.
+  const silenced = createStickDuel([[380, 300, trinketmaster]])
+  throwStick(silenced)
+  silenced.addOrder(2, cast(1, 41, 't-hush', { mode: 'none' }, { x: 380, y: 300 }))
+  silenced.addOrder(2, { id: 'player-2:2', seq: 2, tick: 42, type: 'attack', targetId: 1 })
+  silenced.addOrder(1, cast(2, 50, 't-warp', { mode: 'none' }, TRINKET_AT))
+  assert.equal(silenced.at(44).get(1)?.getStatuses().some((status) => status.kind === 'silence'), false)
+  assert.equal(silenced.at(46).get(1)?.getStatuses().some((status) => status.kind === 'silence'), true)
+  assert.deepEqual(silenced.at(56).get(1)?.getPosition(), TRINKET_AT)
+  assert.equal(silenced.at(56).get(1)?.getAbilityCooldown('t-warp').ready, true)
+
+  // With no stick out there is nowhere to blink to, and the cast is dropped the same way.
+  const bare = createStickDuel()
+  bare.addOrder(1, cast(1, 1, 't-warp', { mode: 'none' }, TRINKET_AT))
+  assert.deepEqual(bare.at(10).get(1)?.getPosition(), TRINKET_AT)
+  assert.equal(bare.at(10).get(1)?.getAbilityCooldown('t-warp').ready, true, 'the cooldown was not spent')
+})
+
+test('the throw needs no stick out and the recall needs one, so a second stick is not thrown and nothing is called back', () => {
+  const simulator = createStickDuel()
+  throwStick(simulator)
+  // The throw is ready again from tick 485, but a stick is still lying there, so this is dropped.
+  simulator.addOrder(1, cast(2, 600, 't-stick', EAST, TRINKET_AT))
+  assert.deepEqual(simulator.at(606).getEntities().map((entity) => entity.defId), ['t-stick'])
+  assert.equal(throwCooldown(simulator, 606)?.ready, true, 'and no cooldown was spent')
+
+  const bare = createStickDuel()
+  bare.addOrder(1, {
+    id: 'player-1:1', seq: 1, tick: 1, type: 'cast', abilityId: 't-recall', target: { mode: 'none' }, origin: TRINKET_AT,
+  })
+  assert.equal(bare.at(10).get(1)?.getAbilityCooldown('t-recall').ready, true)
+  assert.equal(bare.at(10).getEntities().length, 0)
+})
+
+test('the recall is the trinketmaster\'s to cast though it is on no key, and no one else\'s', () => {
+  assert.equal(trinketmaster.hasAbility('t-recall'), true)
+  assert.equal(trinketmaster.abilities.includes('t-recall'), false)
+  assert.equal(brawler.hasAbility('t-recall'), false)
+})
+
+test('a champion cannot have an ability whose recast does not exist', () => {
+  defineAbility({
+    id: 't-broken-recast',
+    targeting: 'none',
+    range: 0,
+    windUpTicks: 0,
+    backswingTicks: 0,
+    cooldownTicks: 60,
+    recast: 't-does-not-exist',
+    apply: [damage(1, enemiesInRadius(10))],
+  })
+
+  assert.throws(() => new Champion({ ...brawler, abilities: ['t-broken-recast'] }), /recast "t-does-not-exist" is unknown/)
+})
+
+test('a silence stops starting abilities and nothing else: the unit still walks, attacks and finishes a cast', () => {
+  // The trinketmaster readies a hush on tick 1 and autos the brawler on tick 2, which lands on tick 5 and
+  // silences it; the brawler's lash, begun on tick 1, still lands.
+  const simulator = createStickDuel([[380, 300]])
+  simulator.addOrder(1, cast(1, 1, 't-hush', { mode: 'none' }, TRINKET_AT))
+  simulator.addOrder(1, { id: 'player-1:2', seq: 2, tick: 2, type: 'attack', targetId: 2 })
+  stopAttacking(simulator, 1, 2 + trinketmaster.attackWindupTicks, TRINKET_AT)
+  simulator.addOrder(2, {
+    id: 'player-2:1', seq: 1, tick: 1, type: 'cast', abilityId: 't-lash',
+    target: { mode: 'unit', unitId: 1 }, origin: { x: 380, y: 300 },
+  })
+  // Silenced from tick 5 to 95. A shockwave (200 to everyone within 120) cast on tick 20 is dropped;
+  // an auto on tick 30 lands; a short walk on tick 40 goes (and ends the attack lock, so there is no
+  // second auto); and a shockwave on tick 100, once the silence is over, lands. The shockwave is not
+  // on cooldown from the lash, so only the silence can be what stops the first.
+  const shockwave = (seq: number, tick: number): CharacterOrder => ({
+    id: `player-2:${seq}`, seq, tick, type: 'cast', abilityId: 't-shockwave',
+    target: { mode: 'none' }, origin: { x: 380, y: 300 },
+  })
+  simulator.addOrder(2, shockwave(2, 20))
+  simulator.addOrder(2, { id: 'player-2:3', seq: 3, tick: 30, type: 'attack', targetId: 1 })
+  simulator.addOrder(2, { id: 'player-2:4', seq: 4, tick: 40, type: 'move', target: { x: 380, y: 340 } })
+  simulator.addOrder(2, { ...shockwave(5, 100), origin: { x: 380, y: 340 } })
+
+  const silencedAt = 2 + trinketmaster.attackWindupTicks
+  assert.equal(simulator.at(silencedAt - 1).get(2)?.getStatuses().some((status) => status.kind === 'silence'), false)
+  assert.equal(simulator.at(silencedAt).get(2)?.getStatuses().find((status) => status.kind === 'silence')?.endTick, silencedAt + 90)
+  assert.equal(simulator.at(10).get(1)?.getHealth(), trinketmaster.maxHp - 300, 'the lash already begun landed')
+  assert.equal(simulator.at(29).get(1)?.getHealth(), trinketmaster.maxHp - 300, 'the shockwave was dropped')
+  assert.equal(simulator.at(29).get(2)?.getAbilityCooldown('t-shockwave').ready, true, 'and not spent')
+  assert.equal(simulator.at(31).get(1)?.getHealth(), trinketmaster.maxHp - 300 - brawler.attackDamage, 'the auto landed')
+  assert.ok((simulator.at(60).get(2)?.getPosition().y ?? 300) > 300, 'and it walked')
+  assert.equal(
+    simulator.at(107).get(1)?.getHealth(),
+    trinketmaster.maxHp - 300 - brawler.attackDamage - 200,
+    'a shockwave cast after the silence is over lands',
+  )
+})
+
+test('auto, hush, auto: hush resets the auto timer, so the next auto follows at once and carries the silence', () => {
+  const simulator = createStickDuel([[360, 300]])
+  const windup = trinketmaster.attackWindupTicks
+  // One attack order keeps the trinketmaster swinging; the hush has no windup, so it does not interrupt.
+  // The hush is cast on tick 5 and the auto it frees begins on the tick after, once the reset is written.
+  simulator.addOrder(1, { id: 'player-1:1', seq: 1, tick: 1, type: 'attack', targetId: 2 })
+  simulator.addOrder(1, cast(2, 5, 't-hush', { mode: 'none' }, TRINKET_AT))
+  stopAttacking(simulator, 1, 6 + windup, TRINKET_AT)
+
+  // The auto at tick 1 puts its next one at tick 61; it has landed plainly, with nothing readied.
+  assert.equal(simulator.at(1 + windup).get(1)?.getNextAttackTick(), 61)
+  assert.equal(simulator.at(1 + windup).get(2)?.getHealth(), brawler.maxHp - trinketmaster.attackDamage)
+  assert.equal(simulator.at(1 + windup).get(2)?.getStatuses().length, 0)
+
+  // The hush brings the timer back to the hush's own tick, and readies the next auto.
+  assert.equal(simulator.at(5).get(1)?.getNextAttackTick(), 5)
+  assert.equal(markerCount(simulator, 5, 'ready:t-hush', 1), 1)
+
+  // So the auto follows at once, not on tick 61.
+  const second = simulator.at(6).get(1)?.getAction()
+  assert.equal(second?.kind, 'attack')
+  assert.equal(second?.startTick, 6)
+  assert.equal(simulator.at(6 + windup - 1).get(2)?.getStatuses().length, 0)
+
+  const frame = simulator.at(6 + windup)
+  assert.equal(frame.get(2)?.getHealth(), brawler.maxHp - 2 * trinketmaster.attackDamage, 'the second auto landed')
+  assert.equal(frame.get(1)?.getNextAttackTick(), 6 + trinketmaster.attackCooldownTicks)
+  assert.equal(frame.get(2)?.getStatuses().find((status) => status.kind === 'silence')?.endTick, 6 + windup + 90)
+  assert.equal(markerCount(simulator, 6 + windup, 'ready:t-hush', 1), 0, 'and used the readiness')
+})
+
+// Attack locks and readied autos, played through the trinketmaster's hush: an ability with no windup
+// that readies the next auto, so it can be used between autos. The enemy is a brawler that never acts,
+// 60 px north of the trinketmaster, so the stick thrown east misses it.
+
+const HUSH_ENEMY_AT: Vector2 = { x: 300, y: 240 }
+
+test('a cast with no windup leaves the attack lock alone, and one with a windup ends it', () => {
+  const swing = (ability: string, target: CastTarget): Simulator => {
+    const simulator = createStickDuel([[HUSH_ENEMY_AT.x, HUSH_ENEMY_AT.y]])
+    simulator.addOrder(1, { id: 'player-1:1', seq: 1, tick: 1, type: 'attack', targetId: 2 })
+    simulator.addOrder(1, cast(2, 20, ability, target, TRINKET_AT))
+    return simulator
+  }
+  const damageAt = (simulator: Simulator, tick: number): number =>
+    brawler.maxHp - (simulator.at(tick).get(2)?.getHealth() ?? 0)
+
+  // The hush comes between two autos and the swinging goes on: the auto on tick 1, the one the hush
+  // frees on tick 21 and the one after it on tick 81. The hush's is the first ability hit for the passive,
+  // so none of the three has its bonus.
+  const hushed = swing('t-hush', { mode: 'none' })
+  assert.equal(hushed.at(30).get(1)?.getAttackTarget(), 2)
+  assert.equal(damageAt(hushed, 90), 3 * trinketmaster.attackDamage)
+
+  // The stick takes a windup, so the trinketmaster stops to throw it and goes back to nothing.
+  const thrown = swing('t-stick', EAST)
+  assert.equal(thrown.at(19).get(1)?.getAttackTarget(), 2)
+  assert.equal(thrown.at(20).get(1)?.getAttackTarget(), undefined)
+  assert.equal(damageAt(thrown, 90), trinketmaster.attackDamage)
+})
+
+test('a cast with no windup does not interrupt a walk, a dash resumes it, and a cast with a windup stops it', () => {
+  const walkTo: Vector2 = { x: 400, y: 100 }
+  const archer = getChampion('t-archer')
+  const walking = (): Simulator => {
+    const simulator = new Simulator()
+    simulator.addPlayer(1, 'player-1', 'Player 1', ORIGIN, archer)
+    simulator.addPlayer(2, 'player-2', 'Player 2', { x: 100, y: 700 }, brawler)
+    simulator.addOrder(1, { id: 'player-1:1', seq: 1, tick: 1, type: 'move', target: walkTo })
+    return simulator
+  }
+  // Left alone it gets there 120 ticks after the order, at 2.5 px a tick.
+  const arrival = 1 + Math.ceil((walkTo.x - ORIGIN.x) / (archer.moveSpeed / GAME_TPS))
+  const castAt = (simulator: Simulator, seq: number, abilityId: string, target: CastTarget): void => {
+    const origin = simulator.at(20).get(1)?.getPosition()
+    assert.ok(origin)
+    simulator.addOrder(1, cast(seq, 20, abilityId, target, origin))
+  }
+
+  // Focus has no windup: the archer goes on walking, and gets there on time.
+  const focused = walking()
+  castAt(focused, 2, 't-focus', { mode: 'none' })
+  assert.equal(focused.at(20).get(1)?.getAbilityCooldown('t-focus').ready, false, 'it was cast')
+  assert.ok((focused.at(21).get(1)?.getPosition().x ?? 0) > (focused.at(20).get(1)?.getPosition().x ?? 0), 'and it did not stop')
+  assert.deepEqual(focused.at(arrival).get(1)?.getPosition(), walkTo)
+
+  // Leap has none either. It dashes, and when the dash is over the walk is still there to go on with.
+  const leapt = walking()
+  castAt(leapt, 2, 't-leap', { mode: 'point', point: { x: 148, y: 200 } })
+  assert.equal(leapt.at(22).get(1)?.isDashing(), true)
+  assert.equal(leapt.at(60).get(1)?.isDashing(), false)
+  assert.deepEqual(leapt.at(200).get(1)?.getPosition(), walkTo, 'and it walks on to where it was going')
+
+  // Snare has a windup, so the archer stops to throw it and does not set off again.
+  const snared = walking()
+  castAt(snared, 2, 't-snare', { mode: 'point', point: { x: 300, y: 100 } })
+  const stopped = snared.at(30).get(1)?.getPosition()
+  assert.ok(stopped && stopped.x < walkTo.x)
+  assert.deepEqual(snared.at(arrival + 20).get(1)?.getPosition(), stopped, 'it stays where it threw from')
+})
+
+test('a readied auto is kept for its time and then lost, and the hush is spent either way', () => {
+  const hush = getAbilityDef('t-hush')
+  assert.ok(hush?.empowerAttack)
+  const lasts = hush.empowerAttack.ticks
+  const attackAfterHush = (attackTick: number): Simulator => {
+    const simulator = createStickDuel([[HUSH_ENEMY_AT.x, HUSH_ENEMY_AT.y]])
+    simulator.addOrder(1, cast(1, 1, 't-hush', { mode: 'none' }, TRINKET_AT))
+    simulator.addOrder(1, { id: 'player-1:2', seq: 2, tick: attackTick, type: 'attack', targetId: 2 })
+    stopAttacking(simulator, 1, attackTick + trinketmaster.attackWindupTicks, TRINKET_AT)
+    return simulator
+  }
+  const silenced = (simulator: Simulator, tick: number): boolean =>
+    simulator.at(tick).get(2)?.getStatuses().some((status) => status.kind === 'silence') ?? false
+
+  const inTime = attackAfterHush(lasts - 10)
+  assert.equal(markerCount(inTime, lasts - 11, 'ready:t-hush', 1), 1, 'still readied')
+  assert.equal(silenced(inTime, lasts - 10 + trinketmaster.attackWindupTicks), true)
+  assert.equal(markerCount(inTime, lasts - 10 + trinketmaster.attackWindupTicks, 'ready:t-hush', 1), 0)
+
+  const late = attackAfterHush(lasts + 10)
+  assert.equal(markerCount(late, lasts + 9, 'ready:t-hush', 1), 0, 'it has gone')
+  const landed = lasts + 10 + trinketmaster.attackWindupTicks
+  assert.equal(late.at(landed).get(2)?.getHealth(), brawler.maxHp - trinketmaster.attackDamage, 'the auto still lands')
+  assert.equal(silenced(late, landed), false, 'but plainly')
+  assert.equal(late.at(landed).get(1)?.getAbilityCooldown('t-hush').ready, false, 'and the hush was spent')
+})
+
+defineAbility({
+  id: 't-blind-test',
+  targeting: 'unit',
+  range: 300,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: 600,
+  apply: [blind(120, targetUnit())],
+})
+
+test('an auto thrown while blind lands nothing, so it does not use up the readied one', () => {
+  const simulator = createStickDuel([[380, 300, new Champion({ ...brawler, abilities: ['t-blind-test'] })]])
+  // Blind from tick 1 to 121. The hush is readied on tick 2 and the auto ordered on tick 3 swings
+  // on ticks 3 and 63 at nothing, and on tick 123, with the blindness over, lands.
+  simulator.addOrder(2, {
+    id: 'player-2:1', seq: 1, tick: 1, type: 'cast', abilityId: 't-blind-test',
+    target: { mode: 'unit', unitId: 1 }, origin: { x: 380, y: 300 },
+  })
+  simulator.addOrder(1, cast(1, 2, 't-hush', { mode: 'none' }, TRINKET_AT))
+  simulator.addOrder(1, { id: 'player-1:2', seq: 2, tick: 3, type: 'attack', targetId: 2 })
+  const windup = trinketmaster.attackWindupTicks
+  stopAttacking(simulator, 1, 123 + windup, TRINKET_AT)
+
+  assert.equal(simulator.at(2).get(1)?.getStatuses().some((status) => status.kind === 'blind'), true)
+  const missed = simulator.at(63 + windup)
+  assert.equal(missed.get(2)?.getHealth(), brawler.maxHp, 'neither swing hit')
+  assert.equal(missed.get(2)?.getStatuses().length, 0)
+  assert.equal(markerCount(simulator, 63 + windup, 'ready:t-hush', 1), 1, 'and the hush is still readied')
+  assert.equal(missed.get(1)?.getNextAttackTick(), 123, 'the swings still took their cooldowns')
+
+  const landed = simulator.at(123 + windup)
+  assert.equal(landed.get(2)?.getHealth(), brawler.maxHp - trinketmaster.attackDamage)
+  assert.equal(landed.get(2)?.getStatuses().find((status) => status.kind === 'silence')?.endTick, 123 + windup + 90)
+  assert.equal(markerCount(simulator, 123 + windup, 'ready:t-hush', 1), 0)
+})
+
+test('a root holds a chasing attacker where it stands, and it carries on after its target once freed', () => {
+  const rooter = new Champion({ ...brawler, abilities: ['t-root-test'] })
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 300 }, brawler)
+  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 350, y: 300 }, rooter)
+  simulator.addOrder(1, { id: 'player-1:1', seq: 1, tick: 1, type: 'attack', targetId: 2 })
+  // The root lasts 300 ticks, from tick 5, while the attacker is still well out of reach.
+  simulator.addOrder(2, {
+    id: 'player-2:1', seq: 1, tick: 5, type: 'cast', abilityId: 't-root-test',
+    target: { mode: 'unit', unitId: 1 }, origin: { x: 350, y: 300 },
+  })
+  const stopAttacker = 400
+  stopAttacking(simulator, 1, stopAttacker, { x: 300, y: 300 })
+
+  const root = simulator.at(6).get(1)?.getStatuses().find((status) => status.kind === 'root')
+  assert.ok(root)
+  const heldAt = simulator.at(10).get(1)?.getPosition()
+  assert.ok(heldAt && heldAt.x > 100 && heldAt.x < 350 - brawler.attackRange, 'it had set off, and was stopped short')
+  for (let tick = 11; tick < root.endTick; tick += 1) {
+    assert.deepEqual(simulator.at(tick).get(1)?.getPosition(), heldAt, `held on tick ${tick}`)
+    assert.equal(simulator.at(tick).get(1)?.getAttackTarget(), 2, `still after it on tick ${tick}`)
+  }
+  assert.equal(simulator.at(root.endTick - 1).get(2)?.getHealth(), brawler.maxHp, 'and nothing was hit')
+
+  // Freed, it walks the rest of the way and swings.
+  let hit = -1
+  for (let tick = root.endTick; tick < stopAttacker && hit < 0; tick += 1) {
+    if ((simulator.at(tick).get(2)?.getHealth() ?? 0) < brawler.maxHp) hit = tick
+  }
+  assert.ok(hit > root.endTick, 'it walked up first')
+  assert.ok(hit < root.endTick + 60, `and was swinging by tick ${hit}`)
+})
+
+test('a blink onto someone is no obstacle, and the two are pushed apart afterwards instead of stacking', () => {
+  // The enemy is standing on the stick, so the trinketmaster blinks right onto it.
+  const simulator = createStickDuel([[STICK_AT.x, STICK_AT.y]])
+  throwStick(simulator)
+  simulator.addOrder(1, cast(2, 40, 't-warp', { mode: 'none' }, TRINKET_AT))
+  const landed = 43
+
+  assert.deepEqual(simulator.at(landed).get(1)?.getPosition(), STICK_AT)
+  assert.deepEqual(simulator.at(landed).get(2)?.getPosition(), STICK_AT, 'for one frame, exactly on top')
+  const gap = (tick: number): number => {
+    const first = simulator.at(tick).get(1)?.getPosition()
+    const second = simulator.at(tick).get(2)?.getPosition()
+    return Math.hypot((first?.x ?? 0) - (second?.x ?? 0), (first?.y ?? 0) - (second?.y ?? 0))
+  }
+  assert.ok(gap(landed + 1) > 0)
+  assert.ok(Math.abs(gap(landed + 40) - (trinketmaster.radius + brawler.radius)) < 1e-6, 'and they settle just touching')
+})
+
+test('a stick on the ground, a stick coming home and a silence survive a checkpoint restore', () => {
+  const build = (): Simulator => {
+    const simulator = createStickDuel([[450, 300]])
+    throwStick(simulator)
+    simulator.addOrder(1, {
+      id: 'player-1:2', seq: 2, tick: 40, type: 'cast', abilityId: 't-recall', target: { mode: 'none' }, origin: TRINKET_AT,
+    })
+    // Hush readied on tick 80, and the auto that carries it walks up to the enemy 150 px away.
+    simulator.addOrder(1, cast(3, 80, 't-hush', { mode: 'none' }, TRINKET_AT))
+    simulator.addOrder(1, { id: 'player-1:4', seq: 4, tick: 81, type: 'attack', targetId: 2 })
+    return simulator
+  }
+  const record = (simulator: Simulator, from: number, to: number): Map<number, string> => {
+    const frames = new Map<number, string>()
+    for (let tick = from; tick <= to; tick += 1) {
+      const frame = simulator.at(tick)
+      frames.set(tick, JSON.stringify([
+        frame.getEntities(),
+        frame.get(1)?.getAbilityCooldown('t-stick'),
+        frame.get(2)?.getHealthState(),
+        frame.get(2)?.getStatuses(),
+        frame.get(1)?.getPosition(),
+        frame.get(1)?.getAttackTarget(),
+        frame.get(1)?.getMarkers(),
+      ]))
+    }
+    return frames
+  }
+  const expected = record(build(), 1, 140)
+  assert.equal(
+    build().at(140).get(2)?.getStatuses().some((status) => status.kind === 'silence'),
+    true,
+    'the hush landed',
+  )
+
+  // One checkpoint with the stick lying on the ground, one with it on its way home.
+  const original = build()
+  original.advanceTo(39)
+  original.setCommitTick(38)
+  const onGround = original.snapshot()
+  original.advanceTo(57)
+  original.setCommitTick(55)
+  const coming = original.snapshot()
+  // And one on the way to the enemy, with the attack lock and the readied hush in it.
+  original.advanceTo(100)
+  original.setCommitTick(95)
+  const chasing = original.snapshot()
+  const chaser = chasing.checkpoint.characters.find((character) => character.characterId === 1)
+  assert.equal(chaser?.attackTarget?.targetId, 2)
+  assert.equal(onGround.checkpoint.entities.map((entity) => entity.defId).join(), 't-stick')
+  assert.equal(coming.checkpoint.entities[0]?.defId, 't-stick-recall')
+  assert.equal(coming.checkpoint.entities[0]?.targetId, 1, 'it remembers who it is bound for')
+
+  for (const [snapshot, committed] of [[onGround, 38], [coming, 55], [chasing, 95]] as const) {
+    assert.equal(GameSnapshotSchema.safeParse(snapshot).success, true)
+    const restored = new Simulator()
+    restored.replaceFromSnapshot(snapshot)
+    for (const [tick, frame] of record(restored, committed + 1, 140)) assert.equal(frame, expected.get(tick), `tick ${tick}`)
+  }
+})
+
+// Ninja kit, against the copy in fixtures.ts. The ninja starts at (300, 300) and its target is a
+// brawler on the same row. Q dashes 300 px at 20 px a tick, so a dash east from the start ends on
+// (600, 300) 15 ticks after it begins, one tick after the cast. Bodies touch when they are 34 apart
+// (16 and 18), so a dash passes through an enemy whose centre is within 34 of its path.
+
+const NINJA_AT: Vector2 = { x: 300, y: 300 }
+const STEP_RANGE = 300
+// The dash moves 20 px a tick from the tick after the cast, so a dash of 300 px cast on tick 1 is over
+// on tick 16.
+const STEP_TICKS = 15
+// What a dash does to an enemy it passes happens when the ninja's body reaches it, not when the dash
+// is ordered. An enemy at (400, 300) is touched on tick 5, when the step from x = 360 to 380 gets
+// within 34 of it.
+const CONTACT = 5
+// The dash back is ready a second after the dash that left the shadow reached its enemy.
+const RETURN_READY = CONTACT + 60
+
+function createNinjaDuel(enemies: Array<[number, number, Champion?]> = [[400, 300]]): Simulator {
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', NINJA_AT, ninja)
+  enemies.forEach(([x, y, champion], index) => {
+    simulator.addPlayer(index + 2, `player-${index + 2}`, `Player ${index + 2}`, { x, y }, champion ?? brawler)
+  })
+  return simulator
+}
+
+// Q aimed along the row it stands on, `length` px ahead (east, or west for a negative one).
+function stepAlong(seq: number, tick: number, origin: Vector2, length = STEP_RANGE): CastOrder {
+  return cast(seq, tick, 't-shadowstep', { mode: 'point', point: { x: origin.x + length, y: origin.y } }, origin)
+}
+
+const shadowsOut = (simulator: Simulator, tick: number) =>
+  simulator.at(tick).getEntities().filter((entity) => entity.defId === 't-shadow')
+const slowedAt = (simulator: Simulator, tick: number, id = 2): boolean =>
+  simulator.at(tick).get(id)?.getStatuses().some((status) => status.kind === 'slow') ?? false
+const healthAt = (simulator: Simulator, tick: number, id = 2): number | undefined =>
+  simulator.at(tick).get(id)?.getHealth()
+// The first tick in the range on which the condition holds, reading the frames in order.
+function firstTick(from: number, to: number, holds: (tick: number) => boolean): number | undefined {
+  for (let tick = from; tick <= to; tick += 1) {
+    if (holds(tick)) return tick
+  }
+  return undefined
+}
+
+test('a dash hurts and slows an enemy as the ninja passes it, and the first it passes gives a shadow stack, most of the cooldown back and a shadow where it was cast', () => {
+  const simulator = createNinjaDuel()
+  simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
+
+  // Nothing happens when it is ordered, or on the way there.
+  for (const tick of [1, 3, CONTACT - 1]) {
+    const frame = simulator.at(tick)
+    assert.equal(frame.get(2)?.getHealth(), brawler.maxHp, `tick ${tick}: not hurt yet`)
+    assert.equal(frame.get(2)?.getStatuses().length, 0)
+    assert.equal(markerCount(simulator, tick, 'shadow', 1), 0)
+    assert.equal(frame.getEntities().length, 0)
+    assert.equal(frame.get(1)?.getAbilityCooldown('t-shadowstep').ticksRemaining, 481 - tick, 'the whole cooldown so far')
+  }
+
+  const frame = simulator.at(CONTACT)
+  assert.equal(frame.get(2)?.getHealth(), brawler.maxHp - 60, 'hurt')
+  const slow = frame.get(2)?.getStatuses().find((status) => status.kind === 'slow')
+  assert.equal(slow?.amount, 0.4)
+  assert.equal(slow?.endTick, CONTACT + 90, 'for 1.5 s from when it was reached')
+  assert.equal(markerCount(simulator, CONTACT, 'shadow', 1), 1, 'a shadow stack on the ninja')
+  assert.equal(markerCount(simulator, CONTACT, 'shadow', 2), 0, 'and none on the enemy')
+  assert.equal(frame.get(1)?.getAbilityCooldown('t-shadowstep').ticksRemaining, 1 + 480 - 360 - CONTACT, 'three quarters of the 8 s came back')
+  assert.equal(frame.get(1)?.getAbilityCooldown('t-shadowreturn').ticksRemaining, 60, 'and the dash back has a second to wait')
+
+  const shadows = shadowsOut(simulator, CONTACT)
+  assert.equal(shadows.length, 1, 'a shadow')
+  assert.deepEqual(entityPosAt(shadows[0], CONTACT), NINJA_AT, 'where it was cast from, not where the ninja is now')
+  assert.ok((frame.get(1)?.getPosition().x ?? 0) > 360, 'which it left behind')
+
+  assert.equal(simulator.at(2 + STEP_TICKS - 2).get(1)?.isDashing(), true)
+  assert.equal(simulator.at(2 + STEP_TICKS - 1).get(1)?.isDashing(), false, 'and the dash ends on tick 16')
+  assert.ok((simulator.at(2 + STEP_TICKS).get(1)?.getPosition().x ?? 0) > 500, 'well past the enemy')
+  assert.deepEqual(simulator.at(2 + STEP_TICKS).get(2)?.getPosition(), { x: 400, y: 300 }, 'and the enemy was not shoved along')
+})
+
+test('an enemy is judged where it is when the ninja reaches it: one that walks into the path is hit, and one that walks out of it is not', () => {
+  // Both are 40 px off the row at the start, or on it, which is outside the 34 that touches.
+  const walksIn = createNinjaDuel([[450, 340]])
+  walksIn.addOrder(1, stepAlong(1, 1, NINJA_AT))
+  walksIn.addOrder(2, { id: 'player-2:1', seq: 1, tick: 1, type: 'move', target: { x: 450, y: 300 } })
+  const walksOut = createNinjaDuel([[450, 310]])
+  walksOut.addOrder(1, stepAlong(1, 1, NINJA_AT))
+  walksOut.addOrder(2, { id: 'player-2:1', seq: 1, tick: 1, type: 'move', target: { x: 450, y: 600 } })
+
+  assert.equal(healthAt(walksIn, 1), brawler.maxHp, 'it is out of the way when the dash is ordered')
+  assert.equal(healthAt(walksIn, 2 + STEP_TICKS + 1), brawler.maxHp - 60, 'and has stepped into it by the time the ninja gets there')
+  assert.equal(healthAt(walksOut, 1), brawler.maxHp, 'the other is in the way when the dash is ordered, but nothing happens yet')
+  assert.equal(healthAt(walksOut, 2 + STEP_TICKS + 1), brawler.maxHp, 'and has gone by the time the ninja gets there')
+  assert.equal(shadowsOut(walksOut, 2 + STEP_TICKS + 1).length, 0, 'so there was nothing to leave a shadow for')
+})
+
+test('a dash through passes through a character where an ordinary dash shoves it along', () => {
+  // Both dash 120 px east from the start at a character 50 px ahead of it.
+  const dashAt = (champion: Champion, abilityId: string, aim: Vector2): Simulator => {
+    const simulator = new Simulator()
+    simulator.addPlayer(1, 'player-1', 'Player 1', NINJA_AT, champion)
+    simulator.addPlayer(2, 'player-2', 'Player 2', { x: 350, y: 300 }, brawler)
+    simulator.addOrder(1, cast(1, 1, abilityId, { mode: 'point', point: aim }, NINJA_AT))
+    return simulator
+  }
+
+  const through = dashAt(ninja, 't-shadowstep', { x: 420, y: 300 })
+  assert.ok((through.at(10).get(1)?.getPosition().x ?? 0) > (through.at(10).get(2)?.getPosition().x ?? 0), 'the ninja came out the far side')
+
+  // The leap is an ordinary dash, so the brawler is carried along ahead of the archer and never passed.
+  const shoved = dashAt(getChampion('t-archer'), 't-leap', { x: 420, y: 300 })
+  assert.ok((shoved.at(10).get(1)?.getPosition().x ?? 0) < (shoved.at(10).get(2)?.getPosition().x ?? 0), 'the archer is still behind')
+  assert.ok((shoved.at(10).get(2)?.getPosition().x ?? 0) > 350, 'having pushed it along')
+})
+
+test('a dash that passes through nobody changes nothing but where the ninja is', () => {
+  const simulator = createNinjaDuel([[400, 400]])
+  simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
+
+  const over = 2 + STEP_TICKS + 2
+  const frame = simulator.at(over)
+  assert.equal(frame.get(2)?.getHealth(), brawler.maxHp, 'not hurt')
+  assert.equal(frame.get(2)?.getStatuses().length, 0)
+  assert.equal(markerCount(simulator, over, 'shadow', 1), 0, 'no stack')
+  assert.equal(frame.getEntities().length, 0, 'no shadow')
+  assert.equal(frame.get(1)?.getAbilityCooldown('t-shadowstep').ticksRemaining, 481 - over, 'and the whole cooldown, running from the cast')
+  assert.equal(frame.get(1)?.isDashing(), false, 'though it did dash')
+  assert.deepEqual(frame.get(1)?.getPosition(), { x: 600, y: 300 })
+})
+
+test('a dash through several enemies hurts and slows each as it reaches it, once, and gives one stack, not one each', () => {
+  const simulator = createNinjaDuel([[400, 300], [500, 300 + 20], [450, 300 + 100]])
+  simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
+
+  const hitAt = new Map<number, number>()
+  for (let tick = 1; tick <= 2 + STEP_TICKS + 2; tick += 1) {
+    for (const id of [2, 3, 4]) {
+      if (!hitAt.has(id) && (healthAt(simulator, tick, id) ?? 0) < brawler.maxHp) hitAt.set(id, tick)
+    }
+  }
+  const end = 2 + STEP_TICKS + 2
+  assert.equal(hitAt.get(2), CONTACT)
+  assert.ok((hitAt.get(3) ?? 0) > CONTACT, 'the second enemy is hurt later, when the ninja gets to it')
+  assert.equal(hitAt.has(4), false, 'the one off to the side is not touched')
+  assert.equal(healthAt(simulator, end, 2), brawler.maxHp - 60, 'each once')
+  assert.equal(healthAt(simulator, end, 3), brawler.maxHp - 60)
+  assert.equal(slowedAt(simulator, end, 4), false)
+  assert.equal(markerCount(simulator, end, 'shadow', 1), 1)
+  // What the first one sets off is set off once: the cooldown is refunded once, not once per enemy.
+  assert.equal(simulator.at(end).get(1)?.getAbilityCooldown('t-shadowstep').ticksRemaining, 1 + 480 - 360 - end)
+})
+
+test('a dash passes through an enemy exactly when their bodies touch along its path', () => {
+  // Each case is a dash aimed `length` px east of the start and an enemy somewhere; 34 is the limit.
+  const passes = (enemy: [number, number], length = STEP_RANGE): boolean => {
+    const simulator = createNinjaDuel([enemy])
+    simulator.addOrder(1, stepAlong(1, 1, NINJA_AT, length))
+    return (healthAt(simulator, 2 + Math.ceil(length / 20) + 1) ?? 0) < brawler.maxHp
+  }
+
+  assert.equal(passes([450, 300 + 33]), true, 'clipping its edge')
+  assert.equal(passes([450, 300 - 33]), true, 'on either side')
+  assert.equal(passes([450, 300 + 36]), false, 'just wide of it')
+  assert.equal(passes([430, 300], 100), true, 'near the end of a short dash')
+  assert.equal(passes([520, 300], 100), false, 'beyond the end of a short dash')
+  assert.equal(passes([600, 300 + 20]), true, 'right at the end of a full one')
+  assert.equal(passes([250, 300]), false, 'behind it')
+})
+
+test('a dash is not past a teammate, only an enemy', () => {
+  const simulator = createTeamGame([
+    { champion: ninja, x: 300, y: 300, team: 1 },
+    { x: 400, y: 300, team: 1 },
+  ])
+  simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
+
+  const over = 2 + STEP_TICKS + 2
+  assert.equal(slowedAt(simulator, over), false)
+  assert.equal(healthAt(simulator, over), brawler.maxHp, 'not hurt')
+  assert.equal(markerCount(simulator, over, 'shadow', 1), 0)
+  assert.equal(simulator.at(over).getEntities().length, 0)
+})
+
+test('the key dashes forward while no shadow is out and back to it while one is, and the other is refused', () => {
+  const step = getAbilityDef('t-shadowstep')
+  assert.ok(step)
+  assert.equal(abilityOnKey(step, () => false).id, 't-shadowstep')
+  assert.equal(abilityOnKey(step, () => true).id, 't-shadowreturn')
+  assert.equal(ninja.hasAbility('t-shadowreturn'), true, 'the ninja can cast the return though it is on no key')
+
+  // With no shadow out the return is dropped, and with one out the step is.
+  const bare = createNinjaDuel()
+  bare.addOrder(1, cast(1, 1, 't-shadowreturn', { mode: 'none' }, NINJA_AT))
+  assert.equal(bare.at(3).get(1)?.isDashing(), false)
+  assert.equal(bare.at(3).get(1)?.getAbilityCooldown('t-shadowreturn').ready, true)
+
+  const held = createNinjaDuel()
+  held.addOrder(1, stepAlong(1, 1, NINJA_AT))
+  held.addOrder(1, stepAlong(2, 2 + STEP_TICKS + 5, held.at(2 + STEP_TICKS + 5).get(1)?.getPosition() ?? NINJA_AT, -100))
+  assert.equal(held.at(2 + STEP_TICKS + 8).get(1)?.isDashing(), false, 'refused while a shadow is out')
+})
+
+test('the dash back is not ready the moment the dash forward is over, only a second after it reached its enemy', () => {
+  const simulator = createNinjaDuel()
+  simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
+  const waitAtContact = simulator.at(CONTACT).get(1)?.getAbilityCooldown('t-shadowreturn').ticksRemaining
+  const early = 2 + STEP_TICKS + 3
+  const from = simulator.at(early).get(1)?.getPosition()
+  assert.ok(from)
+  simulator.addOrder(1, cast(2, early, 't-shadowreturn', { mode: 'none' }, from))
+  simulator.addOrder(1, cast(3, RETURN_READY, 't-shadowreturn', { mode: 'none' }, from))
+
+  assert.equal(waitAtContact, 60, 'it starts when the dash forward reaches its enemy')
+  assert.equal(simulator.at(early - 1).get(1)?.isDashing(), false, 'the dash forward is over')
+  assert.equal(simulator.at(early + 2).get(1)?.isDashing(), false, 'but the dash back is refused')
+  assert.deepEqual(simulator.at(early + 2).get(1)?.getPosition(), from, 'the ninja has not moved')
+  assert.equal(shadowsOut(simulator, early + 2).length, 1, 'and the shadow is still where it was')
+  assert.equal(simulator.at(RETURN_READY - 1).get(1)?.getAbilityCooldown('t-shadowreturn').ready, false)
+  assert.equal(simulator.at(RETURN_READY).get(1)?.getAbilityCooldown('t-shadowreturn').ticksRemaining, 60, 'it is ready the tick it is wanted, and is cast')
+  assert.equal(simulator.at(RETURN_READY + 3).get(1)?.isDashing(), true)
+})
+
+test('with a shadow out, a dash back through the enemy hurts it again as the ninja reaches it and leaves a new shadow where it was cast', () => {
+  const simulator = createNinjaDuel()
+  simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
+  const castTick = RETURN_READY + 5
+  const from = simulator.at(castTick).get(1)?.getPosition()
+  assert.ok(from)
+  simulator.addOrder(1, cast(2, castTick, 't-shadowreturn', { mode: 'none' }, from))
+
+  assert.equal(simulator.at(castTick - 1).get(1)?.getAbilityCooldown('t-shadowreturn').ready, true)
+  // Ordering it does nothing to the enemy yet.
+  assert.equal(healthAt(simulator, castTick), brawler.maxHp - 60, 'only the first dash has hurt it')
+  assert.equal(markerCount(simulator, castTick, 'shadow', 1), 1, 'and there is the one stack')
+  assert.deepEqual(entityPosAt(shadowsOut(simulator, castTick)[0], castTick), NINJA_AT, 'and the old shadow')
+
+  const touched = firstTick(castTick + 1, castTick + 40, (tick) => (healthAt(simulator, tick) ?? 0) < brawler.maxHp - 60)
+  assert.ok(touched !== undefined && touched > castTick + 5, `it reaches the enemy a few ticks into the dash, on tick ${touched}`)
+  const frame = simulator.at(touched)
+  assert.equal(frame.get(2)?.getHealth(), brawler.maxHp - 2 * 60, 'hurt again')
+  const slows = frame.get(2)?.getStatuses().filter((status) => status.kind === 'slow') ?? []
+  assert.deepEqual(slows.map((status) => status.endTick).sort((a, b) => a - b), [CONTACT + 90, touched + 90], 'slowed afresh')
+  assert.equal(markerCount(simulator, touched, 'shadow', 1), 2, 'a second stack')
+  assert.equal(frame.get(1)?.getAbilityCooldown('t-shadowreturn').ticksRemaining, 60, 'a second before it again')
+
+  const shadows = shadowsOut(simulator, touched)
+  assert.equal(shadows.length, 1, 'one shadow at a time')
+  assert.deepEqual(entityPosAt(shadows[0], touched), from, 'where it was cast from')
+  assert.ok((frame.get(1)?.getPosition().x ?? 0) < from.x, 'the ninja is heading back the way it came')
+
+  assert.equal(simulator.at(castTick + STEP_TICKS + 1).get(1)?.isDashing(), false)
+  assert.deepEqual(simulator.at(castTick + STEP_TICKS + 1).get(1)?.getPosition(), NINJA_AT, 'and it ends on the old shadow')
+})
+
+test('the dash back goes to the shadow from any distance, and reaches the enemy on the way when it gets there', () => {
+  const simulator = createNinjaDuel()
+  simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
+  // The ninja then walks a thousand pixels from the shadow, far beyond the reach of any dash.
+  simulator.addOrder(1, { id: 'player-1:2', seq: 2, tick: 30, type: 'move', target: { x: 1300, y: 300 } })
+  const castTick = 30 + Math.ceil(700 / (ninja.moveSpeed / GAME_TPS)) + 5
+  const from = simulator.at(castTick).get(1)?.getPosition()
+  assert.deepEqual(from, { x: 1300, y: 300 })
+  simulator.addOrder(1, cast(3, castTick, 't-shadowreturn', { mode: 'none' }, from))
+
+  assert.equal(simulator.at(castTick + 20).get(1)?.isDashing(), true, 'under way')
+  assert.equal(healthAt(simulator, castTick + 20), brawler.maxHp - 60, 'and the enemy 900 px away has not been touched')
+  const touched = firstTick(castTick + 21, castTick + 70, (tick) => (healthAt(simulator, tick) ?? 0) < brawler.maxHp - 60)
+  assert.ok(touched !== undefined && touched >= castTick + 40, `it is touched about forty ticks in, on tick ${touched}`)
+  assert.equal(shadowsOut(simulator, touched).length, 1)
+  assert.deepEqual(entityPosAt(shadowsOut(simulator, touched)[0], touched), from, 'a new shadow where it was cast from')
+
+  const over = castTick + 52
+  assert.equal(simulator.at(over).get(1)?.isDashing(), false)
+  assert.deepEqual(simulator.at(over).get(1)?.getPosition(), NINJA_AT, 'it arrives on the old shadow, a thousand pixels on')
+})
+
+test('a dash back to the shadow that passes through nobody loses it when it finishes, and the key is the forward dash again', () => {
+  const simulator = createNinjaDuel()
+  simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
+  // The enemy walks off the row, and the ninja comes back after the first dash's cooldown, which had
+  // most of it refunded, is up (on tick 121).
+  simulator.addOrder(2, { id: 'player-2:1', seq: 1, tick: 5, type: 'move', target: { x: 400, y: 800 } })
+  const castTick = 130
+  const from = simulator.at(castTick).get(1)?.getPosition()
+  assert.ok(from)
+  assert.ok((simulator.at(castTick).get(2)?.getPosition().y ?? 0) > 400, 'it is well off the row')
+  simulator.addOrder(1, cast(2, castTick, 't-shadowreturn', { mode: 'none' }, from))
+
+  assert.equal(simulator.at(castTick - 1).get(1)?.getAbilityCooldown('t-shadowstep').ready, true, 'it had run out while the shadow was out')
+  const done = castTick + STEP_TICKS
+  assert.equal(shadowsOut(simulator, done - 1).length, 1, 'the shadow is still there while the dash goes on')
+  assert.equal(shadowsOut(simulator, done).length, 0, 'and goes when it finishes having passed through no one')
+  assert.equal(simulator.at(done).get(1)?.getAbilityCooldown('t-shadowstep').ticksRemaining, 480, 'and the miss puts all 8 s back')
+  assert.equal(markerCount(simulator, done, 'shadow', 1), 1, 'no new stack, and the one there stays')
+  assert.equal(healthAt(simulator, done), brawler.maxHp - 60, 'no more damage than the first dash did')
+  assert.equal(slowedAt(simulator, done), false, 'and no new slow')
+
+  const step = getAbilityDef('t-shadowstep')
+  assert.ok(step)
+  assert.equal(abilityOnKey(step, (defId) => shadowsOut(simulator, done).some((entity) => entity.defId === defId)).id, 't-shadowstep')
+
+  // So Q cannot be cast twice in a row: a dash forward is refused straight after the miss.
+  const after = done + 20
+  const stoppedAt = simulator.at(after).get(1)?.getPosition()
+  assert.ok(stoppedAt)
+  simulator.addOrder(1, stepAlong(3, after, stoppedAt))
+  assert.equal(simulator.at(after + 2).get(1)?.isDashing(), false, 'the second dash is refused')
+  assert.equal(shadowsOut(simulator, after + 2).length, 0)
+})
+
+test('a shadow never times out, but does not outlive the ninja', () => {
+  const simulator = createNinjaDuel()
+  simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
+  simulator.addDeath(1, { tick: 1000, respawnTick: 1100 })
+
+  assert.equal(shadowsOut(simulator, CONTACT).length, 1)
+  assert.equal(shadowsOut(simulator, 600).length, 1, 'ten seconds on')
+  assert.equal(shadowsOut(simulator, 999).length, 1, 'and sixteen')
+  assert.equal(shadowsOut(simulator, 1002).length, 0, 'but not past its owner\'s death')
+  assert.equal(shadowsOut(simulator, 1200).length, 0, 'nor back with it')
+})
+
+test('shadow stacks stop at two however many dashes through an enemy there are, and wear off after six seconds', () => {
+  const simulator = createNinjaDuel()
+  simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
+  const secondAt = RETURN_READY + 5
+  const fromSecond = simulator.at(secondAt).get(1)?.getPosition()
+  assert.ok(fromSecond)
+  simulator.addOrder(1, cast(2, secondAt, 't-shadowreturn', { mode: 'none' }, fromSecond))
+  // The return has a second to wait from reaching the enemy, so the third dash is a second later still.
+  const secondTouched = firstTick(secondAt + 1, secondAt + 40, (tick) => markerCount(simulator, tick, 'shadow', 1) === 2)
+  assert.ok(secondTouched !== undefined)
+  const thirdAt = secondTouched + 70
+  const fromThird = simulator.at(thirdAt).get(1)?.getPosition()
+  assert.ok(fromThird)
+  assert.equal(markerCount(simulator, thirdAt - 1, 'shadow', 1), 2)
+  simulator.addOrder(1, cast(3, thirdAt, 't-shadowreturn', { mode: 'none' }, fromThird))
+
+  const thirdTouched = firstTick(thirdAt + 1, thirdAt + 40, (tick) =>
+    simulator.at(tick).get(2)?.getStatuses().some((status) => status.kind === 'slow' && status.endTick === tick + 90) ?? false)
+  assert.ok(thirdTouched !== undefined, 'the third dash went through the enemy too')
+  assert.equal(markerCount(simulator, thirdTouched, 'shadow', 1), 2, 'but there are still only two')
+  assert.equal(markerCount(simulator, thirdTouched + 359, 'shadow', 1), 2, 'six seconds after the last')
+  assert.equal(markerCount(simulator, thirdTouched + 360, 'shadow', 1), 0, 'and then both are gone together')
+})
+
+// Two shadow stacks at once for the tests that spend them, from an ability of their own that grants
+// three with a cap of two. The ninja is the same in every other way.
+defineAbility({
+  id: 't-shadow-grant',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: 600,
+  apply: [mark('shadow', 360, self(), { count: 3, cap: 2 })],
+})
+const stackedNinja = new Champion({ ...ninja, abilities: [...ninja.abilities, 't-shadow-grant'] })
+
+test('the ninja\'s auto spends one shadow stack for bonus damage, and an auto with none is plain', () => {
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', NINJA_AT, stackedNinja)
+  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 360, y: 300 }, brawler)
+  simulator.addOrder(1, cast(1, 1, 't-shadow-grant', { mode: 'none' }, NINJA_AT))
+  // One order, three autos, ticks 2, 62 and 122, landing four ticks after they start.
+  simulator.addOrder(1, { id: 'player-1:2', seq: 2, tick: 2, type: 'attack', targetId: 2 })
+  const third = 2 + 2 * ninja.attackCooldownTicks + ninja.attackWindupTicks
+  stopAttacking(simulator, 1, third, NINJA_AT)
+  const first = 2 + ninja.attackWindupTicks
+  const second = first + ninja.attackCooldownTicks
+
+  assert.equal(markerCount(simulator, 1, 'shadow', 1), 2, 'three were granted and two stayed')
+  assert.equal(simulator.at(first).get(2)?.getHealth(), brawler.maxHp - (ninja.attackDamage + 60), 'the first spends one')
+  assert.equal(markerCount(simulator, first, 'shadow', 1), 1, 'and leaves the other')
+  assert.ok(
+    simulator.at(first).get(1)?.getMarkers().find((marker) => marker.key === 'shadow')?.id.endsWith(':2'),
+    'the older of the two went first',
+  )
+  assert.equal(simulator.at(second).get(2)?.getHealth(), brawler.maxHp - 2 * (ninja.attackDamage + 60), 'the second spends it')
+  assert.equal(markerCount(simulator, second, 'shadow', 1), 0)
+  assert.equal(simulator.at(third).get(2)?.getHealth(), brawler.maxHp - 2 * (ninja.attackDamage + 60) - ninja.attackDamage, 'the third is plain')
+})
+
+test('an auto with no shadow stack is plain', () => {
+  const simulator = createNinjaDuel([[360, 300]])
+  simulator.addOrder(1, { id: 'player-1:1', seq: 1, tick: 1, type: 'attack', targetId: 2 })
+  stopAttacking(simulator, 1, 1 + ninja.attackWindupTicks, NINJA_AT)
+
+  assert.equal(simulator.at(1 + ninja.attackWindupTicks).get(2)?.getHealth(), brawler.maxHp - ninja.attackDamage)
+})
+
+test('the kunai hurts and slows every enemy in its line, and gives no shadow stack', () => {
+  const simulator = createNinjaDuel([[400, 300], [500, 300]])
+  simulator.addOrder(1, cast(1, 1, 't-kunai', EAST, NINJA_AT))
+
+  for (const [id, health] of [[2, 1000 - 60], [3, 1000 - 60]] as const) {
+    const frame = simulator.at(40)
+    assert.equal(frame.get(id)?.getHealth(), health, `enemy ${id} is hurt`)
+    assert.equal(frame.get(id)?.getStatuses().some((status) => status.kind === 'slow'), true, `and slowed`)
+    assert.equal(frame.get(id)?.getStatuses().some((status) => status.kind === 'root'), false)
+  }
+  assert.equal(markerCount(simulator, 40, 'shadow', 1), 0)
+})
+
+test('the kunai spends a shadow stack to hurt more and root instead of slow', () => {
+  const simulator = createNinjaDuel([[400, 300]])
+  simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
+  const castTick = 2 + STEP_TICKS + 5
+  const from = simulator.at(castTick).get(1)?.getPosition()
+  assert.ok(from)
+  const hurtBefore = simulator.at(castTick).get(2)?.getHealth()
+  simulator.addOrder(1, cast(2, castTick, 't-kunai', { mode: 'direction', dir: { x: -1, y: 0 } }, from))
+  const launch = castTick + 4
+
+  assert.equal(markerCount(simulator, launch - 1, 'shadow', 1), 1, 'still there during the windup')
+  assert.equal(markerCount(simulator, launch, 'shadow', 1), 0, 'spent when it launches')
+
+  let rooted = -1
+  for (let tick = launch; tick <= launch + 40 && rooted < 0; tick += 1) {
+    if (simulator.at(tick).get(2)?.getStatuses().some((status) => status.kind === 'root')) rooted = tick
+  }
+  assert.ok(rooted > launch, 'the enemy is rooted when it arrives')
+  const frame = simulator.at(rooted)
+  assert.equal(frame.get(2)?.getStatuses().find((status) => status.kind === 'root')?.endTick, rooted + 60)
+  assert.equal(frame.get(2)?.getHealth(), (hurtBefore ?? 0) - 110)
+  assert.equal(
+    frame.get(2)?.getStatuses().find((status) => status.kind === 'slow')?.endTick,
+    CONTACT + 90,
+    'and no new slow, only the one from the dash',
+  )
+})
+
+test('the kunai spends only one of two shadow stacks, and with none left it slows again', () => {
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', NINJA_AT, stackedNinja)
+  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 400, y: 300 }, brawler)
+  simulator.addOrder(1, cast(1, 1, 't-shadow-grant', { mode: 'none' }, NINJA_AT))
+  // The first kunai leaves on tick 9. Its seven seconds are up on tick 429, and by then the stacks,
+  // which last six, have worn off.
+  simulator.addOrder(1, cast(2, 5, 't-kunai', EAST, NINJA_AT))
+  const second = 9 + 7 * GAME_TPS
+  simulator.addOrder(1, cast(3, second, 't-kunai', EAST, NINJA_AT))
+
+  assert.equal(markerCount(simulator, 8, 'shadow', 1), 2)
+  assert.equal(markerCount(simulator, 9, 'shadow', 1), 1, 'one is spent')
+  let rooted = false
+  for (let tick = 9; tick <= 40; tick += 1) {
+    rooted = rooted || (simulator.at(tick).get(2)?.getStatuses().some((status) => status.kind === 'root') ?? false)
+  }
+  assert.equal(rooted, true, 'and it rooted the enemy')
+
+  assert.equal(markerCount(simulator, second - 1, 'shadow', 1), 0, 'the other wore off')
+  let slowed = false
+  let rootedAgain = false
+  for (let tick = second + 4; tick <= second + 40; tick += 1) {
+    const statuses = simulator.at(tick).get(2)?.getStatuses() ?? []
+    slowed = slowed || statuses.some((status) => status.kind === 'slow')
+    rootedAgain = rootedAgain || statuses.some((status) => status.kind === 'root')
+  }
+  assert.equal(slowed, true, 'the second kunai slows')
+  assert.equal(rootedAgain, false, 'and does not root')
+})
+
+test('a kunai with no shadow stack neither roots nor makes one', () => {
+  const simulator = createNinjaDuel([[400, 300]])
+  simulator.addOrder(1, cast(1, 1, 't-kunai', EAST, NINJA_AT))
+
+  assert.equal(markerCount(simulator, 10, 'shadow', 1), 0)
+  assert.equal(simulator.at(40).get(2)?.getStatuses().some((status) => status.kind === 'root'), false)
+})
+
+test('dodge gives move speed and a short window in which every auto aimed at the ninja misses', () => {
+  const simulator = createNinjaDuel([[360, 300]])
+  simulator.addOrder(1, cast(1, 1, 't-dodge', { mode: 'none' }, NINJA_AT))
+  // The brawler swings on tick 10, which is dodged, and again on tick 70, which is dodged too (the
+  // window runs to tick 73); the one on tick 130 is not. Its attack never ends.
+  simulator.addOrder(2, { id: 'player-2:1', seq: 1, tick: 10, type: 'attack', targetId: 1 })
+
+  const frame = simulator.at(1)
+  const haste = frame.get(1)?.getStatuses().find((status) => status.kind === 'haste')
+  assert.equal(haste?.amount, 0.4)
+  assert.equal(haste?.endTick, 1 + 90)
+  assert.equal(frame.get(1)?.getStatuses().find((status) => status.kind === 'dodge')?.endTick, 1 + 72)
+
+  assert.equal(simulator.at(12).get(1)?.getHealth(), ninja.maxHp, 'the first swing missed')
+  assert.equal(simulator.at(12).get(2)?.getNextAttackTick(), 70, 'though it was spent')
+  assert.equal(simulator.at(72).get(1)?.getHealth(), ninja.maxHp, 'and the second')
+  assert.equal(simulator.at(72).get(1)?.getStatuses().some((status) => status.kind === 'dodge'), true)
+  assert.equal(simulator.at(74).get(1)?.getStatuses().some((status) => status.kind === 'dodge'), false, 'it wears off')
+  assert.equal(simulator.at(131).get(1)?.getHealth(), ninja.maxHp - brawler.attackDamage, 'and the third lands')
+})
+
+test('a shot at a dodging ninja is spent without landing', () => {
+  const simulator = createNinjaDuel([[560, 300, gunner]])
+  simulator.addOrder(1, cast(1, 1, 't-dodge', { mode: 'none' }, NINJA_AT))
+  simulator.addOrder(2, { id: 'player-2:1', seq: 1, tick: 2, type: 'attack', targetId: 1 })
+  stopAttacking(simulator, 2, 2 + gunner.attackWindupTicks, { x: 560, y: 300 })
+
+  // It leaves on tick 5 and covers the 260 px in about twenty ticks, well inside the window.
+  assert.equal(simulator.at(5 + 4).getEntities().length, 1, 'the shot is on its way')
+  assert.equal(simulator.at(5 + 40).getEntities().length, 0, 'and has arrived')
+  assert.equal(simulator.at(5 + 40).get(1)?.getHealth(), ninja.maxHp)
+})
+
+test('dodge does not stop abilities', () => {
+  // The brawler lashes the ninja while it is dodging: that lands.
+  const lashed = createNinjaDuel([[360, 300]])
+  lashed.addOrder(1, cast(1, 1, 't-dodge', { mode: 'none' }, NINJA_AT))
+  lashed.addOrder(2, {
+    id: 'player-2:1', seq: 1, tick: 5, type: 'cast', abilityId: 't-lash',
+    target: { mode: 'unit', unitId: 1 }, origin: { x: 360, y: 300 },
+  })
+  assert.equal(lashed.at(5 + 9).get(1)?.getHealth(), ninja.maxHp - 300)
+})
+
+test('a dodged auto spends the attacker\'s readied hush, so it never lands the silence', () => {
+  // A trinketmaster readies its hush and autos a dodging ninja. The swing is dodged, and the hush is
+  // spent with it; the next swings, one inside the window and one after it, are plain.
+  const simulator = createNinjaDuel([[360, 300, trinketmaster]])
+  simulator.addOrder(1, cast(1, 1, 't-dodge', { mode: 'none' }, NINJA_AT))
+  simulator.addOrder(2, {
+    id: 'player-2:1', seq: 1, tick: 2, type: 'cast', abilityId: 't-hush', target: { mode: 'none' }, origin: { x: 360, y: 300 },
+  })
+  simulator.addOrder(2, { id: 'player-2:2', seq: 2, tick: 3, type: 'attack', targetId: 1 })
+  const first = 3 + trinketmaster.attackWindupTicks
+  const last = 3 + 2 * trinketmaster.attackCooldownTicks + trinketmaster.attackWindupTicks
+  stopAttacking(simulator, 2, last, { x: 360, y: 300 })
+
+  assert.equal(markerCount(simulator, first - 1, 'ready:t-hush', 2), 1, 'readied before the swing')
+  assert.equal(simulator.at(first).get(1)?.getHealth(), ninja.maxHp, 'dodged')
+  assert.equal(markerCount(simulator, first, 'ready:t-hush', 2), 0, 'and the hush is spent')
+  assert.equal(simulator.at(last).get(1)?.getHealth(), ninja.maxHp - trinketmaster.attackDamage, 'the swing after the window lands')
+  assert.equal(simulator.at(last).get(1)?.getStatuses().some((status) => status.kind === 'silence'), false, 'with no silence')
+})
+
+test('a dodged auto lands none of the attacker\'s effects: not a shackle, not the stack it would add', () => {
+  const enemyAt = { x: 300 + SWORD_GAP, y: 300 }
+  const simulator = createNinjaDuel([[enemyAt.x, enemyAt.y, sword]])
+  simulator.addOrder(1, cast(1, 1, 't-dodge', { mode: 'none' }, NINJA_AT))
+  simulator.addOrder(2, {
+    id: 'player-2:1', seq: 1, tick: 2, type: 'cast', abilityId: 't-shackle', target: { mode: 'none' }, origin: enemyAt,
+  })
+  simulator.addOrder(2, { id: 'player-2:2', seq: 2, tick: 3, type: 'attack', targetId: 1 })
+  const landing = 3 + sword.attackWindupTicks
+  stopAttacking(simulator, 2, landing, enemyAt)
+
+  assert.equal(markerCount(simulator, landing - 1, 'ready:t-shackle', 2), 1)
+  const frame = simulator.at(landing)
+  assert.equal(frame.get(1)?.getHealth(), ninja.maxHp, 'no damage')
+  assert.equal(frame.get(1)?.getStatuses().some((status) => status.kind === 'root' || status.kind === 'stun'), false, 'no shackle')
+  assert.equal(markerCount(simulator, landing, 'sword', 2), 0, 'no sword stack for the swordsman')
+  assert.equal(markerCount(simulator, landing, 'ready:t-shackle', 2), 0, 'and the shackle is used up')
+})
+
+test('dodging does not stop the ninja\'s own autos', () => {
+  const simulator = createNinjaDuel([[360, 300]])
+  simulator.addOrder(1, cast(1, 1, 't-dodge', { mode: 'none' }, NINJA_AT))
+  // The ninja itself attacks while dodging.
+  simulator.addOrder(1, { id: 'player-1:2', seq: 2, tick: 2, type: 'attack', targetId: 2 })
+  stopAttacking(simulator, 1, 2 + ninja.attackWindupTicks, NINJA_AT)
+
+  assert.equal(
+    simulator.at(2 + ninja.attackWindupTicks).get(2)?.getHealth(),
+    brawler.maxHp - ninja.attackDamage,
+    'dodging does not stop the ninja\'s own autos',
+  )
+})
+
+test('a dash with effects of its own, the shadow, the stacks and a dodge survive a checkpoint restore', () => {
+  const build = (): Simulator => {
+    const simulator = createNinjaDuel()
+    // The dodge first, then the step, which leaves a shadow and carries on through the dodge.
+    simulator.addOrder(1, cast(1, 1, 't-dodge', { mode: 'none' }, NINJA_AT))
+    simulator.addOrder(1, stepAlong(2, 2, NINJA_AT))
+    return simulator
+  }
+  const record = (simulator: Simulator, from: number, to: number): Map<number, string> => {
+    const frames = new Map<number, string>()
+    for (let tick = from; tick <= to; tick += 1) {
+      const frame = simulator.at(tick)
+      frames.set(tick, JSON.stringify([
+        frame.getEntities(),
+        frame.get(1)?.getPosition(),
+        frame.get(2)?.getPosition(),
+        frame.get(1)?.getStatuses(),
+        frame.get(1)?.getMarkers(),
+        frame.get(1)?.getAbilityCooldown('t-shadowstep'),
+        frame.get(2)?.getStatuses(),
+        frame.get(2)?.getMarkers(),
+        frame.get(2)?.getHealth(),
+      ]))
+    }
+    return frames
+  }
+  const expected = record(build(), 1, 160)
+
+  // The step is cast on tick 2 and reaches the enemy on tick 6. One checkpoint is mid-dash before that
+  // (the dash carries its effects and has touched no one), one mid-dash after it (it has touched the
+  // enemy, and must not touch it again), and one with the dodge on.
+  const original = build()
+  original.advanceTo(5)
+  original.setCommitTick(3)
+  const beforeContact = original.snapshot()
+  original.advanceTo(12)
+  original.setCommitTick(8)
+  const afterContact = original.snapshot()
+  original.advanceTo(70)
+  original.setCommitTick(65)
+  const dodging = original.snapshot()
+  const dashOf = (snapshot: typeof beforeContact) =>
+    snapshot.checkpoint.characters.find((character) => character.characterId === 1)?.dash
+  assert.deepEqual(dashOf(beforeContact)?.contact?.hitIds, [])
+  assert.deepEqual(dashOf(afterContact)?.contact?.hitIds, [2])
+  assert.equal(afterContact.checkpoint.entities.some((entity) => entity.defId === 't-shadow'), true)
+  assert.equal(afterContact.checkpoint.characters.find((character) => character.characterId === 1)
+    ?.markers.some((marker) => marker.key === 'shadow'), true)
+  assert.equal(dodging.checkpoint.characters.find((character) => character.characterId === 1)
+    ?.statuses.some((status) => status.kind === 'dodge'), true)
+
+  for (const [snapshot, committed] of [[beforeContact, 3], [afterContact, 8], [dodging, 65]] as const) {
+    // Restored from what the schema lets through, as a client receiving it would be.
+    const parsed = GameSnapshotSchema.safeParse(snapshot)
+    assert.equal(parsed.success, true)
+    const restored = new Simulator()
+    restored.replaceFromSnapshot(parsed.data as typeof snapshot)
+    for (const [tick, frame] of record(restored, committed + 1, 160)) assert.equal(frame, expected.get(tick), `tick ${tick}`)
+  }
+})
+
+// Trinketmaster's passive, against the copy in fixtures.ts: the third ability hit in a row on the same
+// enemy, each within 5 s of the last, deals 50 bonus damage on top of its own and gives 30% move speed
+// for 2 s. The hits are the stick going out, the stick coming back and the auto that hush readies. His
+// plain autos are not hits for it.
+
+const trickHurt = (simulator: Simulator, tick: number, id = 2): number =>
+  brawler.maxHp - (simulator.at(tick).get(id)?.getHealth() ?? 0)
+const trickSpeed = (simulator: Simulator, tick: number) =>
+  simulator.at(tick).get(1)?.getStatuses().find((status) => status.kind === 'haste')
+
+test('plain autos are not hits for the passive: three in a row on the same enemy are all plain', () => {
+  const simulator = createStickDuel([[360, 300]])
+  const windup = trinketmaster.attackWindupTicks
+  const landing = (index: number): number => 1 + index * trinketmaster.attackCooldownTicks + windup
+  simulator.addOrder(1, { id: 'player-1:1', seq: 1, tick: 1, type: 'attack', targetId: 2 })
+  stopAttacking(simulator, 1, landing(2), TRINKET_AT)
+
+  for (const index of [0, 1, 2]) {
+    assert.equal(trickHurt(simulator, landing(index)), (index + 1) * trinketmaster.attackDamage, `auto ${index + 1} is plain`)
+    assert.equal(markerCount(simulator, landing(index), 'trick', 2), 0, 'and leaves no mark')
+    assert.equal(trickSpeed(simulator, landing(index)), undefined)
+  }
+})
+
+test('the stick going out, the stick coming back and the auto hush readies are three ability hits, and the last has the bonus', () => {
+  const simulator = createStickDuel([[360, 300]])
+  const windup = trinketmaster.attackWindupTicks
+  // A plain auto on tick 1 lands on tick 4 and does not count. The stick, thrown east on tick 10 for 60
+  // damage, hits the enemy on the way out and comes down about tick 45. The recall, called on tick 60,
+  // hits it again on the way back. Hush is readied on tick 100 and the auto on 101 is the hush's.
+  simulator.addOrder(1, { id: 'player-1:1', seq: 1, tick: 1, type: 'attack', targetId: 2 })
+  simulator.addOrder(1, cast(2, 10, 't-stick', EAST, TRINKET_AT))
+  simulator.addOrder(1, cast(3, 60, 't-recall', { mode: 'none' }, TRINKET_AT))
+  simulator.addOrder(1, cast(4, 100, 't-hush', { mode: 'none' }, TRINKET_AT))
+  simulator.addOrder(1, { id: 'player-1:5', seq: 5, tick: 101, type: 'attack', targetId: 2 })
+  const hushLanding = 101 + windup
+  stopAttacking(simulator, 1, hushLanding, TRINKET_AT)
+
+  const auto = 1 + windup
+  assert.equal(trickHurt(simulator, auto), 60, 'the auto is plain')
+  assert.equal(markerCount(simulator, auto, 'trick', 2), 0, 'and does not count')
+
+  const out = firstTick(auto + 1, 50, (tick) => trickHurt(simulator, tick) > 60)
+  assert.ok(out !== undefined, 'the stick hits it going out')
+  assert.equal(trickHurt(simulator, out), 120, 'for its own damage: it is the first hit')
+  assert.equal(markerCount(simulator, out, 'trick', 2), 1)
+
+  const back = firstTick(61, 99, (tick) => trickHurt(simulator, tick) > 120)
+  assert.ok(back !== undefined, 'and the recall hits it coming back')
+  assert.equal(trickHurt(simulator, back), 180, 'for its own damage: the second')
+  assert.equal(markerCount(simulator, back, 'trick', 2), 2)
+  assert.equal(trickSpeed(simulator, back), undefined)
+
+  const frame = simulator.at(hushLanding)
+  assert.equal(trickHurt(simulator, hushLanding), 180 + 60 + 50, 'the hush auto is the third, with the 50 more')
+  assert.equal(frame.get(2)?.getStatuses().some((status) => status.kind === 'silence'), true, 'and still silences')
+  assert.equal(markerCount(simulator, hushLanding, 'trick', 2), 0, 'and pops the marks')
+  const speed = trickSpeed(simulator, hushLanding)
+  assert.equal(speed?.amount, 0.3)
+  assert.equal(speed?.endTick, hushLanding + 120, 'for two seconds')
+})
+
+test('hush counts wherever it comes in the count, as the first hit as much as the third', () => {
+  const simulator = createStickDuel([[360, 300]])
+  const windup = trinketmaster.attackWindupTicks
+  // Hush is readied on tick 1 and its auto lands on tick 5. Then the stick, and then the recall.
+  simulator.addOrder(1, cast(1, 1, 't-hush', { mode: 'none' }, TRINKET_AT))
+  simulator.addOrder(1, { id: 'player-1:2', seq: 2, tick: 2, type: 'attack', targetId: 2 })
+  const hushLanding = 2 + windup
+  stopAttacking(simulator, 1, hushLanding, TRINKET_AT)
+  simulator.addOrder(1, cast(3, 10, 't-stick', EAST, TRINKET_AT))
+  simulator.addOrder(1, cast(4, 70, 't-recall', { mode: 'none' }, TRINKET_AT))
+
+  assert.equal(trickHurt(simulator, hushLanding), 60, 'the hush auto does its own damage')
+  assert.equal(markerCount(simulator, hushLanding, 'trick', 2), 1, 'and is the first hit')
+  const out = firstTick(hushLanding + 1, 60, (tick) => trickHurt(simulator, tick) > 60)
+  assert.ok(out !== undefined)
+  assert.equal(trickHurt(simulator, out), 120)
+  assert.equal(markerCount(simulator, out, 'trick', 2), 2, 'the stick is the second')
+  const back = firstTick(71, 140, (tick) => trickHurt(simulator, tick) > 120)
+  assert.ok(back !== undefined)
+  assert.equal(trickHurt(simulator, back), 120 + 60 + 50, 'and the recall the third')
+  assert.equal(trickSpeed(simulator, back)?.amount, 0.3)
+})
+
+test('the passive counts each enemy on its own, so hits split between two never make a third', () => {
+  const simulator = createStickDuel([[360, 300], [460, 300]])
+  // The stick goes out through the first enemy and then the second, and the recall comes back through
+  // the second and then the first: four hits, but only two on either of them.
+  simulator.addOrder(1, cast(1, 1, 't-stick', EAST, TRINKET_AT))
+  simulator.addOrder(1, cast(2, 60, 't-recall', { mode: 'none' }, TRINKET_AT))
+
+  const end = 150
+  assert.equal(trickHurt(simulator, end, 2), 120, 'two plain hits on the first')
+  assert.equal(trickHurt(simulator, end, 3), 120, 'and two on the second')
+  assert.equal(markerCount(simulator, end, 'trick', 2), 2)
+  assert.equal(markerCount(simulator, end, 'trick', 3), 2)
+  assert.equal(trickSpeed(simulator, end), undefined, 'and no speed')
+})
+
+test('the passive count is lost if the hits are more than five seconds apart', () => {
+  const simulator = createStickDuel([[360, 300]])
+  simulator.addOrder(1, cast(1, 1, 't-stick', EAST, TRINKET_AT))
+  // The mark from the stick going out lasts five seconds. The recall, called on tick 400, hits the enemy
+  // long after it has gone.
+  simulator.addOrder(1, cast(2, 400, 't-recall', { mode: 'none' }, TRINKET_AT))
+
+  const out = firstTick(2, 60, (tick) => trickHurt(simulator, tick) > 0)
+  assert.ok(out !== undefined)
+  assert.equal(markerCount(simulator, out, 'trick', 2), 1)
+  assert.equal(markerCount(simulator, 399, 'trick', 2), 0, 'it has worn off')
+  const back = firstTick(401, 480, (tick) => trickHurt(simulator, tick) > 60)
+  assert.ok(back !== undefined)
+  assert.equal(trickHurt(simulator, back), 120)
+  assert.equal(markerCount(simulator, back, 'trick', 2), 1, 'so the recall is the first hit of a new count, not the second')
+})
+
+// Teams, against the fixtures. Characters on the same team are teammates and anyone else is an
+// enemy: attacks, targeted casts, blasts, lines, shots, statuses and pushes only ever reach enemies,
+// while the effects meant for allies reach teammates too. Every game here is laid out along y = 300.
+
+type TeamEntry = { champion?: Champion; x: number; y: number; team: number }
+
+function createTeamGame(entries: TeamEntry[]): Simulator {
+  const simulator = new Simulator()
+  entries.forEach(({ champion, x, y, team }, index) => {
+    simulator.addPlayer(index + 1, `player-${index + 1}`, `Player ${index + 1}`, { x, y }, champion ?? brawler, team)
+  })
+  return simulator
+}
+
+const kindsOn = (simulator: Simulator, tick: number, id: number): string[] =>
+  (simulator.at(tick).get(id)?.getStatuses() ?? []).map((status) => status.kind).sort()
+
+test('a character cannot attack a teammate or aim a unit ability at one, but can do both to an enemy', () => {
+  const simulator = createTeamGame([
+    { x: 300, y: 300, team: 1 },
+    { x: 380, y: 300, team: 1 },
+    { x: 300, y: 400, team: 2 },
+  ])
+  const at: Vector2 = { x: 300, y: 300 }
+  // At the teammate: an auto on tick 1 and a lash (300) on tick 5. At the enemy: an auto on tick 20
+  // and a lash on tick 30, which lands on tick 39.
+  simulator.addOrder(1, { id: 'player-1:1', seq: 1, tick: 1, type: 'attack', targetId: 2 })
+  simulator.addOrder(1, cast(2, 5, 't-lash', { mode: 'unit', unitId: 2 }, at))
+  simulator.addOrder(1, { id: 'player-1:3', seq: 3, tick: 20, type: 'attack', targetId: 3 })
+  simulator.addOrder(1, cast(4, 30, 't-lash', { mode: 'unit', unitId: 3 }, at))
+
+  assert.equal(simulator.at(18).get(2)?.getHealth(), 1000, 'the teammate was not hit')
+  assert.equal(simulator.at(18).get(1)?.getNextAttackTick(), 0, 'and the auto was never started')
+  assert.equal(simulator.at(18).get(1)?.getAbilityCooldown('t-lash').ready, true, 'nor was the lash')
+  assert.equal(simulator.at(21).get(3)?.getHealth(), 900, 'the enemy takes the auto')
+  assert.equal(simulator.at(40).get(3)?.getHealth(), 600, 'and the lash')
+})
+
+test('a blast, a shot and a line hurt enemies and pass teammates by', () => {
+  // A nova (200 damage, a slow, to everyone within 120): the teammate 60 away is untouched, the
+  // enemy 60 away on the other side is hurt and slowed.
+  const nova = createTeamGame([
+    { x: 300, y: 300, team: 1 },
+    { x: 360, y: 300, team: 1 },
+    { x: 240, y: 300, team: 2 },
+  ])
+  nova.addOrder(1, cast(1, 1, 't-shockwave', { mode: 'none' }, { x: 300, y: 300 }))
+  assert.equal(nova.at(7).get(3)?.getHealth(), 800)
+  assert.deepEqual(kindsOn(nova, 7, 3), ['slow'])
+  assert.equal(nova.at(7).get(2)?.getHealth(), 1000)
+  assert.deepEqual(kindsOn(nova, 7, 2), [], 'the teammate is neither hurt nor slowed')
+  assert.equal(nova.at(7).get(1)?.getShield(), 200, 'while the caster still shields itself')
+
+  // A bolt that stops at the first thing it hits flies straight through a teammate in its way and
+  // stops on the enemy behind: it reaches the teammate on tick 23 and the enemy on tick 38.
+  const bolt = createTeamGame([
+    { x: 300, y: 300, team: 1 },
+    { x: 450, y: 300, team: 1 },
+    { x: 600, y: 300, team: 2 },
+  ])
+  bolt.addOrder(1, cast(1, 1, 't-bolt', EAST, { x: 300, y: 300 }))
+  assert.equal(bolt.at(23).get(2)?.getHealth(), 1000)
+  assert.equal(bolt.at(23).getEntities().length, 1, 'it did not stop on the teammate')
+  assert.equal(bolt.at(38).get(3)?.getHealth(), 700)
+  assert.equal(bolt.at(38).getEntities().length, 0)
+  assert.equal(bolt.at(40).get(2)?.getHealth(), 1000)
+
+  // A cut along a line damages the enemy in it and not the teammate in front of it. The fire it
+  // leaves slows the enemy and speeds the teammate, which is a thing meant for allies.
+  const cut = createTeamGame([
+    { champion: cutter, x: 300, y: 300, team: 1 },
+    { x: 400, y: 300, team: 1 },
+    { x: 500, y: 300, team: 2 },
+  ])
+  cut.addOrder(1, cast(1, 1, 't-cut', EAST, { x: 300, y: 300 }))
+  assert.equal(cut.at(8).get(3)?.getHealth(), 880)
+  assert.equal(cut.at(8).get(2)?.getHealth(), 1000)
+  assert.deepEqual(kindsOn(cut, 8, 3), ['slow'])
+  assert.deepEqual(kindsOn(cut, 8, 2), ['haste'])
+})
+
+test('a grenade bounces and hurts only enemies, never a teammate beside them, and refunds only for an enemy', () => {
+  // Lobbed 300 px to (600, 300), going off on tick 36. A teammate 50 east of the middle and an
+  // enemy 50 north of it are both inside the blast.
+  const mixed = createTeamGame([
+    { champion: grenadier, x: 300, y: 300, team: 1 },
+    { x: 650, y: 300, team: 1 },
+    { x: 600, y: 250, team: 2 },
+  ])
+  mixed.addOrder(1, cast(1, 1, 't-grenade', { mode: 'point', point: { x: 600, y: 300 } }, { x: 300, y: 300 }))
+  assert.equal(mixed.at(36).get(3)?.getHealth(), 900, 'the enemy is hurt')
+  assert.equal(mixed.at(36).get(2)?.getHealth(), 1000, 'and the teammate is not')
+  assert.equal(mixed.at(37).get(3)?.isDashing(), true, 'the enemy is bounced')
+  assert.equal(mixed.at(37).get(2)?.isDashing(), false, 'and the teammate is not')
+  assert.equal(
+    mixed.at(37).get(1)?.getAbilityCooldown('t-grenade').ticksRemaining,
+    5 + 600 - 300 - 37,
+    'catching an enemy hands back half the cooldown',
+  )
+  assert.deepEqual(mixed.at(96).get(2)?.getPosition(), { x: 650, y: 300 }, 'the teammate has not moved')
+  assert.deepEqual(mixed.at(96).get(3)?.getPosition(), { x: 600, y: 100 })
+
+  // With only a teammate in the blast there is nothing to hurt, nothing to bounce, and no refund.
+  const mates = createTeamGame([
+    { champion: grenadier, x: 300, y: 300, team: 1 },
+    { x: 650, y: 300, team: 1 },
+  ])
+  mates.addOrder(1, cast(1, 1, 't-grenade', { mode: 'point', point: { x: 600, y: 300 } }, { x: 300, y: 300 }))
+  assert.equal(mates.at(36).get(2)?.getHealth(), 1000)
+  assert.equal(mates.at(37).get(2)?.isDashing(), false)
+  assert.equal(
+    mates.at(37).get(1)?.getAbilityCooldown('t-grenade').ticksRemaining,
+    5 + 600 - 37,
+    'a blast that caught no enemy refunds nothing',
+  )
+  assert.deepEqual(mates.at(96).get(2)?.getPosition(), { x: 650, y: 300 })
+})
+
+test('a flash, a fire and a thrown stick affect enemies and spare teammates standing in them', () => {
+  // The flash goes off at (600, 300) on tick 36: an enemy in its core is stunned and one at its edge
+  // blinded, and a teammate in the core and one at the edge have nothing happen to them.
+  const flash = createTeamGame([
+    { champion: grenadier, x: 300, y: 300, team: 1 },
+    { x: 580, y: 300, team: 1 },
+    { x: 640, y: 300, team: 2 },
+    { x: 600, y: 390, team: 1 },
+    { x: 700, y: 300, team: 2 },
+  ])
+  flash.addOrder(1, cast(1, 1, 't-flashbang', { mode: 'point', point: { x: 600, y: 300 } }, { x: 300, y: 300 }))
+  assert.deepEqual(kindsOn(flash, 36, 3), ['stun'])
+  assert.deepEqual(kindsOn(flash, 36, 5), ['blind'])
+  assert.deepEqual(kindsOn(flash, 36, 2), [], 'a teammate in the core is not stunned')
+  assert.deepEqual(kindsOn(flash, 36, 4), [], 'and one at the edge is not blinded')
+
+  // The fire goes down on tick 36 too and burns and slows an enemy in it, and not a teammate.
+  const fire = createTeamGame([
+    { champion: grenadier, x: 300, y: 300, team: 1 },
+    { x: 570, y: 300, team: 1 },
+    { x: 630, y: 300, team: 2 },
+  ])
+  fire.addOrder(1, cast(1, 1, 't-molotov', { mode: 'point', point: { x: 600, y: 300 } }, { x: 300, y: 300 }))
+  assert.deepEqual(kindsOn(fire, 40, 3), ['burn', 'slow'])
+  assert.deepEqual(kindsOn(fire, 40, 2), [])
+  assert.equal(fire.at(70).get(2)?.getHealth(), 1000, 'and the teammate is never burned')
+  assert.ok((fire.at(70).get(3)?.getHealth() ?? 1000) < 1000)
+
+  // A stick thrown east passes through everyone in its line, and hurts only the enemy in it: the
+  // teammate 100 along takes nothing and the enemy 200 along takes the 60.
+  const stick = createTeamGame([
+    { champion: trinketmaster, x: 300, y: 300, team: 1 },
+    { x: 400, y: 300, team: 1 },
+    { x: 500, y: 300, team: 2 },
+  ])
+  stick.addOrder(1, cast(1, 1, 't-stick', EAST, TRINKET_AT))
+  assert.equal(stick.at(30).get(3)?.getHealth(), 940)
+  assert.equal(stick.at(30).get(2)?.getHealth(), 1000)
+})
+
+test('an area speed-up reaches teammates and the caster, not enemies, and it really makes them faster', () => {
+  const simulator = createTeamGame([
+    { champion: cursebearer, x: 300, y: 300, team: 1 },
+    { x: 400, y: 300, team: 1 },
+    { x: 300, y: 400, team: 2 },
+    { x: 300, y: 700, team: 1 },
+  ])
+  simulator.addOrder(1, cast(1, 1, 't-miasma', { mode: 'none' }, { x: 300, y: 300 }))
+  simulator.addOrder(2, { id: 'player-2:1', seq: 1, tick: 10, type: 'move', target: { x: 800, y: 300 } })
+  simulator.addOrder(3, { id: 'player-3:1', seq: 1, tick: 10, type: 'move', target: { x: 300, y: 800 } })
+
+  // The field is out by tick 8. The teammate and the caster are in it and sped up; the enemy is in
+  // it and slowed; the other teammate is 400 away and untouched.
+  assert.deepEqual(kindsOn(simulator, 8, 2), ['haste'])
+  assertClose(simulator.at(8).get(2)?.getStatuses()[0]?.amount ?? 0, 0.25)
+  assert.deepEqual(kindsOn(simulator, 8, 1), ['haste'])
+  assert.deepEqual(kindsOn(simulator, 8, 3), ['slow'])
+  assert.deepEqual(kindsOn(simulator, 8, 4), [])
+
+  // And the speed is real: a walker in the field goes 25% faster, an enemy 25% slower.
+  const step = (id: number, tick: number): number => {
+    const before = simulator.at(tick).get(id)?.getPosition()
+    const after = simulator.at(tick + 1).get(id)?.getPosition()
+    return Math.hypot((after?.x ?? 0) - (before?.x ?? 0), (after?.y ?? 0) - (before?.y ?? 0))
+  }
+  assertClose(step(2, 12), brawler.moveSpeed * 1.25 / GAME_TPS)
+  assertClose(step(3, 12), brawler.moveSpeed * 0.75 / GAME_TPS)
 })

@@ -3,7 +3,7 @@ import test from 'node:test'
 import { CastControl } from '../apps/client/src/cast-control.ts'
 import { ClientGameState } from '../apps/client/src/game-state.ts'
 import { withinCastRange } from '../packages/shared/src/index.ts'
-import { brawler } from './fixtures.ts'
+import { brawler, grenadier } from './fixtures.ts'
 
 test('quick cast with indicator is the default', () => {
   assert.equal(new CastControl().mode, 'quick-with-indicator')
@@ -65,6 +65,21 @@ function createClient(enemyGap = 40): ClientGameState {
   gameState.resetServerTickAnchor(0, 0)
   return gameState
 }
+
+test('an ability that gives two circles hands both to the renderer, held to range like any ground target', () => {
+  const gameState = new ClientGameState()
+  gameState.simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, grenadier)
+  gameState.setLocalCharacterId(1)
+  gameState.resetServerTickAnchor(0, 0)
+  // The flashbang is the third slot (the grenade, the molotov, then the flashbang).
+  const preview = gameState.getCastPreview(2, { x: 900, y: 100 }, 0)
+
+  assert.equal(preview?.abilityId, 't-flashbang')
+  assert.deepEqual(preview?.indicator, { radius: 120, innerRadius: 50 })
+  assert.deepEqual(preview?.target, { mode: 'point', point: { x: 500, y: 100 } })
+  // An ability with one circle is untouched.
+  assert.deepEqual(gameState.getCastPreview(0, { x: 200, y: 100 }, 0)?.indicator, undefined)
+})
 
 test('only abilities with something to aim are held for an indicator', () => {
   const gameState = createClient()

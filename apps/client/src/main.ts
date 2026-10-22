@@ -1,11 +1,12 @@
 import './style.css'
 import { createChampionSelect } from './champion-select.ts'
 import { startGame } from './game.ts'
-import type { GameStatus } from '../../../packages/shared/src/index.ts'
+import { GAME_TEAMS, getTeam, type GameStatus } from '../../../packages/shared/src/index.ts'
 
 type Player = {
   id: string
   name: string
+  team: number
 }
 
 type Lobby = {
@@ -53,6 +54,7 @@ const renameForm = requiredElement<HTMLFormElement>('#rename-form')
 const lobbyUsernameInput = requiredElement<HTMLInputElement>('#lobby-username')
 const playerCount = requiredElement<HTMLSpanElement>('#player-count')
 const playerList = requiredElement<HTMLUListElement>('#player-list')
+const teamPicker = requiredElement<HTMLDivElement>('#team-picker')
 const chatMessages = requiredElement<HTMLUListElement>('#chat-messages')
 const chatForm = requiredElement<HTMLFormElement>('#chat-form')
 const chatInput = requiredElement<HTMLInputElement>('#chat-input')
@@ -157,9 +159,18 @@ function renderLobby(lobby: Lobby): void {
     indicator.className = player.id === lobby.leaderId ? 'player-icon leader-icon' : 'player-icon'
     indicator.textContent = player.id === lobby.leaderId ? '♛' : '♟'
     indicator.setAttribute('aria-label', player.id === lobby.leaderId ? 'Leader' : 'Player')
+    const team = getTeam(player.team)
+    const swatch = document.createElement('span')
+    swatch.className = 'team-swatch'
+    swatch.style.background = team.color
+    swatch.setAttribute('aria-hidden', 'true')
     const name = document.createElement('span')
     name.textContent = player.name
-    item.append(indicator, name)
+    // The name of the team as well as its colour, so it does not rest on telling colours apart.
+    const teamName = document.createElement('span')
+    teamName.className = 'team-name'
+    teamName.textContent = team.name
+    item.append(indicator, swatch, name, teamName)
 
     if (player.id !== lobby.leaderId && isLeader) {
       const actions = document.createElement('span')
@@ -181,6 +192,7 @@ function renderLobby(lobby: Lobby): void {
     playerList.append(item)
   }
   playerCount.textContent = `${lobby.players.length}/${lobby.maxPlayers}`
+  renderTeamPicker(lobby)
 
   const previousLatestId = chatMessages.lastElementChild?.getAttribute('data-message-id')
   chatMessages.replaceChildren()
@@ -197,6 +209,39 @@ function renderLobby(lobby: Lobby): void {
     chatMessages.lastElementChild?.scrollIntoView({ block: 'nearest' })
   }
   syncChampionSelect(lobby)
+}
+
+// One button per team in its colour, the player's own ringed. Teams can only be changed in the
+// lobby, so the buttons are off once a game is starting.
+function renderTeamPicker(lobby: Lobby): void {
+  const own = lobby.players.find((player) => player.id === sessionId)?.team
+  teamPicker.replaceChildren()
+  for (const team of GAME_TEAMS) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.style.background = team.color
+    button.title = team.name
+    button.setAttribute('aria-label', `${team.name} team`)
+    button.setAttribute('aria-pressed', String(team.id === own))
+    button.disabled = lobby.game.status !== 'idle'
+    button.addEventListener('click', () => void chooseTeam(team.id))
+    teamPicker.append(button)
+  }
+}
+
+async function chooseTeam(team: number): Promise<void> {
+  if (!currentLobby) return
+  try {
+    const result = await request<{ lobby: Lobby }>(
+      `/api/lobbies/${encodeURIComponent(currentLobby.code)}/team`,
+      'POST',
+      { sessionId, team },
+    )
+    currentLobby = result.lobby
+    renderLobby(result.lobby)
+  } catch (error) {
+    setLobbyMessage(errorMessage(error), true)
+  }
 }
 
 const championSelect = createChampionSelect({

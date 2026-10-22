@@ -1,17 +1,20 @@
-import { abilityDefs, withinCastRange, type AbilityDef } from './abilities.js'
-import { boxTouchesCircle } from './geometry.js'
+import { abilityDefs, meetsRequirement, readyKey, withinCastRange, type AbilityDef } from './abilities.js'
+import { boxTouchesCircle, clampPosition, distanceToSegment } from './geometry.js'
 import { DEFAULT_CHAMPION_ID, getChampion, type Champion } from './champions.js'
 import {
-  GAME_ARENA_HEIGHT,
-  GAME_ARENA_WIDTH,
+  GAME_BURN_PULSE_TICKS,
   GAME_CAST_ORIGIN_TOLERANCE,
+  GAME_COLLISION_STIFFNESS,
   GAME_SNAPSHOT_HISTORY_TICKS,
   GAME_TPS,
 } from './constants.js'
 import {
   areEnemies,
+  getDashDef,
   getEntityDef,
+  mark,
   runEffects,
+  self,
   type GameEvent,
   type SimContext,
 } from './effects.js'
@@ -35,6 +38,15 @@ import type {
 
 const DIRECTION_LENGTH_TOLERANCE = 0.01
 
+// A step of a dash that has effects of its own: where it started from this tick, what the dash
+// carries (and the enemies it has touched so far), and whether this step finished it.
+type DashStep = {
+  characterId: number
+  from: Vector2
+  contact: NonNullable<NonNullable<GameFrameCharacter['dash']>['contact']>
+  finished: boolean
+}
+
 export class SimCharacter {
   readonly orders: CharacterOrder[]
   // Server-confirmed deaths; each one also names the tick the character respawns.
@@ -49,6 +61,9 @@ export class SimCharacter {
     readonly player?: GameCharacterSnapshot['player'],
     highestOrderSequence = 0,
     deaths: GameDeathTiming[] = [],
+    // Characters on the same team are teammates. By default each is on a team of its own, so
+    // everyone is an enemy of everyone else.
+    readonly team: number = id,
   ) {
     this.orders = orders.map(cloneOrder).sort(compareCharacterOrders)
     this.deaths = deaths.map((death) => ({ ...death })).sort((left, right) => left.tick - right.tick)
@@ -74,6 +89,7 @@ export class SimCharacter {
       deaths: this.deaths.map((death) => ({ ...death })),
       highestOrderSequence: this.highestOrderSequence,
       championId: this.champion.id,
+      team: this.team,
       ...(this.player ? { player: { ...this.player } } : {}),
     }
   }
@@ -130,6 +146,11 @@ export class CharacterTickSnapshot {
 
   getNextAttackTick(): number {
     return this.state.nextAttackTick
+  }
+
+  // The character this one is going after, if it has been told to attack someone and not to stop.
+  getAttackTarget(): number | undefined {
+    return this.state.attackTarget?.targetId
   }
 
   getCooldown(): { ready: boolean; ticksRemaining: number } {
@@ -203,7 +224,8 @@ export class GameTickSnapshot {
 }
 
 export function entityPosAt(entity: SimEntity, tick: number): Vector2 {
-  // An entity that follows its owner keeps its latest position instead of a straight path.
+  // An entity that follows its owner or chases a unit keeps its latest position instead of a
+  // straight path.
   if (entity.position) return { ...entity.position }
   const elapsedTicks = Math.max(0, Math.min(
     entity.lifetimeTicks ?? Infinity,
@@ -222,15 +244,25 @@ class TickContext implements SimContext {
   readonly events: GameEvent[] = []
   readonly statusWrites: Array<{ unitId: number; status: Status }> = []
   readonly markerWrites: Array<{ unitId: number; marker: Marker }> = []
-  readonly markerRemovals: Array<{ unitId: number; key: string; ownerId: number }> = []
-  readonly dashWrites: Array<{ unitId: number; target: Vector2; speed: number }> = []
+  readonly markerRemovals: Array<{ unitId: number; key: string; ownerId: number; count?: number }> = []
+  readonly dashWrites: Array<{
+    unitId: number
+    target: Vector2
+    speed: number
+    through: boolean
+    contact?: { defId: string; origin: Vector2; sourceId: string; orderId: string }
+  }> = []
+  readonly blinkWrites: Array<{ unitId: number; target: Vector2 }> = []
   readonly orderWrites: Array<{ unitId: number; order: CharacterOrder }> = []
   readonly entityWrites: SimEntity[] = []
+  readonly entityRemovals: Array<{ ownerId: number; defId: string }> = []
 
   constructor(
     readonly tick: number,
     private readonly characters: ReadonlyMap<number, SimCharacter>,
     private readonly states: ReadonlyMap<number, GameFrameCharacter>,
+    // The entities as the previous frame left them, which effects read before this tick moves any.
+    private readonly entities: readonly SimEntity[],
     private readonly history: (tick: number) => GameTickSnapshot,
   ) {}
 
@@ -269,6 +301,17 @@ class TickContext implements SimContext {
     return (this.states.get(unitId)?.statuses ?? []).map((status) => ({ ...status }))
   }
 
+  entitiesOf(ownerId: number, defId: string): Array<{ id: string; position: Vector2 }> {
+    return this.entities
+      .filter((entity) => entity.ownerId === ownerId && entity.defId === defId)
+      .map((entity) => ({ id: entity.id, position: entityPosAt(entity, this.tick) }))
+  }
+
+  isAlive(unitId: number): boolean {
+    const state = this.states.get(unitId)
+    return state !== undefined && isAlive(state)
+  }
+
   addStatus(unitId: number, s: Status): void {
     this.statusWrites.push({ unitId, status: { ...s } })
   }
@@ -281,16 +324,38 @@ class TickContext implements SimContext {
     this.markerWrites.push({ unitId, marker: { ...m } })
   }
 
-  removeMarkers(unitId: number, key: string, ownerId: number): void {
-    this.markerRemovals.push({ unitId, key, ownerId })
+  removeMarkers(unitId: number, key: string, ownerId: number, count?: number): void {
+    this.markerRemovals.push({ unitId, key, ownerId, ...(count === undefined ? {} : { count }) })
   }
 
-  startDash(unitId: number, target: Vector2, speed: number): void {
-    this.dashWrites.push({ unitId, target: { ...target }, speed })
+  startDash(
+    unitId: number,
+    target: Vector2,
+    speed: number,
+    options: {
+      through?: boolean
+      contact?: { defId: string; origin: Vector2; sourceId: string; orderId: string }
+    } = {},
+  ): void {
+    this.dashWrites.push({
+      unitId,
+      target: { ...target },
+      speed,
+      through: options.through === true,
+      ...(options.contact ? { contact: { ...options.contact, origin: { ...options.contact.origin } } } : {}),
+    })
+  }
+
+  blink(unitId: number, target: Vector2): void {
+    this.blinkWrites.push({ unitId, target: { ...target } })
   }
 
   addEntity(p: SimEntity): void {
     this.entityWrites.push(cloneEntity(p))
+  }
+
+  removeEntities(ownerId: number, defId: string): void {
+    this.entityRemovals.push({ ownerId, defId })
   }
 
   emitEvent(e: GameEvent): void {
@@ -330,6 +395,8 @@ export class Simulator {
     name: string,
     position: Vector2,
     champion: Champion = getChampion(DEFAULT_CHAMPION_ID),
+    // Players on the same team are teammates. By default a player is on a team of their own.
+    team: number = id,
   ): SimCharacter {
     const character = new SimCharacter(
       id,
@@ -337,6 +404,9 @@ export class Simulator {
       [],
       champion,
       { playerId, name },
+      0,
+      [],
+      team,
     )
     this.characters.set(id, character)
     if (this.tick === 0 && this.commitTick === 0) this.resetFrameHistory()
@@ -477,6 +547,7 @@ export class Simulator {
         character.player,
         character.highestOrderSequence,
         character.deaths,
+        character.team,
       ))
     })
     this.frameBuffer.fill(undefined)
@@ -488,6 +559,8 @@ export class Simulator {
 
   private computeFrame(tick: number, previous: GameTickSnapshot): GameTickSnapshot {
     const states = new Map<number, GameFrameCharacter>()
+    // Dashes with effects of their own, to settle once everyone is where this tick left them.
+    const dashSteps: DashStep[] = []
     for (const characterId of previous.getCharacterIds()) {
       const character = this.characters.get(characterId)
       const prior = previous.getCharacterState(characterId)
@@ -496,12 +569,14 @@ export class Simulator {
       if (state.dash) {
         // A dash replaces walking for as long as it lasts, at its own speed.
         state.position = stepToward(prior.position, state.dash.target, state.dash.speed / GAME_TPS, character.champion.radius)
-        if (state.position.x === state.dash.target.x && state.position.y === state.dash.target.y) {
-          state.dash = undefined
+        const finished = state.position.x === state.dash.target.x && state.position.y === state.dash.target.y
+        if (state.dash.contact) {
+          dashSteps.push({ characterId, from: { ...prior.position }, contact: state.dash.contact, finished })
         }
+        if (finished) state.dash = undefined
       } else if (state.movement && !isImmobilized(prior.statuses)) {
-        // Movement over (tick - 1, tick] uses the previous frame's statuses.
-        const speed = getMoveSpeed(character, prior.statuses)
+        // Movement over (tick - 1, tick] uses the previous frame's statuses, as they stood then.
+        const speed = getMoveSpeed(character, prior.statuses, tick - 1)
         state.position = stepToward(prior.position, state.movement.target, speed / GAME_TPS, character.champion.radius)
         if (state.position.x === state.movement.target.x && state.position.y === state.movement.target.y) {
           state.movement = undefined
@@ -519,8 +594,37 @@ export class Simulator {
       if (states.has(character.id)) continue
       states.set(character.id, this.createInitialCharacterFrame(character))
     }
+    pushCharactersApart(states, this.characters)
     const characters = [...this.characters.values()].sort((left, right) => left.id - right.id)
-    const context = new TickContext(tick, this.characters, states, (historyTick) => this.at(historyTick))
+    const context = new TickContext(
+      tick,
+      this.characters,
+      states,
+      previous.getEntities(),
+      (historyTick) => this.at(historyTick),
+    )
+
+    // Burning characters take their burn on every pulse tick, as damage from whoever lit them.
+    if (tick % GAME_BURN_PULSE_TICKS === 0) {
+      for (const character of characters) {
+        const state = states.get(character.id)
+        if (!state || !isAlive(state)) continue
+        for (const status of state.statuses) {
+          if (status.kind !== 'burn') continue
+          context.emitEvent({
+            type: 'damage',
+            id: `${status.id}:pulse:t${tick}`,
+            rootId: status.rootId,
+            ownerId: status.ownerId,
+            targetId: character.id,
+            amount: status.amount,
+          })
+        }
+      }
+    }
+
+    // What a dash touched on its way this tick, and whether it ended having touched no one.
+    this.resolveDashes(context, characters, states, dashSteps, tick)
 
     // Windups that finish this tick launch before this tick's orders can cancel them.
     for (const character of characters) {
@@ -548,14 +652,18 @@ export class Simulator {
       const state = states.get(character.id)
       if (!state || !isAlive(state)) continue
       if (order.type === 'move') {
+        // Walking somewhere cancels a windup and stops going after anyone.
         state.action = undefined
+        state.attackTarget = undefined
         state.movement = { target: clampPosition(order.target, character.champion.radius) }
       } else if (order.type === 'attack') {
-        this.startAttack(context, character, state, order, states, tick)
+        this.lockOnto(character, state, order, states)
       } else {
         this.startCast(context, character, state, order, states, tick)
       }
     }
+    // Whoever has a target now goes after it, in the same tick the order arrived if it can.
+    this.driveAttacks(context, characters, states, tick)
 
     const entities = this.advanceEntities(context, previous.getEntities(), states, tick)
     for (const state of states.values()) {
@@ -570,36 +678,124 @@ export class Simulator {
     }, context.events)
   }
 
-  private startAttack(
+  // A dash with effects of its own: every enemy its body reached on this tick's step, each once for
+  // the whole dash, takes its `onHit`; the first of them also sets off `onConnect`; and a dash that
+  // finishes having reached no one runs `onMiss`. It is a sweep along the step, so a fast dash cannot
+  // skip over someone, and it reads the enemies where they are on this tick, not where they were when
+  // it was ordered.
+  private resolveDashes(
     context: TickContext,
+    characters: readonly SimCharacter[],
+    states: ReadonlyMap<number, GameFrameCharacter>,
+    steps: readonly DashStep[],
+    tick: number,
+  ): void {
+    for (const { characterId, from, contact, finished } of steps) {
+      const character = this.characters.get(characterId)
+      const state = states.get(characterId)
+      const def = getDashDef(contact.defId)
+      if (!character || !state || !def || !isAlive(state)) continue
+      const source = { rootId: contact.orderId, ownerId: characterId, tick, aim: null }
+      for (const enemy of characters) {
+        const enemyState = states.get(enemy.id)
+        if (
+          !enemyState
+          || !areEnemies(character, enemy)
+          || !isAlive(enemyState)
+          || contact.hitIds.includes(enemy.id)
+          || distanceToSegment(enemyState.position, from, state.position)
+            > character.champion.radius + enemy.champion.radius
+        ) continue
+        const first = contact.hitIds.length === 0
+        contact.hitIds.push(enemy.id)
+        runEffects(def.onHit ?? [], context, {
+          ...source,
+          id: `${contact.sourceId}:dash:u${enemy.id}`,
+          at: { ...state.position },
+          subject: enemy.id,
+        })
+        if (first) {
+          runEffects(def.onConnect ?? [], context, {
+            ...source,
+            id: `${contact.sourceId}:dash:connect`,
+            at: { ...contact.origin },
+            subject: enemy.id,
+          })
+        }
+      }
+      if (finished && contact.hitIds.length === 0) {
+        runEffects(def.onMiss ?? [], context, {
+          ...source,
+          id: `${contact.sourceId}:dash:miss`,
+          at: { ...contact.origin },
+          subject: null,
+        })
+      }
+    }
+  }
+
+  // An attack order makes its target the one this character goes after, until it is told to do
+  // something else. It does not swing here: `driveAttacks` does, as soon as the character is able
+  // and in reach. An order for something that cannot be attacked (a teammate, a character who is
+  // dead or gone) changes nothing, so it does not interrupt a walk.
+  private lockOnto(
     character: SimCharacter,
     state: GameFrameCharacter,
     order: GameAttackOrder,
     states: ReadonlyMap<number, GameFrameCharacter>,
-    tick: number,
   ): void {
     const target = this.characters.get(order.targetId)
     const targetState = target ? states.get(target.id) : undefined
-    const valid = Boolean(
-      target
-      && targetState
-      && areEnemies(character, target)
-      && isAlive(targetState)
-      && isAlive(state)
-      && !isWindingUp(state, tick)
-      && !state.dash
-      && !isStunned(state.statuses)
-      && tick >= state.nextAttackTick
-      && distanceBetween(state.position, targetState.position) <= character.champion.attackRangeWith(state.statuses),
-    )
-    if (!valid) return
-
+    if (!target || !targetState || !areEnemies(character, target) || !isAlive(targetState) || !isAlive(state)) return
+    state.attackTarget = { targetId: order.targetId, orderId: order.id }
     state.movement = undefined
+  }
+
+  // Everyone who is going after someone does what that needs this tick. A target that is dead or
+  // gone ends it. A character that is busy (winding up, dashing, stunned) waits and keeps its target.
+  // One out of reach heads for where the target stands now. One in reach stops and attacks as soon
+  // as its attack is ready, and again each time it is, for as long as it keeps the target.
+  private driveAttacks(
+    context: TickContext,
+    characters: readonly SimCharacter[],
+    states: ReadonlyMap<number, GameFrameCharacter>,
+    tick: number,
+  ): void {
+    for (const character of characters) {
+      const state = states.get(character.id)
+      const lock = state?.attackTarget
+      if (!state || !lock) continue
+      const target = this.characters.get(lock.targetId)
+      const targetState = target ? states.get(target.id) : undefined
+      if (!target || !targetState || !isAlive(state) || !isAlive(targetState) || !areEnemies(character, target)) {
+        state.attackTarget = undefined
+        continue
+      }
+      if (isWindingUp(state, tick) || state.dash || isStunned(state.statuses)) continue
+
+      if (distanceBetween(state.position, targetState.position) > character.champion.attackRangeWith(state.statuses)) {
+        state.movement = { target: { ...targetState.position } }
+        continue
+      }
+      state.movement = undefined
+      if (tick >= state.nextAttackTick) this.beginAttack(context, character, state, lock, states, tick)
+    }
+  }
+
+  // One swing at the target: a windup, and then the hit.
+  private beginAttack(
+    context: TickContext,
+    character: SimCharacter,
+    state: GameFrameCharacter,
+    lock: NonNullable<GameFrameCharacter['attackTarget']>,
+    states: ReadonlyMap<number, GameFrameCharacter>,
+    tick: number,
+  ): void {
     const launchTick = tick + character.champion.attackWindupTicks
     state.action = {
       kind: 'attack',
-      orderId: order.id,
-      targetId: order.targetId,
+      orderId: lock.orderId,
+      targetId: lock.targetId,
       startTick: tick,
       launchTick,
       endTick: launchTick,
@@ -623,14 +819,23 @@ export class Simulator {
       && !isWindingUp(state, tick)
       && !state.dash
       && !isStunned(state.statuses)
+      && !isSilenced(state.statuses)
       && !(def.movement && isImmobilized(state.statuses))
+      && meetsRequirement(def, (defId) => context.entitiesOf(character.id, defId).length > 0)
       && (state.cooldowns[def.id] ?? 0) <= tick
       && distanceBetween(order.origin, state.position) <= GAME_CAST_ORIGIN_TOLERANCE
       && this.isValidCastTarget(character, def, order, states),
     )
     if (!valid || !def) return
 
-    state.movement = undefined
+    // A cast with a windup stops the character: it stops walking, and going after its target, to cast,
+    // and does not go back to either. One with none does not: it carries on around it, so a walk
+    // goes on through it (and resumes after a dash it started), and an attack can be followed by an
+    // ability and then another.
+    if (def.windUpTicks > 0) {
+      state.movement = undefined
+      state.attackTarget = undefined
+    }
     const launchTick = tick + def.windUpTicks
     state.action = {
       kind: 'cast',
@@ -696,8 +901,14 @@ export class Simulator {
         return
       }
       state.nextAttackTick = action.startTick + character.champion.attackCooldownTicksWith(state.statuses)
-      runEffects(character.champion.onAttackHit, context, {
-        id: `a:${action.orderId}`,
+      // A blind attacker swings at nothing: the windup and cooldown are spent, but nothing lands
+      // and no shot leaves. A shot already in the air is unaffected.
+      if (state.statuses.some((status) => status.kind === 'blind')) return
+      // An instant attack lands here; one with a projectile launches it, and it lands on arrival.
+      runEffects(character.champion.onAttackLaunch, context, {
+        // One order makes many attacks, and what an attack places (a stack, a shot) is named by
+        // this ID, so each attack has its own: otherwise the next would replace the last.
+        id: `a:${action.orderId}:t${action.startTick}`,
         rootId: action.orderId,
         ownerId: character.id,
         tick,
@@ -724,6 +935,19 @@ export class Simulator {
       aim: cloneCastTarget(action.target),
       subject: null,
     })
+    // An ability applied through an auto attack only readies it here. The champion's attack
+    // effects find the readiness and spend it when the next auto lands.
+    if (def.empowerAttack) {
+      runEffects([mark(readyKey(def.id), def.empowerAttack.ticks, self(), { cap: 1 })], context, {
+        id: `c:${action.orderId}:ready`,
+        rootId: action.orderId,
+        ownerId: character.id,
+        tick,
+        at: { ...action.origin },
+        aim: cloneCastTarget(action.target),
+        subject: null,
+      })
+    }
     // The champion's own reaction to any spell it casts (Capricorn's passive).
     runEffects(character.champion.onCast, context, {
       id: `c:${action.orderId}:cast`,
@@ -787,6 +1011,16 @@ export class Simulator {
           entity.position = { x: from.x + velocity.x * dt, y: from.y + velocity.y * dt }
         }
       }
+      if (def.homing && tick > entity.startTick) {
+        // One step toward where the target stands this tick, so it turns with the target. It is
+        // over, without hitting, if the target died or left the game, or if its shooter left.
+        const target = entity.targetId === undefined ? undefined : states.get(entity.targetId)
+        if (!owner || !target || !isAlive(target)) continue
+        const from = entity.position ?? entity.origin
+        const next = stepToward(from, target.position, def.speed / GAME_TPS, 0)
+        entity.velocity = { x: (next.x - from.x) * GAME_TPS, y: (next.y - from.y) * GAME_TPS }
+        entity.position = next
+      }
       const position = entityPosAt(entity, tick)
       if (def.stayWhile && !def.stayWhile(context, {
         id: `${entity.id}:stay`,
@@ -797,8 +1031,9 @@ export class Simulator {
         aim: null,
         subject: null,
       })) continue
-      // Where the entity stops, for effects that care how much of its travel is left.
-      const travelEnd = entity.lifetimeTicks === undefined
+      // Where the entity stops, for effects that care how much of its travel is left. A chaser's
+      // path bends, so it has no such point.
+      const travelEnd = entity.lifetimeTicks === undefined || def.homing
         ? undefined
         : entityPosAt(entity, entity.startTick + entity.lifetimeTicks)
       const onHit = def.onHit ?? []
@@ -811,6 +1046,8 @@ export class Simulator {
               || !areEnemies(owner, unit)
               || !isAlive(state)
               || entity.hitIds.includes(unit.id)
+              // A chaser passes through everyone but its target, unless it pierces on the way home.
+              || (def.homing && !def.pierce && unit.id !== entity.targetId)
             ) return []
             const distance = distanceBetween(position, state.position)
             const touching = def.box
@@ -842,6 +1079,27 @@ export class Simulator {
           subject: id,
           travelEnd,
         })
+      }
+      // The owner picks it up by touching it: walking over it, or it arriving home. Any hits it
+      // made this tick still count, and then it is gone without running its other effects.
+      if (def.pickup && def.radius !== undefined && owner) {
+        const ownerState = states.get(entity.ownerId)
+        if (
+          ownerState
+          && isAlive(ownerState)
+          && distanceBetween(position, ownerState.position) <= def.radius + owner.champion.radius
+        ) {
+          runEffects(def.pickup, context, {
+            id: `${entity.id}:pickup`,
+            rootId: entity.rootId,
+            ownerId: entity.ownerId,
+            tick,
+            at: position,
+            aim: null,
+            subject: entity.ownerId,
+          })
+          continue
+        }
       }
       if (def.onPulse && def.pulseEveryTicks && tick > entity.startTick
         && (tick - entity.startTick) % def.pulseEveryTicks === 0) {
@@ -890,10 +1148,18 @@ export class Simulator {
       if (status.kind === 'stun' && state.action && state.action.launchTick > tick) state.action = undefined
     }
     // Pops land before new stacks so one tick can pop a unit and re-apply to it.
-    for (const { unitId, key, ownerId } of context.markerRemovals) {
+    for (const { unitId, key, ownerId, count } of context.markerRemovals) {
       const state = states.get(unitId)
       if (!state) continue
-      state.markers = state.markers.filter((marker) => marker.key !== key || marker.ownerId !== ownerId)
+      const matching = state.markers.filter((marker) => marker.key === key && marker.ownerId === ownerId)
+      // A set number goes oldest first, the order they were placed in.
+      const removed = new Set(
+        matching
+          .sort((left, right) => left.startTick - right.startTick || compareStrings(left.id, right.id))
+          .slice(0, count ?? matching.length)
+          .map((marker) => marker.id),
+      )
+      state.markers = state.markers.filter((marker) => !removed.has(marker.id))
     }
     const markedStates = new Set<GameFrameCharacter>()
     for (const { unitId, marker } of context.markerWrites) {
@@ -903,11 +1169,16 @@ export class Simulator {
       markedStates.add(state)
     }
     for (const state of markedStates) state.markers = settleStacks(state.markers)
-    for (const { unitId, target, speed } of context.dashWrites) {
+    for (const { unitId, target, speed, through, contact } of context.dashWrites) {
       const state = states.get(unitId)
       const character = this.characters.get(unitId)
       if (!state || !character || !isAlive(state)) continue
-      state.dash = { target: clampPosition(target, character.champion.radius), speed }
+      state.dash = {
+        target: clampPosition(target, character.champion.radius),
+        speed,
+        ...(through ? { through: true } : {}),
+        ...(contact ? { contact: { ...contact, origin: { ...contact.origin }, hitIds: [] } } : {}),
+      }
     }
     for (const event of context.events) {
       if (event.type === 'damage') {
@@ -928,6 +1199,16 @@ export class Simulator {
       } else if (event.type === 'interrupt') {
         const state = states.get(event.unitId)
         if (state?.action && state.action.launchTick > tick) state.action = undefined
+      } else if (event.type === 'cap-cooldown') {
+        const state = states.get(event.unitId)
+        const readyTick = state?.cooldowns[event.abilityId]
+        if (state && readyTick !== undefined) {
+          state.cooldowns[event.abilityId] = Math.min(readyTick, tick + event.ticks)
+        }
+      } else if (event.type === 'start-cooldown') {
+        const state = states.get(event.unitId)
+        const def = abilityDefs.get(event.abilityId)
+        if (state && def) state.cooldowns[event.abilityId] = tick + def.cooldownTicks
       } else if (event.type === 'refund-cooldown') {
         const state = states.get(event.unitId)
         const def = abilityDefs.get(event.abilityId)
@@ -941,6 +1222,19 @@ export class Simulator {
       } else {
         const state = states.get(event.unitId)
         if (state) state.nextAttackTick = Math.min(state.nextAttackTick, tick)
+      }
+    }
+    // A blink lands after the tick's damage and pushes but before anything else can move the unit,
+    // so the next frame has it at the point.
+    for (const { unitId, target } of context.blinkWrites) {
+      const state = states.get(unitId)
+      const character = this.characters.get(unitId)
+      if (!state || !character || !isAlive(state)) continue
+      state.position = clampPosition(target, character.champion.radius)
+    }
+    for (const { ownerId, defId } of context.entityRemovals) {
+      for (let index = entities.length - 1; index >= 0; index -= 1) {
+        if (entities[index].ownerId === ownerId && entities[index].defId === defId) entities.splice(index, 1)
       }
     }
     for (const entity of context.entityWrites) {
@@ -1088,6 +1382,7 @@ function respawnCharacter(character: SimCharacter, state: GameFrameCharacter, ti
 function clearActivity(state: GameFrameCharacter): void {
   state.action = undefined
   state.movement = undefined
+  state.attackTarget = undefined
   state.dash = undefined
   state.statuses = []
   state.markers = []
@@ -1103,15 +1398,27 @@ function isStunned(statuses: readonly Status[]): boolean {
   return statuses.some((status) => status.kind === 'stun')
 }
 
+// A silence stops starting an ability and nothing else.
+function isSilenced(statuses: readonly Status[]): boolean {
+  return statuses.some((status) => status.kind === 'silence')
+}
+
 // Haste bonuses add together; only the strongest slow applies; the slow scales the hasted speed.
-function getMoveSpeed(character: SimCharacter, statuses: readonly Status[]): number {
+// A fading haste counts for the share of its length still to run at `tick`.
+function getMoveSpeed(character: SimCharacter, statuses: readonly Status[], tick: number): number {
   let strongestSlow = 0
   let hasteBonus = 0
   for (const status of statuses) {
     if (status.kind === 'slow') strongestSlow = Math.max(strongestSlow, status.amount)
-    else if (status.kind === 'haste') hasteBonus += status.amount
+    else if (status.kind === 'haste') hasteBonus += status.fades ? status.amount * shareLeft(status, tick) : status.amount
   }
   return character.champion.moveSpeed * (1 + hasteBonus) * (1 - Math.min(1, strongestSlow))
+}
+
+// How much of a status's length is still ahead at `tick`: 1 as it starts, 0 as it ends.
+function shareLeft(status: Status, tick: number): number {
+  const length = status.endTick - status.startTick
+  return length <= 0 ? 0 : Math.max(0, Math.min(1, (status.endTick - tick) / length))
 }
 
 // Markers with a cap form a stack per key and owner. Applying to a stack refreshes the
@@ -1216,12 +1523,79 @@ function cloneFrameCharacter(character: GameFrameCharacter): GameFrameCharacter 
         target: { ...character.movement.target },
       },
     } : {}),
-    ...(character.dash ? { dash: { target: { ...character.dash.target }, speed: character.dash.speed } } : {}),
+    ...(character.dash ? {
+      dash: {
+        target: { ...character.dash.target },
+        speed: character.dash.speed,
+        ...(character.dash.through ? { through: true } : {}),
+        ...(character.dash.contact
+          ? {
+            contact: {
+              ...character.dash.contact,
+              origin: { ...character.dash.contact.origin },
+              hitIds: [...character.dash.contact.hitIds],
+            },
+          }
+          : {}),
+      },
+    } : {}),
+    ...(character.attackTarget ? { attackTarget: { ...character.attackTarget } } : {}),
     ...(character.action ? { action: cloneAction(character.action) } : {}),
     cooldowns: { ...character.cooldowns },
     statuses: character.statuses.map((status) => ({ ...status })),
     markers: character.markers.map((marker) => ({ ...marker })),
     queuedOrders: character.queuedOrders.map(cloneOrder),
+  }
+}
+
+// Living characters are solid. For every pair whose bodies overlap, each is pushed away from the
+// other along the line between their centres by half of `GAME_COLLISION_STIFFNESS` times the
+// overlap, so the overlap shrinks by that share every tick. The force grows with the depth, like a
+// spring, and the response is too damped to bounce: they slide apart and settle just touching.
+//
+// Every push is worked out from the positions as the tick found them and applied together, and
+// pairs are visited in ID order, so the result does not depend on who is looked at first. Two
+// characters on exactly the same spot have no line between them; the lower ID goes toward -x.
+// The dead are ghosts, and the arena's edge still holds whoever is pushed against it.
+function pushCharactersApart(
+  states: ReadonlyMap<number, GameFrameCharacter>,
+  characters: ReadonlyMap<number, SimCharacter>,
+): void {
+  const living = [...states.values()]
+    .filter((state) => isAlive(state) && characters.has(state.characterId))
+    .sort((left, right) => left.characterId - right.characterId)
+  const pushes = new Map<number, Vector2>()
+  const addPush = (id: number, x: number, y: number): void => {
+    const total = pushes.get(id) ?? { x: 0, y: 0 }
+    pushes.set(id, { x: total.x + x, y: total.y + y })
+  }
+  for (let first = 0; first < living.length; first += 1) {
+    for (let second = first + 1; second < living.length; second += 1) {
+      const left = living[first]
+      const right = living[second]
+      // Someone dashing through passes through everyone, and no one is pushed for it.
+      if (left.dash?.through || right.dash?.through) continue
+      const reach = (characters.get(left.characterId)?.champion.radius ?? 0)
+        + (characters.get(right.characterId)?.champion.radius ?? 0)
+      const dx = right.position.x - left.position.x
+      const dy = right.position.y - left.position.y
+      const distance = Math.sqrt(dx * dx + dy * dy)
+      if (distance >= reach) continue
+      const push = (reach - distance) * GAME_COLLISION_STIFFNESS / 2
+      const awayX = distance === 0 ? 1 : dx / distance
+      const awayY = distance === 0 ? 0 : dy / distance
+      addPush(left.characterId, -awayX * push, -awayY * push)
+      addPush(right.characterId, awayX * push, awayY * push)
+    }
+  }
+  for (const [id, push] of pushes) {
+    const state = states.get(id)
+    const character = characters.get(id)
+    if (!state || !character) continue
+    state.position = clampPosition(
+      { x: state.position.x + push.x, y: state.position.y + push.y },
+      character.champion.radius,
+    )
   }
 }
 
@@ -1238,9 +1612,3 @@ function stepToward(position: Vector2, target: Vector2, stepLength: number, radi
   }, radius)
 }
 
-function clampPosition(position: Vector2, radius: number): Vector2 {
-  return {
-    x: Math.max(radius, Math.min(GAME_ARENA_WIDTH - radius, position.x)),
-    y: Math.max(radius, Math.min(GAME_ARENA_HEIGHT - radius, position.y)),
-  }
-}

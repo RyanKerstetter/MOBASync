@@ -1,9 +1,6 @@
 import {
   champions,
   DEFAULT_CHAMPION_ID,
-  GAME_ARENA_HEIGHT,
-  GAME_ARENA_WIDTH,
-  GAME_SPAWN_SPACING,
   FINALIZE_LAG,
   GAME_DEATH_LEAD_TICKS,
   GAME_ORDER_VERDICT_RETENTION_MS,
@@ -11,6 +8,7 @@ import {
   GameStatusSchema,
   getChampion,
   Simulator,
+  teamSpawnPositions,
   type GameBroadcastOrder,
   type GameDeath,
   type GameOrder,
@@ -19,7 +17,8 @@ import {
   type GameStatus,
 } from '../../../packages/shared/src/index.js'
 
-type LobbyPlayer = { id: string; name: string }
+// `team` is the team the player picked in the lobby; leave it out for a team of their own.
+type LobbyPlayer = { id: string; name: string; team?: number }
 type CachedOrderAck = { ack: GameOrderAck; expiresAt: number }
 type OrderVerdict = { ack: GameOrderAck; broadcast?: GameBroadcastOrder }
 export type ChampionSelection = { championId: string; locked: boolean }
@@ -81,6 +80,10 @@ export class ServerGameState {
     this.nextCharacterId = 1
 
     const roster = [...players]
+    // A player with no team of their own is on one by themselves.
+    const teams = roster.map((player, index) => player.team ?? index + 1)
+    // Each team starts in its own slice of a circle round the middle of the map, side by side.
+    const positions = teamSpawnPositions(teams)
     roster.forEach((player, index) => {
       const characterId = this.nextCharacterId
       this.nextCharacterId += 1
@@ -89,11 +92,9 @@ export class ServerGameState {
         characterId,
         player.id,
         player.name,
-        {
-          x: GAME_ARENA_WIDTH / 2 + (index - (roster.length - 1) / 2) * GAME_SPAWN_SPACING,
-          y: GAME_ARENA_HEIGHT / 2,
-        },
+        positions[index],
         getChampion(this.selections.get(player.id)?.championId ?? DEFAULT_CHAMPION_ID),
+        teams[index],
       )
     })
     this.selections.clear()

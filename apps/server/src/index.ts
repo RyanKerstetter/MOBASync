@@ -2,11 +2,14 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomInt } from 'node:crypto'
 import geckos from '@geckos.io/server'
 import {
+  balancedTeam,
   champions,
+  GAME_MAX_PLAYERS,
   GAME_ORDER_TIMEOUT_MS,
   GAME_TPS,
   GameJoinSchema,
   GameOrderSchema,
+  isTeamId,
   parseIdentifiedMessage,
   ReliableMessenger,
   type GameBroadcastOrder,
@@ -30,11 +33,11 @@ const iceServers = (process.env.WEBRTC_ICE_SERVERS ?? 'stun:stun.l.google.com:19
 const codeCharacters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const lobbyCodeLength = 6
 const playerTimeoutMs = 45_000
-const maxPlayers = Number(process.env.LOBBY_MAX_PLAYERS ?? 2)
+const maxPlayers = Number(process.env.LOBBY_MAX_PLAYERS ?? GAME_MAX_PLAYERS)
 const checkpointIntervalMs = Number(process.env.GAME_CHECKPOINT_INTERVAL_MS ?? 1_000)
 
-if (!Number.isInteger(maxPlayers) || maxPlayers < 1) {
-  throw new Error('LOBBY_MAX_PLAYERS must be a positive integer.')
+if (!Number.isInteger(maxPlayers) || maxPlayers < 1 || maxPlayers > GAME_MAX_PLAYERS) {
+  throw new Error(`LOBBY_MAX_PLAYERS must be a whole number from 1 to ${GAME_MAX_PLAYERS}.`)
 }
 if (!Number.isInteger(checkpointIntervalMs) || checkpointIntervalMs < 1) {
   throw new Error('GAME_CHECKPOINT_INTERVAL_MS must be a positive integer.')
@@ -54,6 +57,8 @@ function readPort(name: string, fallback: number): number {
 type Player = {
   id: string
   name: string
+  // The team they play on, picked in the lobby.
+  team: number
   lastSeen: number
 }
 
@@ -73,7 +78,7 @@ type Lobby = {
   game: ServerGameState
 }
 
-type PublicPlayer = Pick<Player, 'id' | 'name'>
+type PublicPlayer = Pick<Player, 'id' | 'name' | 'team'>
 type PublicLobby = {
   code: string
   players: PublicPlayer[]
@@ -187,7 +192,7 @@ function getUniqueName(lobby: Lobby, sessionId: string, requestedName: string): 
 function toPublicLobby(lobby: Lobby): PublicLobby {
   return {
     code: lobby.code,
-    players: [...lobby.players.values()].map(({ id, name }) => ({ id, name })),
+    players: [...lobby.players.values()].map(({ id, name, team }) => ({ id, name, team })),
     leaderId: lobby.leaderId,
     messages: lobby.messages,
     maxPlayers,
@@ -248,10 +253,13 @@ function upsertPlayer(lobby: Lobby, sessionId: string, name: string): PublicPlay
   const player: Player = {
     id: sessionId,
     name: getUniqueName(lobby, sessionId, name),
+    // Someone renaming themselves keeps their team; someone joining is put on the smaller side.
+    team: lobby.players.get(sessionId)?.team
+      ?? balancedTeam([...lobby.players.values()].map((existing) => existing.team)),
     lastSeen: Date.now(),
   }
   lobby.players.set(sessionId, player)
-  return { id: player.id, name: player.name }
+  return { id: player.id, name: player.name, team: player.team }
 }
 
 function requireSessionId(url: URL): string {
@@ -305,6 +313,21 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     }
     const player = upsertPlayer(lobby, playerRequest.sessionId, playerRequest.name)
     sendJson(response, 200, { lobby: toPublicLobby(lobby), player })
+    return
+  }
+
+  // A player picks the team they will play on, until the game starts.
+  if (request.method === 'POST' && pathParts.length === 4 && pathParts[3] === 'team') {
+    const body = await readJson(request)
+    const sessionId = requireBodySessionId(body)
+    const player = lobby.players.get(sessionId)
+    if (!player) throw new HttpError(404, 'You are no longer in this lobby.')
+    if (lobby.game.status !== 'idle') {
+      throw new HttpError(409, 'Teams cannot be changed once the game is starting.')
+    }
+    if (!isTeamId(body.team)) throw new HttpError(400, 'Pick a team from the list.')
+    player.team = body.team
+    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
     return
   }
 
