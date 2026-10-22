@@ -182,6 +182,69 @@ big shield shrinks the rest of the bar instead of running off the end. A small t
 (`health-bar.ts`), which `game.ts` only draws. A champion's maximum health is at most 1000 so far,
 so a 1000 tick shows only when a shield stretches the bar past it.
 
+### The escape menu
+
+Escape opens a menu over the game (and closes it again). The game goes on behind it, and while it is
+open nothing reaches the game: no keys, and no clicks on the map. If an ability is being aimed,
+Escape drops the aim first, as it always has, and opens the menu on the next press. It offers the
+cast mode (quick cast, or quick cast with an indicator) and leaving the lobby, which takes the
+player out of the lobby and the game, as the lobby's own Leave button does.
+
+It is built to grow. `menuItems` in `game-menu.ts` is the list of rows, as data: a `choice` (a few
+options with the current one lit) or an `action` (a button), each given what to do by the game, so the
+menu knows nothing of it. Adding an option is adding an item there, and `createGameMenu` draws it.
+What a player chooses is kept in the browser by `game-settings.ts` (`loadSettings` and
+`saveSettings`, every value checked on the way in and defaulted if missing or odd), so the cast mode
+is what they last chose the next time they play. A setting is a field of `GameSettings`.
+
+### Hitbox debug view
+
+P toggles it on and off (nothing to hold). It outlines every body that can touch something, as the
+simulator sees it and whatever it is drawn as, so it stays right when everything is a sprite: each
+living champion's body circle (yours in green, others in red; the dead have none), and each entity's
+circle or rectangle, turned the way it faces (orange). `hitboxShapes` (`hitboxes.ts`) works the
+shapes out from the same rendered characters and entities the game draws, and `game.ts` outlines
+them on a layer kept above everything else. A new kind of body is drawn by adding it there.
+
+### Sprites and animation
+
+A champion can be drawn from sprite sheets instead of as a plain circle. So far the Swordsman is, as the
+sword-and-shield knight in `res/Character_SwordShield`, the Archer, as the crossbowman in
+`res/Character_Crossbow`, and the Cursebearer, as the staff bearer in `res/Character_Cursebearer`. They are drawn a little bigger than their
+bodies and with no circle behind them. The name above every champion is in its team's colour, which is how
+a sprite shows the team. The work is split in three, so animations can be added as data:
+
+- `champion-sprites.ts` is the data. A `SpriteSet` per champion ID gives the frame size, the point
+  in a frame that sits on the champion's position (`anchor`, the middle of the figure), how big an
+  art pixel is drawn (`scale`), which way the art faces, and its `clips`: for each animation, a
+  sheet (`url`, a single row of frames, left to right), how many frames, the rate, and whether it
+  loops. Sheets are referenced with `new URL('../../../res/...', import.meta.url)`, which Vite serves
+  in development and bundles in a build.
+- `animation.ts` is the logic, and knows nothing of drawing. `chooseAnimation` picks the clip:
+  being dead first, then what the champion is in the middle of (an `attack` or a `cast`), then
+  walking, then `idle`, taking the first of those the set has a clip for. So a set with only a walk
+  and an idle walks or stands through attacks and casts until it is given clips for them.
+  `CharacterAnimator` keeps one champion's state from frame to frame. It works out walking and
+  facing from where the champion is drawn (a short grace so a still frame does not flicker it to
+  idle, and a jump such as a respawn is not a step), restarts a clip from its first frame when the
+  clip changes, and gives the frame to show.
+- `character-sprite.ts` is the Pixi side. `loadSpriteSets` loads every sheet once at the start of a
+  game, sampled nearest so pixel art stays crisp, and cuts it into frames. A `CharacterSprite` per
+  champion asks its animator what to show each frame, and flips the frame when the champion faces
+  the other way from the art. If the sheets cannot be loaded, champions are drawn as circles.
+
+The Swordsman's `attack` is `Attack_1.png`. A clip marked `syncToAction` has its frames spread over the
+action instead of running at `fps`, so the last frame is the hit however long the windup is: the
+client works out how far through the action each champion is (`RenderedCharacter.action`, with
+`progress`), and while it attacks or casts the champion turns to face what the action is aimed at.
+A clip can also give each frame its own time (`frameMs`) instead of one rate: the Swordsman's death sits on its
+first frame for 0.4 s and then holds the second for as long as he is dead. To add an animation to a champion, add its clip to the set, for example `cast: { url: ..., frames: 3,
+fps: 10, loop: false }`. To draw another champion, add a set under its ID.
+`RenderedCharacter.action` already says whether a champion is attacking or casting, which is what
+`attack` and `cast` clips will play on. A new kind of animation is a new `AnimationKey` and a place
+for it in `chooseAnimation`. `tests/animation.test.ts` checks each set against its sheets (every
+clip fills its sheet exactly) and the roster, so a wrong frame count fails the tests.
+
 Stacks are drawn as pips under the body, by the pure function `layoutStackPips` (`stack-pips.ts`).
 There are two kinds, told apart by shape, colour and row, so two with similar colours can never
 share a spot. A champion's own stacks (Swordsman's sword, Capricorn's empowered, Ninja's shadow) are
@@ -278,7 +341,8 @@ indicator with it. A circle can have a second one inside it, `{ radius, innerRad
 ability whose middle does something other than its edge: the Flashbang draws the whole flash and
 the core that stuns. The two overlap, so the core is drawn darker than the ring around it. An aimed
 ability without one gets a small marker ring at the point. A dash (`indicator: { line: true }`, as on Leap
-and Shadow Step) also draws a line from the champion to the point. `ClientGameState.getCastPreview` resolves the target
+and Shadow Step) also draws a line from the champion to the point, and with a `width` too (the stick)
+the line is a band that wide. A point-aimed ability can have a `minRange`, the nearest it can be aimed. `ClientGameState.getCastPreview` resolves the target
 the same way `createCastOrder` does but issues nothing, and reads the frame being drawn so that
 calling it every frame does not move the simulation ahead.
 
@@ -331,7 +395,7 @@ attack checks and for the client's range ring and cooldown bar.
 
 **Swordsman** is a melee duelist whose stacks sit on himself. His autos add a sword stack
 (up to three, eight seconds, refreshed together), and each stack adds damage to his autos
-and to Slash. Q, Slash, cuts a 300 by 60 rectangle in front of him (`enemiesInLine`) and
+and to Slash. Q, Slash, cuts a 250 by 60 rectangle in front of him (`enemiesInLine`) and
 leaves a trail of fire in exactly that rectangle that slows enemies and hastes allies (him and his teammates). W, Radiance, spends the stacks in
 a burst around him, with damage and haste per stack. E, Shackle, readies his next auto
 (for five seconds) to spend the stacks on its target: it roots them for 1.5 s, or stuns them for 1 s if
@@ -469,10 +533,13 @@ the markers instead, for 50 more damage on top of its own and 30% move speed for
 list of effects that does this is `trickEffects` (`abilities.ts`), added to each hit that counts: the
 `onHit` of the stick and the recall, and the `empowerAttack` effects of Hush, which run when its auto
 lands. His plain autos are not in it. The count is per enemy, and a swing that is dodged or missed
-does not count. Q, Stick, is a skillshot, aimed and drawn
-as a straight band like Hex's: the stick flies 420 px in a line, hurting every enemy it passes
-through once, and lands in the ground where the flight ends (or against the wall, if it meets one
-first) and stays, with no timer, until the Trinketmaster dies. Walking over it
+does not count. Q, Stick, is aimed at a point, and the player chooses how far to throw it: the stick flies
+to the point at 540 px a second, hurting every enemy it passes through once, and lands in the
+ground there (or against the wall, if the point is past it) and stays, with no timer, until the
+Trinketmaster dies. The point is at least 150 and at most 360 from him (`minRange` and `range` on
+the ability): the client pushes an aim nearer than 150 out to it along the same heading, holds a
+farther one to 360, and the simulator drops a cast aimed outside either. It is drawn as a band as
+wide as the stick, from him to where it will land, with a faint ring at the nearest it can go. Walking over it
 picks it up and leaves Q no more than a second to wait, however long was left; a Q that had less is
 not lengthened. Calling it back is different: pressing Q again sends the stick flying home through
 enemies, hurting and slowing each once, and it is gone when it reaches the Trinketmaster, but Q's
@@ -481,7 +548,10 @@ again coming back, for damage and a slow. Only walking over the stick refunds Q.
 to silence its target for 1.5 s, and resets his auto timer. It has no windup and no target, so it
 goes between autos. E, Warp, blinks the Trinketmaster to the stick,
 wherever it is: it is there on the next frame, standing on the stick, so the stick is walked over and
-Q is left a second to wait. Warp has no range limit.
+Q is left a second to wait. Warp has no range limit. With no stick anywhere, on the ground, in the air
+going out, or in the air coming back, but Q still on cooldown, Warp has nothing to blink to and
+gives Q back instead, all of its cooldown, at the cost of its own; with Q ready and no stick out, or a
+stick in the air, it cannot be cast.
 
 This needed a few things the engine did not have. **Blink** is an effect, `blink(anchor)`, that moves
 a unit to a point as the tick ends: unlike a dash it has nothing in between, a root does not hold it,
@@ -494,10 +564,11 @@ gives nothing back. `capCooldown(abilityId, ticks)` is the event behind "no more
 second to wait": it sets a ceiling on what is left of a cooldown, where the refunds only take a share
 off. Effects can find their caster's own entities (`SimReader.entitiesOf`, the `ownEntity(defId)`
 anchor that Warp blinks to and the recall launches from) and remove them (`removeEntities`). A
-straight shot with `stopsAtWalls` ends where its edge meets the arena's wall instead of flying on past
-it, running its `onExpire` there; the stick's throw uses it so that the stick always lands somewhere
-the Trinketmaster can walk to. It is worked out when the shot is spawned, from where it starts and
-which way it points, and only shortens the lifetime.
+shot with `stopsAtWalls` never leaves the arena: a straight one ends where its edge meets the wall
+instead of flying on past it, running its `onExpire` there, and one that lands at its aim
+(`landAtAim`, which is how the stick is thrown) flies to the aimed point held inside the wall. The
+stick's throw uses it so that the stick always lands somewhere the Trinketmaster can walk to. It
+is worked out when the shot is spawned, and only shortens the flight.
 
 **Ninja** is a melee skirmisher built around shadow stacks, which sit on himself and are each an
 enhanced auto. P: dashing through an enemy with Shadow Step gives him a shadow stack, at most two,
@@ -556,7 +627,11 @@ One key doing two things is the ability's `recast`. Stick names `recast: 'recall
 ability in full, with its own cooldown, that the key becomes while it can be cast. What can be cast
 is the ability's `requires`: `{ entity: 'stick', out: true }` means only while the caster has a stick
 out, so Recall and Warp need one, and Stick (`out: false`) cannot be thrown while one is already
-down. Silenced characters are labelled `silenced`.
+down. An ability can have a second way to be castable, `orWhen: { none, onCooldown }`: when none of
+the entities listed are out and the ability named is on cooldown. Warp has it, so it can be cast with
+no stick in play while Q is on cooldown, and its effects check for a stick on the ground to choose
+between the blink and giving Q back. (`meetsRequirement` takes a way to ask whether an ability is on
+cooldown, as the simulator and the client each have their own.) Silenced characters are labelled `silenced`.
 
 How a recast gets from the key to the server. Only the client knows which ability a key means; the
 server never does, because an order names the ability and not the key (`CastOrderSchema.abilityId`,
@@ -649,13 +724,34 @@ in snapshots, so a lost message is recovered by a resync.
 Pending order messages are retried with exponential backoff. Silence does not
 undo a prediction: after the retry timeout the client requests a full state
 snapshot, and retries continue until an acknowledgement arrives. Server-side
-broadcast timeout also triggers a snapshot. Selected handshake and
-acknowledgement messages use Geckos reliable delivery.
+broadcast timeout also triggers a snapshot. Handshake and lifecycle messages (joining,
+starting, cancelling, deaths, errors) use Geckos reliable delivery, which sends a message ten times.
+Snapshots and order acknowledgements deliberately do not: the next snapshot is a second away and a
+client that falls behind asks for one, and an order whose acknowledgement is lost is resent by the
+client and acknowledged again from the server's cache. Orders themselves use the reliable messenger's
+own retries, not the Geckos option.
 
 Network snapshots use the latest committed frame as a checkpoint and include
 only orders newer than that checkpoint for replay. The server sends these
 checkpoints once per second by default; configure the positive-integer
 `GAME_CHECKPOINT_INTERVAL_MS` environment variable to change the interval.
+A snapshot is the biggest and most repetitive message, so it is sent gzipped (about a quarter of the
+JSON) as a raw binary message (`apps/server/src/snapshot-codec.ts`), which is also small enough not to
+be split into several packets, any of which could be lost. The client unzips it with the browser's
+`DecompressionStream` (`apps/client/src/snapshot-codec.ts`), one at a time so they apply in order.
+Nothing else is gzipped: the other messages are too small for it to help.
+
+An order is named `characterId:seq` (for example `3:41`), and the order broadcast to the lobby carries
+only the order and `characterId`, not the sender's session id or name, which are already known from the
+lobby. Order ids are repeated through the game state, so keeping them short also shrinks snapshots.
+
+The server counts what it sends and logs it every 5 seconds while it is sending (`bandwidth.ts`): the
+total, and each kind of message from the busiest, with how many a second and how many times each is
+sent. It counts what goes on the wire: a message sent with Geckos' `reliable` option is sent 10 times
+by default, 150 ms apart, and a room message goes to every player in it (it is counted once for each,
+as Geckos sends it to each player's channel). Set `GAME_BANDWIDTH_LOG_MS`
+to another interval, or 0 to turn it off.
+
 Delivery acknowledgements are per message rather than cumulative, and reliability has
 not yet been applied to every lobby/game lifecycle event. Clients ping once per
 second and use an exponential moving average of measured RTT to estimate the

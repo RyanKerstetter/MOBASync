@@ -14,7 +14,7 @@
     "start": "npm run build:client && concurrently -n client,server -c cyan,green \"npm:preview\" \"npm:start:server\"",
     "start:server": "npm run start --workspace @2d-moba/server",
     "build:client": "npm run build --workspace @2d-moba/client",
-    "test": "tsx --test tests/simulator.test.ts tests/abilities.test.ts tests/client-game-state.test.ts tests/server-game-state.test.ts tests/reliable-messages.test.ts tests/content.test.ts tests/camera.test.ts tests/health-bar.test.ts tests/cast-control.test.ts tests/stack-pips.test.ts tests/attack-marker.test.ts tests/status-labels.test.ts tests/champion-select.test.ts tests/hud.test.ts tests/teams.test.ts",
+    "test": "tsx --test tests/simulator.test.ts tests/abilities.test.ts tests/client-game-state.test.ts tests/server-game-state.test.ts tests/reliable-messages.test.ts tests/content.test.ts tests/camera.test.ts tests/health-bar.test.ts tests/cast-control.test.ts tests/stack-pips.test.ts tests/attack-marker.test.ts tests/status-labels.test.ts tests/champion-select.test.ts tests/hud.test.ts tests/animation.test.ts tests/hitboxes.test.ts tests/game-menu.test.ts tests/bandwidth.test.ts tests/snapshot-codec.test.ts tests/teams.test.ts",
     "build": "npm run build --workspace @2d-moba/client && npm run typecheck --workspace @2d-moba/server",
     "preview": "npm run preview --workspace @2d-moba/client"
   },

@@ -6,8 +6,8 @@ export const GAME_ARENA_HEIGHT = 1350
 // enough that an ability aimed at its full range is on screen: the longest reach of any champion's
 // abilities is about 650, and the champion is in the middle, so the shortest half of the view should
 // come close to it.
-export const GAME_VIEW_WIDTH = 1200
-export const GAME_VIEW_HEIGHT = 675
+export const GAME_VIEW_WIDTH = 16 * 120
+export const GAME_VIEW_HEIGHT = 9 * 120
 // The most players one lobby can hold.
 export const GAME_MAX_PLAYERS = 8
 // Teams start spread evenly around a circle centred on the middle of the map, with each team's

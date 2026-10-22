@@ -108,7 +108,7 @@ test('the indicator shows exactly where letting go would cast', () => {
   assert.deepEqual(gameState.getCastPreview(1, { x: 142, y: 103 }, 0)?.target, { mode: 'unit', unitId: 2 })
 
   // And the cast itself agrees.
-  const cast = gameState.createCastOrder(3, { x: 700, y: 100 }, 'player-1', 0)
+  const cast = gameState.createCastOrder(3, { x: 700, y: 100 }, 0)
   assert.ok(cast.ok)
   assert.deepEqual(cast.order.target, point?.target)
 })
@@ -134,8 +134,8 @@ test('showing an indicator issues nothing: the next order is the same with or wi
     previewed.getCastBlocker(3, now)
   }
 
-  const first = plain.createCastOrder(3, { x: 300, y: 300 }, 'player-1', 200)
-  const second = previewed.createCastOrder(3, { x: 300, y: 300 }, 'player-1', 200)
+  const first = plain.createCastOrder(3, { x: 300, y: 300 }, 200)
+  const second = previewed.createCastOrder(3, { x: 300, y: 300 }, 200)
   assert.ok(first.ok && second.ok)
   assert.deepEqual(second.order, first.order)
 })
@@ -145,7 +145,7 @@ test('an ability that cannot be cast whatever the aim says why before it is aime
 
   assert.equal(gameState.getCastBlocker(3, 0), undefined)
   assert.equal(gameState.getCastBlocker(7, 0), 'No ability is bound to that key.')
-  const cast = gameState.createCastOrder(3, { x: 300, y: 100 }, 'player-1', 0)
+  const cast = gameState.createCastOrder(3, { x: 300, y: 100 }, 0)
   assert.ok(cast.ok)
   // A second later the windup has long launched and the cooldown is running.
   assert.equal(gameState.getCastBlocker(3, 1000), 't-meteor is on cooldown.')
@@ -166,11 +166,11 @@ test('a unit ability aimed at an enemy beyond its range is refused with a reason
   const far = createClient(300)
   const near = createClient(200)
 
-  const refused = far.createCastOrder(1, { x: 400, y: 100 }, 'player-1', 0)
+  const refused = far.createCastOrder(1, { x: 400, y: 100 }, 0)
   assert.equal(refused.ok, false)
   assert.match(refused.ok ? '' : refused.reason, /out of range/)
   // Right on its reach it casts.
-  assert.equal(near.createCastOrder(1, { x: 300, y: 100 }, 'player-1', 0).ok, true)
+  assert.equal(near.createCastOrder(1, { x: 300, y: 100 }, 0).ok, true)
   // The refused cast used up no order number or tick: the next order is the first.
   const move = far.createMoveOrder({ x: 200, y: 100 }, 0)
   assert.equal(move?.seq, 1)

@@ -1,4 +1,4 @@
-import { abilityDefs, meetsRequirement, readyKey, withinCastRange, type AbilityDef } from './abilities.js'
+import { abilityDefs, beyondMinCastRange, meetsRequirement, readyKey, withinCastRange, type AbilityDef } from './abilities.js'
 import { boxTouchesCircle, clampPosition, distanceToSegment } from './geometry.js'
 import { DEFAULT_CHAMPION_ID, getChampion, type Champion } from './champions.js'
 import {
@@ -821,7 +821,11 @@ export class Simulator {
       && !isStunned(state.statuses)
       && !isSilenced(state.statuses)
       && !(def.movement && isImmobilized(state.statuses))
-      && meetsRequirement(def, (defId) => context.entitiesOf(character.id, defId).length > 0)
+      && meetsRequirement(
+        def,
+        (defId) => context.entitiesOf(character.id, defId).length > 0,
+        (abilityId) => (state.cooldowns[abilityId] ?? 0) > tick,
+      )
       && (state.cooldowns[def.id] ?? 0) <= tick
       && distanceBetween(order.origin, state.position) <= GAME_CAST_ORIGIN_TOLERANCE
       && this.isValidCastTarget(character, def, order, states),
@@ -863,6 +867,7 @@ export class Simulator {
         return true
       case 'point':
         return withinCastRange(order.origin, target.point, def.range)
+          && beyondMinCastRange(order.origin, target.point, def.minRange)
       case 'direction':
         return Math.abs(target.dir.x * target.dir.x + target.dir.y * target.dir.y - 1)
           <= DIRECTION_LENGTH_TOLERANCE

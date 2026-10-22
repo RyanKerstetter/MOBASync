@@ -75,7 +75,7 @@ test('ability cooldowns count down continuously between whole ticks', () => {
   gameState.simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, brawler)
   gameState.setLocalCharacterId(1)
   gameState.resetServerTickAnchor(0, 0)
-  const order = gameState.createCastOrder(0, { x: 100, y: 100 }, 'player-1', 0)
+  const order = gameState.createCastOrder(0, { x: 100, y: 100 }, 0)
   assert.ok(order.ok)
   gameState.simulator.advanceTo(20)
 
@@ -283,23 +283,41 @@ const atTick = (tick: number): number => tick * 1000 / GAME_TPS
 
 test('the stick key throws it while none is out, then calls it back, and shows that instead', () => {
   const gameState = createStickClient()
-  // Thrown east by the key itself on tick 1: a skillshot, so it takes a direction and not a point.
-  // In the air until tick 36, then lying on the ground 300 px along.
-  const thrown = gameState.createCastOrder(0, { x: 600, y: 300 }, 'player-1', atTick(0))
+  // Thrown by the key itself on tick 1 at the point aimed at, which is 300 px along: the farthest it
+  // goes. In the air until tick 36, then lying on the ground there.
+  const thrown = gameState.createCastOrder(0, { x: 600, y: 300 }, atTick(0))
   assert.ok(thrown.ok)
   assert.equal(thrown.order.abilityId, 't-stick')
-  assert.deepEqual(thrown.order.target, { mode: 'direction', dir: { x: 1, y: 0 } })
+  assert.deepEqual(thrown.order.target, { mode: 'point', point: { x: 600, y: 300 } })
 
   assert.equal(gameState.abilityNeedsAim(0, atTick(20)), true, 'the throw is aimed')
-  // Aimed, it is drawn as a straight band as wide as the stick, like the other skillshots, and not
-  // as a circle on the ground.
-  const aimed = gameState.getCastPreview(0, { x: 700, y: 300 }, atTick(20))
+  // Aimed, it is drawn as a band as wide as the stick from the thrower to where it will land.
+  const aimed = gameState.getCastPreview(0, { x: 450, y: 300 }, atTick(20))
   assert.equal(aimed?.abilityId, 't-stick')
-  assert.equal(aimed?.targeting, 'direction')
-  assert.deepEqual(aimed?.target, { mode: 'direction', dir: { x: 1, y: 0 } })
-  assert.deepEqual(aimed?.indicator, { width: 16 })
+  assert.equal(aimed?.targeting, 'point')
+  assert.deepEqual(aimed?.target, { mode: 'point', point: { x: 450, y: 300 } }, 'where the player aims is where it goes')
+  assert.deepEqual(aimed?.indicator, { line: true, width: 16 })
   assert.equal(aimed?.indicator?.radius, undefined)
+  assert.equal(aimed?.minRange, 150)
   assert.equal(gameState.getAbilityCooldowns(atTick(20))[0].abilityId, 't-stick')
+
+  // The player chooses how far, but not nearer than 150 or farther than 300: past either, the point is
+  // held to it along the same heading, and the order carries the point that was shown.
+  const near = gameState.getCastPreview(0, { x: 340, y: 300 }, atTick(20))
+  assert.deepEqual(near?.target, { mode: 'point', point: { x: 450, y: 300 } }, 'pushed out to 150')
+  const far = gameState.getCastPreview(0, { x: 900, y: 300 }, atTick(20))
+  assert.deepEqual(far?.target, { mode: 'point', point: { x: 600, y: 300 } }, 'held to 300')
+  // (A fresh game for the casts, since the first throw above has the stick out and on cooldown.)
+  const fresh = createStickClient()
+  const diagonal = fresh.createCastOrder(0, { x: 310, y: 310 }, atTick(0))
+  assert.ok(diagonal.ok)
+  const point = diagonal.order.target.mode === 'point' ? diagonal.order.target.point : undefined
+  assert.ok(point)
+  assert.ok(Math.abs(Math.hypot(point.x - 300, point.y - 300) - 150) < 1e-9, 'a short throw along a diagonal is 150 long')
+  assert.ok(Math.abs(point.x - point.y) < 1e-9, 'and keeps its heading')
+  // Right on top of the thrower there is no heading to push out along.
+  const onSelf = createStickClient().createCastOrder(0, { x: 300, y: 300 }, atTick(0))
+  assert.deepEqual(onSelf, { ok: false, reason: 'Aim away from your champion.' })
 
   // With the stick down, the same key calls it back: nothing to aim, and its own cooldown.
   assert.equal(gameState.abilityNeedsAim(0, atTick(40)), false, 'the recall is not aimed')
@@ -309,7 +327,7 @@ test('the stick key throws it while none is out, then calls it back, and shows t
   assert.deepEqual([shown.slot, shown.abilityId, shown.ticksRemaining], [0, 't-recall', 0])
   assert.equal(gameState.getCastBlocker(0, atTick(40)), undefined)
 
-  const attempt = gameState.createCastOrder(0, { x: 700, y: 300 }, 'player-1', atTick(40))
+  const attempt = gameState.createCastOrder(0, { x: 700, y: 300 }, atTick(40))
   assert.ok(attempt.ok)
   assert.equal(attempt.order.abilityId, 't-recall')
   assert.deepEqual(attempt.order.target, { mode: 'none' })
@@ -318,10 +336,11 @@ test('the stick key throws it while none is out, then calls it back, and shows t
 test('an ability that cannot be cast says why, instead of sending an order the simulator would drop', () => {
   const gameState = createStickClient()
 
-  // Warp is the third key and needs a stick on the ground.
-  assert.equal(gameState.getCastBlocker(2, atTick(5)), 't-warp needs your t-stick out.')
-  const refused = gameState.createCastOrder(2, { x: 0, y: 0 }, 'player-1', atTick(5))
-  assert.deepEqual(refused, { ok: false, reason: 't-warp needs your t-stick out.' })
+  // Warp is the third key and needs a stick on the ground, or the throw on cooldown with no stick anywhere.
+  const reason = 't-warp needs your t-stick out, or your t-stick on cooldown with none in play.'
+  assert.equal(gameState.getCastBlocker(2, atTick(5)), reason)
+  const refused = gameState.createCastOrder(2, { x: 0, y: 0 }, atTick(5))
+  assert.deepEqual(refused, { ok: false, reason })
 
   // Silenced by the enemy's hush: readied on tick 1, it rides the auto the enemy walks up and lands.
   gameState.simulator.addOrder(2, {
@@ -332,6 +351,25 @@ test('an ability that cannot be cast says why, instead of sending an order the s
   assert.equal(gameState.getCastBlocker(1, atTick(10)), 'You cannot cast while silenced.')
   assert.equal(gameState.getCharacters(atTick(10)).find((character) => character.id === 1)?.silenced, true)
   assert.equal(gameState.getCharacters(atTick(10)).find((character) => character.id === 2)?.silenced, false)
+})
+
+test('warp can be cast with no stick in play once the throw is on cooldown, and not while the stick is in the air', () => {
+  const gameState = createStickClient()
+  // The stick is thrown on tick 1 to 300 px along (leaves on tick 5, down on tick 36), called back on
+  // tick 60, and home by about tick 90, with the throw's 8 s still running.
+  const thrown = gameState.createCastOrder(0, { x: 600, y: 300 }, atTick(0))
+  assert.ok(thrown.ok)
+  gameState.simulator.addOrder(1, {
+    id: 'player-1:90', seq: 90, tick: 60, type: 'cast', abilityId: 't-recall', target: { mode: 'none' }, origin: { x: 300, y: 300 },
+  })
+
+  assert.equal(gameState.getCastBlocker(2, atTick(20)) !== undefined, true, 'not while the stick is in the air')
+  assert.equal(gameState.getCastBlocker(2, atTick(40)), undefined, 'but a stick on the ground can be warped to')
+  assert.equal(gameState.getCastBlocker(2, atTick(75)) !== undefined, true, 'not while the stick is coming back')
+  assert.equal(gameState.getCastBlocker(2, atTick(150)), undefined, 'and with it home and the throw still on cooldown, it can')
+  const warp = gameState.createCastOrder(2, { x: 0, y: 0 }, atTick(150))
+  assert.ok(warp.ok)
+  assert.equal(warp.order.abilityId, 't-warp')
 })
 
 test('clicking, auto-targeting and aiming skip teammates, and every character reports its team', () => {
@@ -350,10 +388,10 @@ test('clicking, auto-targeting and aiming skip teammates, and every character re
 
   // A unit ability (the second key, a lash) aimed at the teammate has nothing to target, and aimed at
   // the enemy it is cast.
-  const atTeammate = gameState.createCastOrder(1, { x: 150, y: 100 }, 'player-1', 0)
+  const atTeammate = gameState.createCastOrder(1, { x: 150, y: 100 }, 0)
   assert.equal(atTeammate.ok, false)
   assert.match(atTeammate.ok ? '' : atTeammate.reason, /at an enemy/)
-  const atEnemy = gameState.createCastOrder(1, { x: 200, y: 100 }, 'player-1', 0)
+  const atEnemy = gameState.createCastOrder(1, { x: 200, y: 100 }, 0)
   assert.ok(atEnemy.ok)
   assert.deepEqual(atEnemy.order.target, { mode: 'unit', unitId: 3 })
 })
@@ -367,8 +405,9 @@ test('an attack order locks the local champion onto its target, and walking away
   gameState.resetServerTickAnchor(0, 0)
 
   assert.equal(gameState.getLocalAttackTarget(atTick(5)), undefined, 'nothing yet')
-  const order = gameState.createAttackOrder(2, 'player-1', atTick(0))
+  const order = gameState.createAttackOrder(2, atTick(0))
   assert.ok(order)
+  assert.match(order.id, /^1:[0-9]+$/, 'orders are named by the character that gave them and a number, which is short')
   const lockedAt = order.tick + 1
   assert.equal(gameState.getLocalAttackTarget(atTick(lockedAt)), 2, 'locked on from the order')
   assert.equal(gameState.getLocalAttackTarget(atTick(lockedAt + 40)), 2, 'and still, while it walks up')
@@ -407,7 +446,7 @@ test('the ninja Q key aims a dash until a shadow is out and then dashes back to 
   const aimed = gameState.getCastPreview(0, { x: 900, y: 300 }, atTick(0))
   assert.deepEqual(aimed?.indicator, { line: true })
   assert.deepEqual(aimed?.target, { mode: 'point', point: { x: 600, y: 300 } })
-  const forward = gameState.createCastOrder(0, { x: 600, y: 300 }, 'player-1', atTick(0))
+  const forward = gameState.createCastOrder(0, { x: 600, y: 300 }, atTick(0))
   assert.ok(forward.ok)
   assert.equal(forward.order.abilityId, 't-shadowstep')
   assert.deepEqual(forward.order.target, { mode: 'point', point: { x: 600, y: 300 } })
@@ -417,7 +456,7 @@ test('the ninja Q key aims a dash until a shadow is out and then dashes back to 
   assert.equal(gameState.abilityNeedsAim(0, atTick(70)), false, 'the dash back is not aimed')
   const preview = gameState.getCastPreview(0, { x: 0, y: 0 }, atTick(70))
   assert.deepEqual([preview?.abilityId, preview?.targeting], ['t-shadowreturn', 'none'])
-  const back = gameState.createCastOrder(0, { x: 0, y: 0 }, 'player-1', atTick(70))
+  const back = gameState.createCastOrder(0, { x: 0, y: 0 }, atTick(70))
   assert.ok(back.ok)
   assert.equal(back.order.abilityId, 't-shadowreturn')
   assert.deepEqual(back.order.target, { mode: 'none' })
@@ -438,6 +477,28 @@ test('a dodging champion is reported to the renderer, and the foe is not', () =>
   assert.equal(dodging(10, 1), true)
   assert.equal(dodging(10, 2), false)
   assert.equal(dodging(100, 1), false, 'and it wears off')
+})
+
+test('a champion in the windup of an ability is shown casting, and one using an ability with no windup is not', () => {
+  const gameState = new ClientGameState()
+  gameState.simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, brawler)
+  gameState.simulator.addPlayer(2, 'player-2', 'Player 2', { x: 400, y: 300 }, getChampion('t-archer'))
+  gameState.setLocalCharacterId(1)
+  gameState.resetServerTickAnchor(0, 0)
+  // The brawler's shockwave has a windup of 6 ticks and a backswing of 6; the archer's focus has neither.
+  gameState.simulator.addOrder(1, {
+    id: 'player-1:1', seq: 1, tick: 1, type: 'cast', abilityId: 't-shockwave', target: { mode: 'none' }, origin: { x: 100, y: 100 },
+  })
+  gameState.simulator.addOrder(2, {
+    id: 'player-2:1', seq: 1, tick: 1, type: 'cast', abilityId: 't-focus', target: { mode: 'none' }, origin: { x: 400, y: 300 },
+  })
+  const view = (tick: number, id: number) => gameState.getCharacters(atTick(tick)).find((character) => character.id === id)?.action
+
+  assert.equal(view(1, 1)?.kind, 'cast')
+  assert.ok(Math.abs((view(7, 1)?.progress ?? 0) - 0.5) < 1e-9, 'half way through its windup and backswing')
+  assert.equal(view(13, 1), undefined, 'and done')
+  assert.equal(view(1, 2), undefined, 'a focus is not a cast to show')
+  assert.equal(view(2, 2), undefined)
 })
 
 test('a stunned champion is told so', () => {

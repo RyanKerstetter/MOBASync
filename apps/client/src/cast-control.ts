@@ -17,8 +17,22 @@ export type CastAction =
 // either mode, since there is no indicator to show.
 export class CastControl {
   private aimedSlot: number | undefined
+  private currentMode: CastMode
 
-  constructor(readonly mode: CastMode = DEFAULT_CAST_MODE) {}
+  constructor(mode: CastMode = DEFAULT_CAST_MODE) {
+    this.currentMode = mode
+  }
+
+  get mode(): CastMode {
+    return this.currentMode
+  }
+
+  // Changes how the keys cast, from the next press. Whatever was being aimed is dropped, since the
+  // key's release would be read under the other mode.
+  setMode(mode: CastMode): void {
+    this.currentMode = mode
+    this.aimedSlot = undefined
+  }
 
   // The slot whose indicator is showing, if any.
   get aiming(): number | undefined {
@@ -26,7 +40,7 @@ export class CastControl {
   }
 
   press(slot: number, needsAim: boolean): CastAction {
-    if (this.mode === 'quick' || !needsAim) return { type: 'cast', slot }
+    if (this.currentMode === 'quick' || !needsAim) return { type: 'cast', slot }
     this.aimedSlot = slot
     return { type: 'aim', slot }
   }

@@ -1,3 +1,4 @@
+import type { ActionView } from './animation.ts'
 import {
   GAME_REMOTE_CATCHUP_EASE_TICKS,
   GAME_REMOTE_CATCHUP_MAX_SPEED_MULTIPLIER,
@@ -64,6 +65,8 @@ export type RenderedCharacter =
     silenced: boolean
     // Dodging every auto attack aimed at it.
     dodging: boolean
+    // What it is in the middle of, if anything: an auto attack or an ability, windup or backswing.
+    action?: ActionView
     // Range and cooldown include active attack-range and attack-speed bonuses.
     attackRange: number
     attackCooldownTicks: number
@@ -93,6 +96,8 @@ export type CastPreview = {
   abilityId: string
   targeting: CastTarget['mode']
   range: number
+  // The nearest it can be aimed, for an ability that has one.
+  minRange?: number
   // The ability's own indicator size, when it has one.
   indicator?: AbilityIndicator
   // Absent while the aim would not cast, such as a unit ability over empty ground.
@@ -261,7 +266,7 @@ export class ClientGameState {
     if (!character) return undefined
     const seq = this.nextOrderSequence
     const order: MoveOrder = {
-      id: `${character.player?.playerId ?? this.localCharacterId}:${seq}`,
+      id: `${this.localCharacterId}:${seq}`,
       seq,
       tick: this.nextOrderTick(now),
       type: 'move',
@@ -273,11 +278,7 @@ export class ClientGameState {
     return order
   }
 
-  createAttackOrder(
-    targetId: number,
-    playerId: string,
-    now = performance.now(),
-  ): GameAttackOrder | undefined {
+  createAttackOrder(targetId: number, now = performance.now()): GameAttackOrder | undefined {
     if (
       this.localCharacterId === undefined
       || !this.simulator.characters.has(this.localCharacterId)
@@ -286,7 +287,7 @@ export class ClientGameState {
 
     const seq = this.nextOrderSequence
     const order: GameAttackOrder = {
-      id: `${playerId}:${seq}`,
+      id: `${this.localCharacterId}:${seq}`,
       seq,
       tick: this.nextOrderTick(now),
       targetId,
@@ -300,12 +301,7 @@ export class ClientGameState {
 
   // Aim is in arena coordinates. The ability is resolved from the slot now, so
   // the order names what was cast rather than which key was pressed.
-  createCastOrder(
-    slot: number,
-    aim: Vector2,
-    playerId: string,
-    now = performance.now(),
-  ): CastAttempt {
+  createCastOrder(slot: number, aim: Vector2, now = performance.now()): CastAttempt {
     const ability = this.abilityInSlot(slot)
     if (!ability.ok) return ability
     const { localCharacterId } = ability
@@ -326,7 +322,7 @@ export class ClientGameState {
 
     const seq = this.nextOrderSequence
     const order: CastOrder = {
-      id: `${playerId}:${seq}`,
+      id: `${localCharacterId}:${seq}`,
       seq,
       tick,
       type: 'cast',
@@ -374,10 +370,13 @@ export class ClientGameState {
     const statuses = state.getStatuses()
     if (statuses.some((status) => status.kind === 'stun')) return 'You cannot cast while stunned.'
     if (statuses.some((status) => status.kind === 'silence')) return 'You cannot cast while silenced.'
-    if (!meetsRequirement(def, entityOut) && def.requires) {
-      return def.requires.out
-        ? `${def.id} needs your ${def.requires.entity} out.`
-        : `${def.id} cannot be cast while your ${def.requires.entity} is out.`
+    if (!meetsRequirement(def, entityOut, (abilityId) => !state.getAbilityCooldown(abilityId).ready) && def.requires) {
+      const base = def.requires.out
+        ? `${def.id} needs your ${def.requires.entity} out`
+        : `${def.id} cannot be cast while your ${def.requires.entity} is out`
+      return def.orWhen
+        ? `${base}, or your ${def.orWhen.onCooldown} on cooldown with none in play.`
+        : `${base}.`
     }
     return undefined
   }
@@ -405,6 +404,7 @@ export class ClientGameState {
       abilityId: def.id,
       targeting: def.targeting,
       range: def.range,
+      ...(def.minRange ? { minRange: def.minRange } : {}),
       ...(def.indicator ? { indicator: { ...def.indicator } } : {}),
       ...(shown ? { target: shown } : {}),
       ...(!aimed.ok && aimed.outOfRange ? { outOfRange: true } : {}),
@@ -437,7 +437,12 @@ export class ClientGameState {
       const dx = aim.x - origin.x
       const dy = aim.y - origin.y
       const distance = Math.hypot(dx, dy)
-      const scale = distance > def.range ? def.range / distance : 1
+      const minRange = def.minRange ?? 0
+      // An ability with a least distance has no heading from right on top of the caster.
+      if (distance === 0 && minRange > 0) return { ok: false, reason: 'Aim away from your champion.' }
+      // Held between the nearest and the farthest it can be aimed.
+      const held = Math.max(minRange, Math.min(def.range, distance))
+      const scale = distance === 0 ? 1 : held / distance
       return { ok: true, target: { mode: 'point', point: { x: origin.x + dx * scale, y: origin.y + dy * scale } } }
     }
     if (def.targeting === 'direction') {
@@ -615,6 +620,7 @@ export class ClientGameState {
         blinded: state?.getStatuses().some((status) => status.kind === 'blind') ?? false,
         silenced: state?.getStatuses().some((status) => status.kind === 'silence') ?? false,
         dodging: state?.getStatuses().some((status) => status.kind === 'dodge') ?? false,
+        ...this.getActionView(snapshot, state, now),
         attackRange: character.champion.attackRangeWith(state?.getStatuses() ?? []),
         attackCooldownTicks: character.champion.attackCooldownTicksWith(state?.getStatuses() ?? []),
         ...this.getRenderedCharacterView(character.id, now, snapshot),
@@ -659,6 +665,29 @@ export class ClientGameState {
   private fractionalTicksRemaining(snapshotTick: number, ticksRemaining: number, now: number): number {
     if (ticksRemaining <= 0) return 0
     return Math.max(0, snapshotTick + ticksRemaining - this.estimateTick(now))
+  }
+
+  // What the champion is in the middle of for its animation: the action, how far through it, and
+  // the point it is aimed at.
+  private getActionView(
+    snapshot: GameTickSnapshot,
+    state: ReturnType<GameTickSnapshot['get']>,
+    now: number,
+  ): { action?: ActionView } {
+    const action = state?.getAction()
+    if (!state || !action) return {}
+    // An ability with no windup goes off the moment it is cast, so there is no casting to show.
+    if (action.kind === 'cast' && (getAbilityDef(action.abilityId)?.windUpTicks ?? 0) <= 0) return {}
+    const length = action.endTick - action.startTick
+    const progress = length <= 0 ? 1 : Math.min(1, Math.max(0, (this.estimateTick(now) - action.startTick) / length))
+    let aimAt: Vector2 | undefined
+    if (action.kind === 'attack') aimAt = snapshot.get(action.targetId)?.getPosition()
+    else if (action.target.mode === 'point') aimAt = action.target.point
+    else if (action.target.mode === 'unit') aimAt = snapshot.get(action.target.unitId)?.getPosition()
+    else if (action.target.mode === 'direction') {
+      aimAt = { x: action.origin.x + action.target.dir.x * 100, y: action.origin.y + action.target.dir.y * 100 }
+    }
+    return { action: { kind: action.kind, progress, ...(aimAt ? { aimAt: { ...aimAt } } : {}) } }
   }
 
   private estimateTick(now: number): number {

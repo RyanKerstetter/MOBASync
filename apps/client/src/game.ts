@@ -25,8 +25,14 @@ import {
 import { Application, Container, Graphics, Text } from 'pixi.js'
 import { ATTACK_MARKER_STYLE, chooseAttackMarkers, layoutAttackMarker } from './attack-marker.ts'
 import { computeCamera, screenToWorld, type Camera } from './camera.ts'
-import { CastControl, DEFAULT_CAST_MODE, type CastMode } from './cast-control.ts'
+import { CastControl, type CastMode } from './cast-control.ts'
+import { createGameMenu, menuItems } from './game-menu.ts'
+import { loadSettings, saveSettings } from './game-settings.ts'
+import { CharacterSprite, loadSpriteSets, type LoadedSpriteSet } from './character-sprite.ts'
+import { championSprites } from './champion-sprites.ts'
 import { layoutHealthBar } from './health-bar.ts'
+import { hitboxShapes } from './hitboxes.ts'
+import { decodeSnapshot } from './snapshot-codec.ts'
 import { abilitySlotViews, healthReadout } from './hud.ts'
 import { layoutStackPips } from './stack-pips.ts'
 import { statusLabels } from './status-labels.ts'
@@ -47,13 +53,18 @@ type GameOptions = {
   onStarted: (snapshot: GameSnapshot) => void
   onCancelled: (message: string) => void
   onDisconnected: () => void
+  // The player chose to leave the lobby from the escape menu.
+  onLeave: () => void
   orderTimeoutMs?: number
-  // Quick cast, or quick cast with an indicator while the key is held (the default).
+  // Quick cast, or quick cast with an indicator while the key is held. By default, what the player
+  // last chose in the escape menu, which is kept in the browser.
   castMode?: CastMode
 }
 
 type Actor = {
   node: Container
+  // Drawn from sprite sheets, for a champion that has a sprite set; otherwise its body is a circle.
+  sprite?: CharacterSprite
   statusText: Text
   stackPips: Graphics
   label: Text
@@ -91,8 +102,9 @@ export async function startGame({
   onStarted,
   onCancelled,
   onDisconnected,
+  onLeave,
   orderTimeoutMs = GAME_ORDER_TIMEOUT_MS,
-  castMode = DEFAULT_CAST_MODE,
+  castMode,
 }: GameOptions): Promise<() => void> {
   if (!Number.isFinite(orderTimeoutMs) || orderTimeoutMs <= 0) {
     throw new RangeError('Order timeout must be a finite, positive number.')
@@ -107,6 +119,11 @@ export async function startGame({
   })
   app.ticker.maxFPS = GAME_FPS
   container.replaceChildren(app.canvas)
+  // The sprite sheets, before anything is drawn. If they cannot be loaded, champions are circles.
+  const spriteSets: Map<string, LoadedSpriteSet> = await loadSpriteSets(championSprites).catch((error: unknown) => {
+    console.warn('Could not load the champion sprites, so champions are drawn as circles.', error)
+    return new Map<string, LoadedSpriteSet>()
+  })
 
   const debugOverlay = document.createElement('pre')
   debugOverlay.className = 'game-debug-overlay'
@@ -173,9 +190,43 @@ export async function startGame({
   attackRangeRing.visible = false
   scene.addChild(attackRangeRing)
   // The aimed ability's indicator, on the ground under the champions.
-  const castControl = new CastControl(castMode)
+  const settings = loadSettings()
+  const castControl = new CastControl(castMode ?? settings.castMode)
+  // The escape menu. Its items are data (`menuItems`), so what it offers grows by adding to that list.
+  const menu = createGameMenu({
+    container,
+    items: () => menuItems({
+      getCastMode: () => castControl.mode,
+      setCastMode: (mode) => {
+        castControl.setMode(mode)
+        settings.castMode = mode
+        saveSettings(settings)
+      },
+      leaveLobby: () => {
+        menu.close()
+        onLeave()
+      },
+    }),
+  })
   const castIndicator = new Graphics()
   scene.addChild(castIndicator)
+  // The hitbox debug view, toggled with P: the outline of every body that can touch something.
+  const hitboxLayer = new Graphics()
+  hitboxLayer.visible = false
+  scene.addChild(hitboxLayer)
+  let showHitboxes = false
+  const drawHitboxes = (characters: RenderedCharacter[], entities: RenderedEntity[]): void => {
+    hitboxLayer.visible = showHitboxes
+    if (!showHitboxes) return
+    // Actors and entities are added to the scene as they appear, so keep this on top of them.
+    scene.setChildIndex(hitboxLayer, scene.children.length - 1)
+    hitboxLayer.clear()
+    for (const shape of hitboxShapes(characters, entities, gameState.getLocalCharacterId())) {
+      if (shape.kind === 'circle') hitboxLayer.circle(shape.x, shape.y, shape.radius)
+      else hitboxLayer.poly(shape.points)
+      hitboxLayer.fill({ color: shape.color, alpha: 0.12 }).stroke({ color: shape.color, width: 1.5, alpha: 0.9 })
+    }
+  }
   // A reticle around the enemy a click would attack, and around the one the attack is locked on.
   const attackMarkers = new Graphics()
   scene.addChild(attackMarkers)
@@ -183,14 +234,26 @@ export async function startGame({
     const isLocal = character.player?.playerId === sessionId
     const node = new Container()
     // Filled with the colour of its team. The champion you control has a thick white outline,
-    // since its colour is no longer different from every other player's.
+    // since its colour is no longer different from every other player's. A champion drawn from
+    // sprites has no circle: it is the figure alone, and its team shows in the colour of its name.
+    const loaded = spriteSets.get(character.champion.id)
     const shape = new Graphics()
-      .circle(0, 0, character.champion.radius)
-      .fill({ color: getTeam(character.team).color })
-      .stroke(isLocal ? { color: '#ffffff', width: 4 } : { color: '#0b1220', width: 2, alpha: 0.7 })
+    if (!loaded) {
+      shape
+        .circle(0, 0, character.champion.radius)
+        .fill({ color: getTeam(character.team).color })
+        .stroke(isLocal ? { color: '#ffffff', width: 4 } : { color: '#0b1220', width: 2, alpha: 0.7 })
+    }
+    const sprite = loaded ? new CharacterSprite(loaded) : undefined
     const label = new Text({
       text: character.player?.name ?? '',
-      style: { fill: '#e8f4ff', fontSize: 16, fontFamily: 'Arial' },
+      // In the colour of its team, with a dark edge so any colour reads against the map.
+      style: {
+        fill: getTeam(character.team).color,
+        fontSize: 16,
+        fontFamily: 'Arial',
+        stroke: { color: '#0b1220', width: 3 },
+      },
     })
     label.anchor.set(0.5, 1)
     const healthBar = new Graphics()
@@ -207,9 +270,9 @@ export async function startGame({
     })
     statusText.anchor.set(0.5, 1)
     const stackPips = new Graphics()
-    node.addChild(shape, stackPips, label, statusText, healthBar, cooldownBar)
+    node.addChild(shape, ...(sprite ? [sprite.view] : []), stackPips, label, statusText, healthBar, cooldownBar)
     scene.addChild(node)
-    const actor = { node, statusText, stackPips, label, healthBar, cooldownBar }
+    const actor = { node, ...(sprite ? { sprite } : {}), statusText, stackPips, label, healthBar, cooldownBar }
     actors.set(character.id, actor)
     return actor
   }
@@ -286,6 +349,10 @@ export async function startGame({
     if (preview.range > 0 && preview.targeting !== 'direction') {
       castIndicator.circle(from.x, from.y, preview.range).stroke({ color, width: 2, alpha: 0.45 })
     }
+    // And the nearest it can be aimed, fainter inside it, for one that cannot be aimed closer.
+    if (preview.minRange) {
+      castIndicator.circle(from.x, from.y, preview.minRange).stroke({ color, width: 1, alpha: 0.25 })
+    }
     const target = preview.target
     if (target?.mode === 'direction') {
       const end = { x: from.x + target.dir.x * preview.range, y: from.y + target.dir.y * preview.range }
@@ -296,6 +363,9 @@ export async function startGame({
     } else if (target?.mode === 'point') {
       // A dash is drawn as the way it will go, a line from the caster to the point, as well as the point.
       if (preview.indicator?.line) {
+        // As wide as what it throws, when it says, like a skillshot's band.
+        const band = preview.indicator.width
+        if (band) castIndicator.moveTo(from.x, from.y).lineTo(target.point.x, target.point.y).stroke({ color, width: band, alpha: 0.18 })
         castIndicator.moveTo(from.x, from.y).lineTo(target.point.x, target.point.y).stroke({ color, width: 2, alpha: 0.7 })
       }
       const radius = preview.indicator?.radius
@@ -375,8 +445,9 @@ export async function startGame({
       actor.label.text = character.player?.name ?? ''
       const radius = character.champion.radius
       actor.node.position.set(character.position.x, character.position.y)
-      // A confirmed death leaves a faint ghost with no bars until the respawn.
-      actor.node.alpha = character.dead ? 0.25 : 1
+      // A confirmed death leaves no bars until the respawn: a faint ghost for a circle, and for a sprite its
+      // death animation at full strength, ending lying down.
+      actor.node.alpha = character.dead && !actor.sprite ? 0.25 : 1
       actor.healthBar.visible = !character.dead
       actor.label.position.set(0, -radius - 25)
       drawHealthBar(actor.healthBar, -radius - 20, {
@@ -387,6 +458,12 @@ export async function startGame({
       actor.statusText.text = statusLabels(character).join(' · ')
       actor.statusText.position.set(0, -radius - 43)
       drawStackPips(actor.stackPips, radius, character.dead ? {} : character.stacks)
+      actor.sprite?.update({
+        position: character.position,
+        dead: character.dead,
+        ...(character.action ? { action: character.action } : {}),
+        now,
+      })
       const isLocal = character.id === gameState.getLocalCharacterId()
       if (isLocal) {
         localHealth = {
@@ -412,6 +489,7 @@ export async function startGame({
     }
 
     const entities = gameState.getEntities(now)
+    drawHitboxes(characters, entities)
     const activeEntityIds = new Set(entities.map((entity) => entity.id))
     for (const [id, actor] of entityActors) {
       if (!activeEntityIds.has(id)) {
@@ -565,6 +643,7 @@ export async function startGame({
     pointerOnScreen = { x: event.global.x, y: event.global.y }
   })
   app.stage.on('pointerdown', (event) => {
+    if (menu.isOpen) return
     const target = screenToWorld(camera, event.global)
     if (gameState.isLocalDead()) return
     if (event.button === 0 && started && !disconnected) {
@@ -572,7 +651,7 @@ export async function startGame({
       if (clickedEnemy) {
         // Giving an attack or move command drops any ability being aimed.
         castControl.cancel()
-        const order = gameState.createAttackOrder(clickedEnemy.id, sessionId)
+        const order = gameState.createAttackOrder(clickedEnemy.id)
         if (order) reliableMessenger.send(order)
         return
       }
@@ -585,13 +664,29 @@ export async function startGame({
   const onContextMenu = (event: MouseEvent): void => event.preventDefault()
   app.canvas.addEventListener('contextmenu', onContextMenu)
   const castAtCursor = (slot: number): void => {
-    const attempt = gameState.createCastOrder(slot, pointerInWorld(), sessionId)
+    const attempt = gameState.createCastOrder(slot, pointerInWorld())
     if (attempt.ok) reliableMessenger.send(attempt.order)
     else onStatus(attempt.reason, true)
   }
   const onKeyDown = (event: KeyboardEvent): void => {
     if (event.code === 'Escape') {
-      castControl.cancel()
+      // Escape drops an aim first, as it always has, and opens the menu when there is none (and
+      // closes it when it is open).
+      if (castControl.aiming !== undefined) {
+        castControl.cancel()
+        return
+      }
+      if (started && !disconnected) menu.toggle()
+      return
+    }
+    // The menu has the keyboard while it is open: nothing reaches the game.
+    if (menu.isOpen) return
+    if (
+      event.code === 'KeyP'
+      && !event.repeat
+      && !(event.target instanceof HTMLElement && (event.target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)))
+    ) {
+      showHitboxes = !showHitboxes
       return
     }
     const abilitySlot = abilityKeys.indexOf(event.code)
@@ -619,7 +714,7 @@ export async function startGame({
     const target = gameState.getClosestEnemyInRange()
     if (!target) return
     castControl.cancel()
-    const order = gameState.createAttackOrder(target.id, sessionId)
+    const order = gameState.createAttackOrder(target.id)
     if (order) reliableMessenger.send(order)
   }
   const onKeyUp = (event: KeyboardEvent): void => {
@@ -697,18 +792,31 @@ export async function startGame({
     startPingTimer = window.setInterval(sendStartPing, START_PING_RETRY_MS)
   })
 
-  channel.on('game:snapshot', (data) => {
-    const parsed = GameSnapshotSchema.safeParse(data)
-    if (!parsed.success) {
-      onStatus('The server sent invalid recovery state.', true)
-      return
-    }
-    const snapshotResult = gameState.applySnapshot(parsed.data)
-    for (const order of snapshotResult.confirmedOrders) {
-      reliableMessenger.acknowledge(order.id, order.seq)
-    }
-    if (!snapshotResult.applied) return
-    onStatus('Game state synchronized.')
+  // The only raw messages the server sends are gzipped snapshots. They are unzipped one at a time, so
+  // two that arrive together are still applied in the order they came.
+  let snapshotQueue: Promise<void> = Promise.resolve()
+  channel.onRaw((data) => {
+    snapshotQueue = snapshotQueue.then(async () => {
+      let decoded: unknown
+      try {
+        decoded = await decodeSnapshot(data as ArrayBuffer)
+      } catch {
+        if (!disconnected) onStatus('The server sent invalid recovery state.', true)
+        return
+      }
+      if (disconnected) return
+      const parsed = GameSnapshotSchema.safeParse(decoded)
+      if (!parsed.success) {
+        onStatus('The server sent invalid recovery state.', true)
+        return
+      }
+      const snapshotResult = gameState.applySnapshot(parsed.data)
+      for (const order of snapshotResult.confirmedOrders) {
+        reliableMessenger.acknowledge(order.id, order.seq)
+      }
+      if (!snapshotResult.applied) return
+      onStatus('Game state synchronized.')
+    })
   })
 
   reliableMessenger.listenFor('game:order', 'game:order-delivery-ack', (data) => {
@@ -874,6 +982,7 @@ export async function startGame({
     window.removeEventListener('blur', onBlur)
     debugOverlay.remove()
     hud.remove()
+    menu.destroy()
     reliableMessenger.close()
     channel.close()
     app.destroy(true, { children: true })

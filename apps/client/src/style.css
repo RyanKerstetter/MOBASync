@@ -522,3 +522,77 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
     grid-template-columns: 1fr;
   }
 }
+
+/* The escape menu, over the game and its HUD. */
+.game-menu {
+  position: absolute;
+  z-index: 4;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(8 14 24 / 62%);
+}
+
+.game-menu[hidden] {
+  display: none;
+}
+
+.game-menu-panel {
+  box-sizing: border-box;
+  display: grid;
+  gap: 0.9rem;
+  width: min(24rem, calc(100% - 2rem));
+  padding: 1.1rem 1.2rem 1rem;
+  color: #e8f4ff;
+  background: #121c2c;
+  border: 1px solid rgb(190 215 240 / 28%);
+  border-radius: 0.6rem;
+}
+
+.game-menu-panel h3 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.game-menu-row {
+  display: grid;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.game-menu-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.game-menu-panel button {
+  padding: 0.45rem 0.8rem;
+  color: #e8f4ff;
+  background: #1c2a40;
+  border: 1px solid rgb(190 215 240 / 28%);
+  border-radius: 0.35rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.game-menu-panel button:hover {
+  background: #26395a;
+}
+
+.game-menu-panel button.is-selected {
+  color: #0b1220;
+  background: #79dfb1;
+  border-color: #79dfb1;
+}
+
+.game-menu-panel button.is-danger {
+  border-color: #e5535b;
+  color: #ffb3b7;
+}
+
+.game-menu-hint {
+  margin: 0;
+  color: #8ea4bd;
+  font-size: 0.75rem;
+}

@@ -15,7 +15,9 @@ import {
   type GameBroadcastOrder,
   type GameSnapshot,
 } from '../../../packages/shared/src/index.js'
+import { BandwidthMeter, formatBandwidthReport, type SendOptions } from './bandwidth.js'
 import { ServerGameState } from './game-state.js'
+import { encodeSnapshot } from './snapshot-codec.js'
 
 const port = readPort('LOBBY_API_PORT', 9208)
 const gamePort = readPort('GECKOS_PORT', 9209)
@@ -32,7 +34,9 @@ const iceServers = (process.env.WEBRTC_ICE_SERVERS ?? 'stun:stun.l.google.com:19
   .map((urls) => ({ urls }))
 const codeCharacters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const lobbyCodeLength = 6
-const playerTimeoutMs = 45_000
+// A player who has not been heard from for this long is dropped from the lobby. Long, because a
+// browser throttles a tab that is not showing, so an alt-tab can leave a player quiet for a while.
+const playerTimeoutMs = 15 * 60_000
 const maxPlayers = Number(process.env.LOBBY_MAX_PLAYERS ?? GAME_MAX_PLAYERS)
 const checkpointIntervalMs = Number(process.env.GAME_CHECKPOINT_INTERVAL_MS ?? 1_000)
 
@@ -101,6 +105,44 @@ const lobbies = new Map<string, Lobby>()
 const gameServer = geckos({ portRange: { min: webrtcPortMin, max: webrtcPortMax }, iceServers })
 const gameDeliveryClients = new Map<string, GameDeliveryClient>()
 
+// What the server sends, counted by kind of message and logged every GAME_BANDWIDTH_LOG_MS (5 s by
+// default, 0 to turn it off), so it can be seen where the bandwidth goes. Only while something is sent.
+const bandwidthLogMs = Number(process.env.GAME_BANDWIDTH_LOG_MS ?? 5_000)
+if (!Number.isInteger(bandwidthLogMs) || bandwidthLogMs < 0) {
+  throw new Error('GAME_BANDWIDTH_LOG_MS must be zero or a positive whole number of milliseconds.')
+}
+const bandwidth = bandwidthLogMs > 0 ? new BandwidthMeter() : undefined
+// What Geckos calls a raw (binary) message. The only ones sent are gzipped snapshots, so they are counted
+// as that.
+const RAW_MESSAGE_EVENT = 'rawMessage'
+function countSent(event: string, data: unknown, options?: SendOptions, recipients = 1): void {
+  if (!bandwidth) return
+  if (event === RAW_MESSAGE_EVENT) {
+    bandwidth.record('game:snapshot', (data as Buffer).byteLength, options, recipients)
+  } else {
+    bandwidth.record(event, Buffer.byteLength(JSON.stringify(data ?? null)), options, recipients)
+  }
+}
+// A message to everyone in a lobby's game. Geckos sends it by calling emit on each player's channel, which
+// is where it is counted (see onConnection), so it is counted once for each of them.
+function emitToRoom(lobbyCode: string, event: string, data: unknown, options?: SendOptions): void {
+  gameServer.room(lobbyCode).emit(event, data as never, options)
+}
+// The game state to everyone in a lobby's game: gzipped once, however many players there are.
+function emitSnapshotToRoom(lobby: Lobby): void {
+  gameServer.raw.room(lobby.code).emit(encodeSnapshot(getGameSnapshot(lobby)))
+}
+if (bandwidth) {
+  let lastFlushAt = performance.now()
+  const bandwidthTimer = setInterval(() => {
+    const now = performance.now()
+    const report = bandwidth.flush(now - lastFlushAt)
+    lastFlushAt = now
+    if (report) console.log(formatBandwidthReport(report))
+  }, bandwidthLogMs)
+  bandwidthTimer.unref()
+}
+
 class HttpError extends Error {
   constructor(readonly status: number, message: string) {
     super(message)
@@ -114,7 +156,9 @@ function sendJson(response: ServerResponse, status: number, data: unknown): void
     'Access-Control-Allow-Headers': 'Content-Type',
     'Content-Type': 'application/json; charset=utf-8',
   })
-  response.end(JSON.stringify(data))
+  const body = JSON.stringify(data)
+  bandwidth?.record('http', Buffer.byteLength(body))
+  response.end(body)
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -210,7 +254,7 @@ function getGameSnapshot(lobby: Lobby): GameSnapshot {
 
 function sendReadyProgress(lobby: Lobby): void {
   if (lobby.game.status !== 'starting') return
-  gameServer.room(lobby.code).emit('game:ready-progress', {
+  emitToRoom(lobby.code, 'game:ready-progress', {
     readyCount: lobby.game.readyPlayerIds.length,
     totalPlayers: lobby.players.size,
   }, { reliable: true })
@@ -223,7 +267,7 @@ function beginGameWhenAllLocked(lobby: Lobby): void {
 
 function startGameWhenReady(lobby: Lobby): void {
   const snapshot = lobby.game.startIfReady()
-  if (snapshot) gameServer.room(lobby.code).emit('game:started', snapshot, { reliable: true })
+  if (snapshot) emitToRoom(lobby.code, 'game:started', snapshot, { reliable: true })
 }
 
 function sendReliableOrder(lobbyCode: string, order: GameBroadcastOrder): void {
@@ -376,7 +420,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       lobby.game.cancelStart()
     } else if (lobby.game.status === 'starting') {
       lobby.game.cancelStart()
-      gameServer.room(lobby.code).emit('game:cancelled', { message: 'A player cancelled game start.' }, { reliable: true })
+      emitToRoom(lobby.code, 'game:cancelled', { message: 'A player cancelled game start.' }, { reliable: true })
     }
     sendJson(response, 200, { lobby: toPublicLobby(lobby) })
     return
@@ -531,15 +575,17 @@ function runGameTick(): void {
   for (const lobby of lobbies.values()) {
     if (lobby.game.status === 'running') {
       for (const death of lobby.game.advanceTick()) {
-        gameServer.room(lobby.code).emit('game:death', death, { reliable: true })
+        emitToRoom(lobby.code, 'game:death', death, { reliable: true })
       }
     }
   }
 
+  // Sent once, not with Geckos' reliable option (which repeats a message ten times): the next one is
+  // a second away, so a lost one costs nothing. A client that falls behind asks for one (game:resync).
   if (now >= nextCheckpointAt) {
     for (const lobby of lobbies.values()) {
       if (lobby.game.status === 'running') {
-        gameServer.room(lobby.code).emit('game:snapshot', getGameSnapshot(lobby), { reliable: true })
+        emitSnapshotToRoom(lobby)
       }
     }
     nextCheckpointAt = now + checkpointIntervalMs
@@ -557,6 +603,12 @@ server.listen(port, () => {
 })
 
 gameServer.onConnection((channel) => {
+  // Everything sent to this player directly is counted too, including what the reliable messenger sends.
+  const emitUncounted = channel.emit.bind(channel)
+  channel.emit = ((event: string, data?: unknown, options?: SendOptions) => {
+    countSent(event, data, options)
+    emitUncounted(event, data as never, options)
+  }) as typeof channel.emit
   let lobby: Lobby | undefined
   let playerId: string | undefined
   let deliveryClient: GameDeliveryClient | undefined
@@ -598,7 +650,7 @@ gameServer.onConnection((channel) => {
         timeoutMs: GAME_ORDER_TIMEOUT_MS,
         parseAcknowledgement: parseIdentifiedMessage,
         onTimeout: () => {
-          channel.emit('game:snapshot', getGameSnapshot(joinedLobby), { reliable: true })
+          channel.raw.emit(encodeSnapshot(getGameSnapshot(joinedLobby)))
         },
         onAcknowledged: () => {
           const activePlayer = lobby?.players.get(player.id)
@@ -668,7 +720,7 @@ gameServer.onConnection((channel) => {
     const player = activeLobby.players.get(activePlayerId)
     if (player) player.lastSeen = Date.now()
     const verdict = activeLobby.game.acceptOrder(activePlayerId, parsed.data)
-    channel.emit('game:order-ack', verdict.ack, { reliable: true })
+    channel.emit('game:order-ack', verdict.ack)
     if (verdict.broadcast) {
       sendReliableOrder(activeLobby.code, verdict.broadcast)
     }
@@ -677,7 +729,7 @@ gameServer.onConnection((channel) => {
   channel.on('game:resync', () => {
     if (!lobby || !playerId || lobby.game.status !== 'running') return
     if (!lobby.players.has(playerId)) return
-    channel.emit('game:snapshot', getGameSnapshot(lobby), { reliable: true })
+    channel.raw.emit(encodeSnapshot(getGameSnapshot(lobby)))
   })
 
   channel.onDisconnect(() => {

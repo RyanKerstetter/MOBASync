@@ -70,6 +70,9 @@ export interface AbilityDef {
   description?: string
   targeting: CastTarget['mode']
   range: number
+  // A point-targeted ability cannot be aimed nearer the caster than this. The client pushes the aim out
+  // to it, and a cast aimed nearer is dropped like one aimed out of range.
+  minRange?: number
   windUpTicks: number
   backswingTicks: number
   cooldownTicks: number
@@ -81,6 +84,10 @@ export interface AbilityDef {
   // entity of this definition out in the world, such as a stick on the ground. Cast at any other
   // time it is dropped like an invalid order: nothing happens and no cooldown starts.
   requires?: { entity: string; out: boolean }
+  // Another way to be castable when `requires` is not met: when none of these entities are out (an
+  // entity of each definition, such as a stick on the ground and in the air) and the ability of this
+  // id is on cooldown. For an ability that does something else when there is nothing for it to act on.
+  orWhen?: { none: readonly string[]; onCooldown: string }
   // The ability that takes this one's place on its key while that one can be cast, so one key does
   // two things: throw a stick, then call it back. It is an ability in full, with its own cooldown,
   // and it belongs to any champion that has this one.
@@ -108,11 +115,25 @@ export const withinCastRange = (from: Vector2, to: Vector2, range: number): bool
   const dy = to.y - from.y
   return Math.sqrt(dx * dx + dy * dy) <= range + RANGE_EPSILON
 }
+// Whether `to` is at least `minRange` from `from`, with the same slack.
+export const beyondMinCastRange = (from: Vector2, to: Vector2, minRange = 0): boolean => {
+  const dx = to.x - from.x
+  const dy = to.y - from.y
+  return Math.sqrt(dx * dx + dy * dy) >= minRange - RANGE_EPSILON
+}
 
 // Whether an ability's `requires` holds, given a way to ask whether the caster has an entity of a
 // definition out. The simulator asks its frame and the client its own, so both judge alike.
-export const meetsRequirement = (def: AbilityDef, entityOut: (defId: string) => boolean): boolean =>
-  def.requires === undefined || entityOut(def.requires.entity) === def.requires.out
+export const meetsRequirement = (
+  def: AbilityDef,
+  entityOut: (defId: string) => boolean,
+  onCooldown: (abilityId: string) => boolean = () => false,
+): boolean =>
+  def.requires === undefined
+  || entityOut(def.requires.entity) === def.requires.out
+  || (def.orWhen !== undefined
+    && def.orWhen.none.every((defId) => !entityOut(defId))
+    && onCooldown(def.orWhen.onCooldown))
 
 // The ability on a key right now: the one's `recast` while that can be cast, otherwise the one itself.
 export const abilityOnKey = (def: AbilityDef, entityOut: (defId: string) => boolean): AbilityDef => {
@@ -132,21 +153,25 @@ export const CURSE_DURATION_TICKS = seconds(10)
 export const SWORD_KEY = 'sword'
 export const SWORD_MAX_STACKS = 3
 export const SWORD_DURATION_TICKS = seconds(8)
-export const SWORD_DAMAGE_PER_STACK = 20
+export const SWORD_DAMAGE_PER_STACK = 15
 const swordStacks = stacks(SWORD_KEY, self())
 
-// Slash leaves a fiery trail: a rectangle exactly where the cut landed, 300 long and 60 wide.
+// Slash's length, in one place: how far it aims, how long the cut is, and how long the trail it
+// leaves is, which is the same rectangle the cut landed in.
+const SLASH_LENGTH = 350
+const SLASH_HALF_WIDTH = 30
+// Slash leaves a fiery trail: a rectangle exactly where the cut landed, SLASH_LENGTH long and 60 wide.
 // Its effects find who is inside it with the same half-extents as its box.
 const slashTrail = {
   id: 'slash-trail',
   speed: 0,
-  box: { halfLength: 175, halfWidth: 30 },
+  box: { halfLength: SLASH_LENGTH / 2, halfWidth: SLASH_HALF_WIDTH },
   lifetimeTicks: seconds(3),
   visual: 'field',
   color: '#ff8a3d',
   onTick: [
-    slow(linear(0.4, 2,swordStacks), 2, enemiesInBox(150, 30)),
-    haste(linear(0.4,.15,swordStacks), 2, alliesInBox(150, 30)),
+    slow(linear(0.4, .15 ,swordStacks), 2, enemiesInBox(SLASH_LENGTH / 2, SLASH_HALF_WIDTH)),
+    haste(linear(0.6,.1,swordStacks), 2, alliesInBox(SLASH_LENGTH / 2, SLASH_HALF_WIDTH)),
   ],
 } satisfies EntityDef
 
@@ -202,7 +227,7 @@ const spoutWarning: EntityDef = {
 
 const bubble = {
   id: 'bubble',
-  speed: 550,
+  speed: 600,
   radius: 14,
   lifetimeTicks: seconds(0.7),
   color: '#a8e0ff',
@@ -266,8 +291,8 @@ export const TRICK_KEY = 'trick'
 export const TRICK_HITS = 3
 export const TRICK_WINDOW_TICKS = seconds(5)
 export const TRICK_BONUS_DAMAGE = 50
-export const TRICK_HASTE = 0.3
-export const TRICK_HASTE_TICKS = seconds(2)
+export const TRICK_HASTE = 0.6
+export const TRICK_HASTE_TICKS = seconds(1.5)
 const tricksOnTarget = stacks(TRICK_KEY, subject())
 // Run for each enemy one of his ability hits lands on, after the hit's own damage.
 export const trickEffects: readonly Effect[] = [
@@ -368,26 +393,28 @@ const flashbang = {
 // was. Warp blinks onto the stick, which is walking over it as far as the stick can tell, so the
 // pickup that follows does refund Q.
 const STICK_DAMAGE = 80
-const STICK_RESET_TICKS = seconds(1)
+const STICK_RESET_TICKS = seconds(.5)
 const stick = {
   id: 'stick',
   speed: 0,
-  radius: 16,
+  radius: 12,
   color: '#a9794a',
   // It has no timer, but it does not outlive its owner.
   stayWhile: (sim, src) => sim.isAlive(src.ownerId),
   pickup: [capCooldown('stick', STICK_RESET_TICKS)],
 } satisfies EntityDef
 
-// The stick on its way out: a straight shot, 420 px at 630 px a second, that hurts every enemy it
-// passes through once and comes down where it ends. It stops at the arena's wall so that it never
-// lands where its owner could not walk to it.
+// The stick on its way out: a shot that flies to the point it was thrown at, at 540 px a second, hurts
+// every enemy it passes through once and comes down there. The player chooses how far, from the
+// least to the most. The point is held inside the arena's wall, so it never lands where its owner
+// could not walk to it.
+const STICK_MIN_RANGE = 150
 const STICK_RANGE = 360
 const stickShot = {
   id: 'stick-shot',
-  speed: 540,
-  radius: 12,
-  lifetimeTicks: 40,
+  speed: 700,
+  radius: 14,
+  landAtAim: true,
   pierce: true,
   stopsAtWalls: true,
   color: '#a9794a',
@@ -401,7 +428,7 @@ const stickShot = {
 const stickRecall = {
   id: 'stick-recall',
   speed: 800,
-  radius: 14,
+  radius: 15,
   homing: 'owner',
   pierce: true,
   color: '#a9794a',
@@ -520,7 +547,7 @@ const hexShot = {
 // Capricorn's Tsunami: the wave is a rectangle, 70 wide across its path and 20 deep along it.
 const tsunamiWave = {
   id: 'tsunami-wave',
-  speed: 320,
+  speed: 400,
   box: { halfLength: 10, halfWidth: 45 },
   lifetimeTicks: seconds(0.8),
   pierce: true,
@@ -645,7 +672,7 @@ const abilityList: AbilityDef[] = [
     id: 'tsunami',
     description: 'Sends a wave of water forward. It damages enemies, knocks them back and interrupts what they were casting.',
     targeting: 'direction',
-    range: 300,
+    range: 320,
     windUpTicks: 5,
     backswingTicks: 4,
     cooldownTicks: seconds(9),
@@ -656,7 +683,7 @@ const abilityList: AbilityDef[] = [
     id: 'bubbles',
     description: 'Fires a stream of three bubbles. On each target the first bubble to hit does full damage and the rest do half.',
     targeting: 'direction',
-    range: 350,
+    range: 420,
     windUpTicks: 4,
     backswingTicks: 3,
     cooldownTicks: seconds(8),
@@ -669,7 +696,7 @@ const abilityList: AbilityDef[] = [
     id: 'spout',
     description: 'Marks a small circle at the target point. After a brief warning it erupts, damaging and slowing enemies still standing in it.',
     targeting: 'point',
-    range: 270,
+    range: 290,
     windUpTicks: 4,
     backswingTicks: 4,
     cooldownTicks: seconds(9),
@@ -719,15 +746,16 @@ const abilityList: AbilityDef[] = [
     id: 'slash',
     description: 'Cuts a line in front of you, then leaves a fiery trail that slows enemies and speeds up you and your teammates. Each sword stack adds damage.',
     targeting: 'direction',
-    range: 300,
-    windUpTicks: 4,
+    range: SLASH_LENGTH,
+    windUpTicks: 10,
     backswingTicks: 4,
     cooldownTicks: seconds(7),
     indicator: { width: slashTrail.box.halfWidth * 2 },
     apply: [
-      damage(linear(60, 20, swordStacks), enemiesInLine(300, 30)),
+      damage(linear(60, 50, swordStacks), enemiesInLine(SLASH_LENGTH, SLASH_HALF_WIDTH)),
       // The trail's middle is half the cut's length ahead of the caster, pointing the same way.
-      spawnEntity(slashTrail, { at: alongAim(150) }),
+      spawnEntity(slashTrail, { at: alongAim(SLASH_LENGTH / 2) }),
+      popMarkers(SWORD_KEY, self()),
     ],
   },
   {
@@ -735,8 +763,8 @@ const abilityList: AbilityDef[] = [
     description: 'Spends your sword stacks in an explosion of light around you. Each stack adds damage and move speed.',
     targeting: 'none',
     range: 0,
-    windUpTicks: 3,
-    backswingTicks: 4,
+    windUpTicks: 8,
+    backswingTicks: 2,
     cooldownTicks: seconds(12),
     apply: [
       damage(linear(75, 50, swordStacks), enemiesInRadius(170)),
@@ -760,10 +788,10 @@ const abilityList: AbilityDef[] = [
       effects: [
         when<SimContext>(
           (sim, src) => swordStacks(sim, src) >= SWORD_MAX_STACKS,
-          [stun(seconds(1))],
-          [root(seconds(1.5))],
+          [stun(seconds(1)),popMarkers(SWORD_KEY, self()),damage(linear(0, 50, swordStacks))],
+          [root(seconds(1)),],
         ),
-        popMarkers(SWORD_KEY, self()),
+        
       ],
     },
     apply: [resetAutoTimer()],
@@ -813,16 +841,18 @@ const abilityList: AbilityDef[] = [
   },
   {
     id: 'stick',
-    description: 'Throws a stick in a line. It hurts enemies it passes through, then lands in the ground at the end of its flight, or against a wall, and stays. Walk over it to pick it up, which leaves this no more than a second to wait, or press this again to call it back, which hurts and slows enemies it passes on the way.',
-    targeting: 'direction',
+    description: 'Throws a stick to the point you aim at, anywhere from 150 to 360 away. It hurts enemies it passes through, then lands in the ground there, or against a wall, and stays. Walk over it to pick it up, which leaves this no more than a second to wait, or press this again to call it back, which hurts and slows enemies it passes on the way.',
+    targeting: 'point',
     range: STICK_RANGE,
+    minRange: STICK_MIN_RANGE,
     windUpTicks: 4,
     backswingTicks: 4,
-    cooldownTicks: seconds(8),
+    cooldownTicks: seconds(10),
     // Only one stick at a time. While it is out, this key calls it back instead.
     requires: { entity: 'stick', out: false },
     recast: 'recall',
-    indicator: { width: stickShot.radius * 2 },
+    // A band as wide as the stick, from the thrower to where it will land.
+    indicator: { line: true, width: stickShot.radius * 2 },
     apply: [spawnEntity(stickShot)],
   },
   {
@@ -852,18 +882,27 @@ const abilityList: AbilityDef[] = [
   },
   {
     id: 'warp',
-    description: 'Blinks you to your stick, wherever it is, which picks it up and leaves your throw no more than a second to wait. Needs a stick on the ground.',
+    description: 'Blinks you to your stick, wherever it is, which picks it up and leaves your throw no more than a second to wait. With no stick on the ground, out or flying, but your throw on cooldown, it gives you the throw back instead.',
     targeting: 'none',
     range: 0,
     windUpTicks: 3,
     backswingTicks: 2,
     cooldownTicks: seconds(10),
+    // A stick on the ground to go to, or else no stick anywhere and a throw to give back.
     requires: { entity: 'stick', out: true },
-    // The stick is picked up on the next tick, because the Trinketmaster is standing on it.
+    orWhen: { none: ['stick', 'stick-shot', 'stick-recall'], onCooldown: 'stick' },
     apply: [
-      spawnEntity(warpFlashOut),
-      blink(ownEntity('stick')),
-      spawnEntity(warpFlashIn, { at: ownEntity('stick') }),
+      when<SimContext>(
+        (sim, src) => sim.entitiesOf(src.ownerId, 'stick').length > 0,
+        // The stick is picked up on the next tick, because the Trinketmaster is standing on it.
+        [
+          spawnEntity(warpFlashOut),
+          blink(ownEntity('stick')),
+          spawnEntity(warpFlashIn, { at: ownEntity('stick') }),
+        ],
+        // Nothing to go to: the throw is ready again, all of it.
+        [spawnEntity(warpFlashOut), refundCooldown('stick', 1)],
+      ),
     ],
   },
   {

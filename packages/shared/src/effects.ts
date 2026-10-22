@@ -7,7 +7,7 @@ import type {
   Vector2,
 } from './index.js'
 import { GAME_ARENA_HEIGHT, GAME_ARENA_WIDTH, GAME_BURN_PULSE_TICKS, GAME_TPS } from './constants.js'
-import { boxTouchesCircle, type BoxShape } from './geometry.js'
+import { boxTouchesCircle, clampPosition, type BoxShape } from './geometry.js'
 import type { SimCharacter } from './simulator.js'
 
 // 1. Capabilities: effects read through SimReader and write through SimWriter.
@@ -128,10 +128,12 @@ interface EntityDefBase {
   landAtAim?: boolean
   // Pierce hits every enemy once; otherwise the entity ends on its first hit.
   pierce?: boolean
-  // A straight shot that would leave the arena ends where its edge meets the wall instead, running
-  // its `onExpire` there, so what it leaves behind lands inside the map. Without it a shot flies on
-  // past the wall to the end of its lifetime. Needs a `lifetimeTicks` and a speed, a circular shape
-  // (the wall is met by its radius), and a straight path: it cannot also home, follow or land at an aim.
+  // A shot that would leave the arena ends where its edge meets the wall instead, running its
+  // `onExpire` there, so what it leaves behind lands inside the map. Without it a shot flies on past
+  // the wall to the end of its lifetime. A straight shot needs a `lifetimeTicks`. One that lands at its
+  // aim (`landAtAim`) flies to the aimed point held inside the arena instead, so it can be aimed
+  // past the wall. Either needs a speed, a circular shape (the wall is met by its radius), and a
+  // straight path: it cannot also home or follow.
   stopsAtWalls?: boolean
   // Runs once for each enemy the entity touches. Without it the entity never collides.
   onHit?: readonly Effect[]
@@ -916,10 +918,10 @@ export const spawnEntity = (
     throw new Error(`Entity definition "${def.id}" is picked up by its owner touching it, so it needs a radius.`)
   }
   if (def.stopsAtWalls && !(
-    def.lifetimeTicks !== undefined && def.speed > 0 && def.radius !== undefined
-    && !def.homing && !def.landAtAim && !def.follow
+    (def.lifetimeTicks !== undefined || def.landAtAim) && def.speed > 0 && def.radius !== undefined
+    && !def.homing && !def.follow
   )) {
-    throw new Error(`Entity definition "${def.id}" stops at walls, so it needs a lifetimeTicks, a speed above 0 and a radius, and a straight path.`)
+    throw new Error(`Entity definition "${def.id}" stops at walls, so it needs a lifetimeTicks or to land at its aim, a speed above 0 and a radius, and a straight path.`)
   }
   if ((def.radius === undefined) === (def.box === undefined)) {
     throw new Error(`Entity definition "${def.id}" needs either a radius or a box.`)
@@ -975,8 +977,10 @@ export const spawnEntity = (
       let lifetimeTicks: number | undefined
       if (def.landAtAim) {
         if (src.aim?.mode !== 'point') return
-        const dx = src.aim.point.x - place.at.x
-        const dy = src.aim.point.y - place.at.y
+        // One that stops at walls flies to the aimed point held inside the arena.
+        const aimed = def.stopsAtWalls ? clampPosition(src.aim.point, def.radius ?? 0) : src.aim.point
+        const dx = aimed.x - place.at.x
+        const dy = aimed.y - place.at.y
         const distance = Math.sqrt(dx * dx + dy * dy)
         // Travel time follows the distance. The velocity is fitted to the whole ticks so the
         // entity ends exactly on the aimed point instead of overshooting by part of a tick.

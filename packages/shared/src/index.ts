@@ -53,10 +53,11 @@ export const GameOrderSchema = z.discriminatedUnion('type', [
   CastOrderSchema,
 ])
 
+// An order is sent to every player with only who gave it. Their name and session are already known
+// from the lobby, and the order id (`characterId:seq`) is kept short because it is repeated through
+// the game state.
 const BroadcastFields = {
   characterId: z.number().int().positive(),
-  playerId: z.string(),
-  playerName: z.string(),
 }
 
 export const GameMoveSchema = MoveOrderSchema.extend(BroadcastFields)
@@ -378,6 +379,7 @@ export type {
 export {
   abilityDefs,
   abilityOnKey,
+  beyondMinCastRange,
   getAbilityDef,
   meetsRequirement,
   quantizeDirection,

@@ -528,6 +528,7 @@ async function enterGame(lobby: Lobby): Promise<void> {
         gameLoading.hidden = true
       },
       onDisconnected: () => showGameToast('Disconnected from the game server.', true),
+      onLeave: () => void leaveLobby(),
       onCancelled: (text) => {
         stopActiveGame()
         gamePanel.hidden = true

@@ -229,8 +229,6 @@ export class ServerGameState {
           broadcast: {
             ...order,
             characterId,
-            playerId,
-            playerName: attacker.player?.name ?? 'Player',
           },
         }),
     }

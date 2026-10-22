@@ -29,7 +29,11 @@ function targetFor(def: AbilityDef, enemyId: number): CastTarget {
   switch (def.targeting) {
     case 'none': return { mode: 'none' }
     case 'direction': return { mode: 'direction', dir: { x: 1, y: 0 } }
-    case 'point': return { mode: 'point', point: enemyWithin(def.range) }
+    case 'point': {
+      // Aimed at the enemy, or as near as the ability can be aimed if that is nearer than it allows.
+      const at = enemyWithin(def.range)
+      return { mode: 'point', point: { x: Math.max(at.x, CASTER_AT.x + (def.minRange ?? 0)), y: at.y } }
+    }
     case 'unit': return { mode: 'unit', unitId: enemyId }
   }
 }
@@ -177,6 +181,59 @@ test('every ability launches and plays out without errors', () => {
   }
 })
 
+// The throw goes as far as the player aims it, between the least and the most the ability allows:
+// the stick comes down on the point it was thrown at.
+test('the trinketmaster stick comes down on the point it was thrown at, from the nearest to the farthest', () => {
+  const trinket = champions.get('trinketmaster')
+  const def = abilityDefs.get('stick')
+  assert.ok(trinket && def && def.minRange !== undefined)
+  for (const distance of [def.minRange, (def.minRange + def.range) / 2, def.range]) {
+    const simulator = new Simulator()
+    simulator.addPlayer(1, 'player-1', 'Player 1', CASTER_AT, trinket)
+    const point = { x: CASTER_AT.x + distance, y: CASTER_AT.y }
+    simulator.addOrder(1, {
+      id: 'player-1:1', seq: 1, tick: 1, type: 'cast', abilityId: 'stick', target: { mode: 'point', point }, origin: CASTER_AT,
+    })
+    let stick: { x: number; y: number } | undefined
+    for (let tick = 1; tick <= 200 && !stick; tick += 1) {
+      const entity = simulator.at(tick).getEntities().find((candidate) => candidate.defId === 'stick')
+      if (entity) stick = entity.origin
+    }
+    assert.ok(stick, `a stick comes down when thrown ${distance} away`)
+    assert.ok(Math.abs(stick.x - point.x) < 1e-6 && Math.abs(stick.y - point.y) < 1e-6, `on the point, ${distance} away`)
+  }
+})
+
+// With no stick on the ground or in the air and the throw still on cooldown, warp gives the throw back
+// instead of blinking, so it can be thrown again.
+test('the trinketmaster warp gives the throw back when there is no stick anywhere', () => {
+  const trinket = champions.get('trinketmaster')
+  const warp = abilityDefs.get('warp')
+  assert.ok(trinket && warp)
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'player-1', 'Player 1', CASTER_AT, trinket)
+  // The stick is thrown, called back once it is down, and long home by the time warp is cast.
+  simulator.addOrder(1, {
+    id: 'player-1:1', seq: 1, tick: 1, type: 'cast', abilityId: 'stick',
+    target: { mode: 'point', point: { x: CASTER_AT.x + 200, y: CASTER_AT.y } }, origin: CASTER_AT,
+  })
+  simulator.addOrder(1, {
+    id: 'player-1:2', seq: 2, tick: 80, type: 'cast', abilityId: 'recall', target: { mode: 'none' }, origin: CASTER_AT,
+  })
+  const warpAt = 200
+  simulator.addOrder(1, {
+    id: 'player-1:3', seq: 3, tick: warpAt, type: 'cast', abilityId: 'warp', target: { mode: 'none' }, origin: CASTER_AT,
+  })
+
+  assert.equal(simulator.at(warpAt - 1).getEntities().length, 0, 'nothing is out')
+  assert.equal(simulator.at(warpAt - 1).get(1)?.getAbilityCooldown('stick').ready, false, 'and the throw is on cooldown')
+  const launched = warpAt + warp.windUpTicks
+  const frame = simulator.at(launched)
+  assert.equal(frame.get(1)?.getAbilityCooldown('stick').ready, true, 'warp gives it back')
+  assert.equal(frame.get(1)?.getAbilityCooldown('warp').ready, false, 'and is spent')
+  assert.deepEqual(frame.get(1)?.getPosition(), CASTER_AT, 'without going anywhere')
+})
+
 // Not tuned numbers, just what the passive is: it is for abilities, not plain autos.
 test('the trinketmaster plain autos never trigger its passive, however many land on the same enemy', () => {
   const trinket = champions.get('trinketmaster')
@@ -213,7 +270,7 @@ test('the trinketmaster stick, recall and hush count for the passive, and the th
   simulator.addPlayer(2, 'player-2', 'Player 2', enemyWithin(trinket.attackRange), opponent)
   simulator.addOrder(1, {
     id: 'player-1:1', seq: 1, tick: 10, type: 'cast', abilityId: 'stick',
-    target: { mode: 'direction', dir: { x: 1, y: 0 } }, origin: CASTER_AT,
+    target: { mode: 'point', point: { x: CASTER_AT.x + 200, y: CASTER_AT.y } }, origin: CASTER_AT,
   })
   // By tick 120 the stick has come down, and the recall brings it back through the enemy. Hush is
   // readied on tick 200, and the attack ordered on tick 201 is the auto it readied.

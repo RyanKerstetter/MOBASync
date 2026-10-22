@@ -279,17 +279,17 @@ test('the client resolves slots into clamped, quantized cast orders', () => {
   gameState.simulator.addPlayer(2, 'player-2', 'Player 2', { x: 400, y: 100 }, brawler)
   gameState.setLocalCharacterId(1)
 
-  const meteor = gameState.createCastOrder(3, { x: 700, y: 100 }, 'player-1', 0)
+  const meteor = gameState.createCastOrder(3, { x: 700, y: 100 }, 0)
   assert.ok(meteor.ok)
   assert.equal(meteor.order.abilityId, 't-meteor')
   assert.deepEqual(meteor.order.origin, ORIGIN)
   assert.deepEqual(meteor.order.target, { mode: 'point', point: { x: 400, y: 100 } })
 
-  const bolt = gameState.createCastOrder(2, { x: 100, y: 300 }, 'player-1', 0)
+  const bolt = gameState.createCastOrder(2, { x: 100, y: 300 }, 0)
   assert.ok(bolt.ok)
   assert.deepEqual(bolt.order.target, { mode: 'direction', dir: { x: 0, y: 1 } })
 
-  const lash = gameState.createCastOrder(1, { x: 600, y: 300 }, 'player-1', 0)
+  const lash = gameState.createCastOrder(1, { x: 600, y: 300 }, 0)
   assert.deepEqual(lash, { ok: false, reason: 'Aim t-lash at an enemy.' })
 })
 
@@ -1787,6 +1787,9 @@ test('the server accepts casts from the picked champion\'s kit and rejects other
   const accepted = send(1, 't-miasma', { mode: 'none' })
   assert.equal(accepted.ack.status, 'accepted')
   assert.equal(accepted.broadcast?.type, 'cast')
+  assert.equal(accepted.broadcast?.characterId, characterId)
+  assert.equal('playerId' in (accepted.broadcast ?? {}), false, 'the session id is not sent to everyone')
+  assert.equal('playerName' in (accepted.broadcast ?? {}), false, 'nor the name')
   assert.equal(send(2, 't-feast', { mode: 'unit', unitId: 2 }).ack.status, 'accepted')
   assert.equal(send(3, 't-leap', { mode: 'point', point: origin }).ack.reason, 'unknown_ability', 'another champion\'s ability')
   assert.equal(send(4, 'fireball', { mode: 'none' }).ack.reason, 'unknown_ability', 'an ability that does not exist')
@@ -2691,6 +2694,8 @@ test('burn, fading haste and blind survive a checkpoint restore', () => {
 const TRINKET_AT: Vector2 = { x: 300, y: 300 }
 const STICK_AT: Vector2 = { x: 600, y: 300 }
 const EAST: CastTarget = { mode: 'direction', dir: { x: 1, y: 0 } }
+// The stick thrown at the point 300 px east of the trinketmaster, the farthest it goes.
+const STICK_EAST: CastTarget = { mode: 'point', point: STICK_AT }
 // Thrown east on tick 1, the stick leaves on tick 5, flies its 300 px in 30 ticks and is down on tick 36.
 const STICK_DOWN = 36
 const STICK_PICKUP_REACH = 16 + trinketmaster.radius
@@ -2705,7 +2710,7 @@ function createStickDuel(enemies: Array<[number, number, Champion?]> = []): Simu
 }
 
 function throwStick(simulator: Simulator): void {
-  simulator.addOrder(1, cast(1, 1, 't-stick', EAST, TRINKET_AT))
+  simulator.addOrder(1, cast(1, 1, 't-stick', STICK_EAST, TRINKET_AT))
 }
 
 const sticksOut = (simulator: Simulator, tick: number) =>
@@ -2827,25 +2832,70 @@ test('the stick hurts every enemy in its line on the way out, once each, and non
   assert.equal(simulator.at(STICK_DOWN + 20).get(5)?.getHealth(), 1000, 'past where it lands is not hit')
 })
 
+test('the player chooses how far the stick goes: it comes down on the point it was thrown at, after as long as that is far', () => {
+  // The stick leaves on tick 5 and flies 10 px a tick, so it is down on tick 6 plus a tick for every
+  // 10 px: 21 for the nearest it can be thrown, 150, and 36 for the farthest, 300.
+  for (const [distance, down] of [[150, 21], [200, 26], [250, 31], [300, 36]] as const) {
+    const simulator = createStickDuel()
+    simulator.addOrder(1, cast(1, 1, 't-stick', { mode: 'point', point: { x: 300 + distance, y: 300 } }, TRINKET_AT))
+    assert.equal(sticksOut(simulator, down - 1).length, 0, `not down yet on tick ${down - 1} at ${distance}`)
+    assert.deepEqual(sticksOut(simulator, down)[0]?.origin, { x: 300 + distance, y: 300 }, `down on tick ${down}, ${distance} px on`)
+  }
+
+  // Any heading, not only along the row: a point 200 px away up and to the left.
+  const diagonal = createStickDuel()
+  const aimed = { x: 300 - 200 * Math.SQRT1_2, y: 300 - 200 * Math.SQRT1_2 }
+  diagonal.addOrder(1, cast(1, 1, 't-stick', { mode: 'point', point: aimed }, TRINKET_AT))
+  const down = sticksOut(diagonal, 26)[0]
+  assert.ok(down)
+  assert.ok(Math.abs(down.origin.x - aimed.x) < 1e-9 && Math.abs(down.origin.y - aimed.y) < 1e-9)
+})
+
+test('the stick hurts what it passes on the way to where it was thrown and nothing beyond it', () => {
+  // Thrown 200 px east, to x = 500: the enemy at 400 is in its way, and the one at 560 is past where it stops.
+  const simulator = createStickDuel([[400, 300], [560, 300]])
+  simulator.addOrder(1, cast(1, 1, 't-stick', { mode: 'point', point: { x: 500, y: 300 } }, TRINKET_AT))
+
+  assert.equal(simulator.at(60).get(2)?.getHealth(), brawler.maxHp - 60, 'the one on the way is hurt')
+  assert.equal(simulator.at(60).get(3)?.getHealth(), brawler.maxHp, 'and the one beyond is not')
+  assert.deepEqual(sticksOut(simulator, 60)[0]?.origin, { x: 500, y: 300 })
+})
+
+test('a throw aimed nearer than 150 or farther than 300 is dropped, one at exactly either is thrown', () => {
+  const throwAt = (distance: number): Simulator => {
+    const simulator = createStickDuel()
+    simulator.addOrder(1, cast(1, 1, 't-stick', { mode: 'point', point: { x: 300 + distance, y: 300 } }, TRINKET_AT))
+    return simulator
+  }
+  const thrown = (simulator: Simulator): boolean => throwCooldown(simulator, 40)?.ready === false
+
+  assert.equal(thrown(throwAt(150)), true, 'at the least')
+  assert.equal(thrown(throwAt(300)), true, 'and at the most')
+  const tooNear = throwAt(149)
+  assert.equal(thrown(tooNear), false, 'a throw a pixel too near is not made')
+  assert.equal(sticksOut(tooNear, 60).length, 0)
+  assert.equal(thrown(throwAt(10)), false, 'nor one nearly on top of the thrower')
+  assert.equal(thrown(throwAt(301)), false, 'nor one a pixel too far')
+})
+
 test('a stick thrown at a wall comes down against it, inside the map, instead of flying out of it', () => {
   const shotRadius = 8
-  // 92 px from the east wall: the stick's edge meets it after 9 whole steps of 10, so it comes down
-  // at x = 2390 on tick 5 + 9 + 1, not 300 px on at x = 2600 off the map.
+  // Thrown at the point 300 px east of 2300, which is off the map. The stick comes down where its
+  // edge meets the east wall, x = 2392, 92 px on, not at x = 2600.
   const east = new Simulator()
   east.addPlayer(1, 'player-1', 'Player 1', { x: 2300, y: 300 }, trinketmaster)
-  east.addOrder(1, cast(1, 1, 't-stick', EAST, { x: 2300, y: 300 }))
+  east.addOrder(1, cast(1, 1, 't-stick', { mode: 'point', point: { x: 2600, y: 300 } }, { x: 2300, y: 300 }))
   const eastStick = sticksOut(east, 15)[0]
-  assert.deepEqual(eastStick?.origin, { x: 2390, y: 300 })
-  assert.ok((eastStick?.origin.x ?? Infinity) <= GAME_ARENA_WIDTH - shotRadius)
+  assert.deepEqual(eastStick?.origin, { x: GAME_ARENA_WIDTH - shotRadius, y: 300 })
 
-  // And the same up the page against the top wall: 32 px from it, so 3 steps, at y = 10.
+  // And the same up the page against the top wall: it comes down at y = 8, 32 px on.
   const north = new Simulator()
   north.addPlayer(1, 'player-1', 'Player 1', { x: 300, y: 40 }, trinketmaster)
-  north.addOrder(1, cast(1, 1, 't-stick', { mode: 'direction', dir: { x: 0, y: -1 } }, { x: 300, y: 40 }))
+  north.addOrder(1, cast(1, 1, 't-stick', { mode: 'point', point: { x: 300, y: -260 } }, { x: 300, y: 40 }))
   const northStick = sticksOut(north, 9)[0]
-  assert.deepEqual(northStick?.origin, { x: 300, y: 10 })
+  assert.deepEqual(northStick?.origin, { x: 300, y: shotRadius })
 
-  // Far from any wall it flies its whole length, so nothing changes there.
+  // Far from any wall it comes down exactly where it was thrown.
   const open = createStickDuel()
   throwStick(open)
   assert.deepEqual(sticksOut(open, STICK_DOWN)[0]?.origin, STICK_AT)
@@ -2903,6 +2953,73 @@ test('warp blinks to the stick in a single tick, wherever it is, and the pickup 
   )
 })
 
+test('warp with no stick anywhere and the throw on cooldown gives the throw back instead of blinking', () => {
+  const warp = getAbilityDef('t-warp')
+  assert.ok(warp)
+  const simulator = createStickDuel()
+  throwStick(simulator)
+  // The stick is thrown on tick 1, down on 36, called back on 40 and home by about tick 75, with the
+  // throw's 8 s, from tick 5, still running. Warp is cast on tick 120 with nothing out.
+  simulator.addOrder(1, cast(2, 40, 't-recall', { mode: 'none' }, TRINKET_AT))
+  const warpAt = 120
+  simulator.addOrder(1, cast(3, warpAt, 't-warp', { mode: 'none' }, TRINKET_AT))
+  const launched = warpAt + warp.windUpTicks
+
+  assert.equal(sticksOut(simulator, warpAt - 1).length, 0, 'there is no stick')
+  assert.equal(simulator.at(warpAt - 1).getEntities().length, 0, 'in the air either')
+  assert.equal(throwCooldown(simulator, warpAt - 1)?.ready, false, 'and the throw is on cooldown')
+  assert.equal(throwCooldown(simulator, launched - 1)?.ready, false, 'it stays there through the windup')
+  const frame = simulator.at(launched)
+  assert.equal(throwCooldown(simulator, launched)?.ready, true, 'then warp gives it back, all of it')
+  assert.equal(frame.get(1)?.getAbilityCooldown('t-warp').ticksRemaining, warp.cooldownTicks, 'at the cost of its own cooldown')
+  assert.deepEqual(frame.get(1)?.getPosition(), TRINKET_AT, 'and the trinketmaster has not gone anywhere')
+
+  // The throw can go again at once.
+  simulator.addOrder(1, cast(4, launched + warp.backswingTicks + 1, 't-stick', STICK_EAST, TRINKET_AT))
+  assert.equal(sticksOut(simulator, launched + warp.backswingTicks + 1 + STICK_DOWN).length, 1, 'and does')
+})
+
+test('warp with a stick on the ground still blinks to it, and the throw is not given back', () => {
+  const simulator = createStickDuel()
+  throwStick(simulator)
+  simulator.addOrder(1, cast(2, 40, 't-warp', { mode: 'none' }, TRINKET_AT))
+  const warp = getAbilityDef('t-warp')
+  assert.ok(warp)
+  const landed = 40 + warp.windUpTicks
+
+  assert.deepEqual(simulator.at(landed).get(1)?.getPosition(), STICK_AT, 'it goes to the stick')
+  // Walking over the stick, which warping onto it is, leaves the throw a second to wait: not ready.
+  assert.equal(throwCooldown(simulator, landed + 1)?.ready, false)
+  assert.equal(throwCooldown(simulator, landed + 1)?.ticksRemaining, 60)
+})
+
+test('warp is still dropped with the throw ready and nothing out, and while the stick is in the air', () => {
+  const warp = getAbilityDef('t-warp')
+  assert.ok(warp)
+  const wasCast = (simulator: Simulator, tick: number): boolean =>
+    simulator.at(tick).get(1)?.getAbilityCooldown('t-warp').ready === false
+
+  // The throw is ready and there is no stick: nothing for it to do.
+  const ready = createStickDuel()
+  ready.addOrder(1, cast(1, 1, 't-warp', { mode: 'none' }, TRINKET_AT))
+  assert.equal(wasCast(ready, 10), false)
+
+  // The stick is on its way out, and the throw is on cooldown, but it is in play.
+  const flying = createStickDuel()
+  throwStick(flying)
+  flying.addOrder(1, cast(2, 10, 't-warp', { mode: 'none' }, TRINKET_AT))
+  assert.equal(throwCooldown(flying, 14)?.ready, false)
+  assert.equal(wasCast(flying, 14), false)
+
+  // And on its way back.
+  const returning = createStickDuel()
+  throwStick(returning)
+  returning.addOrder(1, cast(2, 40, 't-recall', { mode: 'none' }, TRINKET_AT))
+  returning.addOrder(1, cast(3, 50, 't-warp', { mode: 'none' }, TRINKET_AT))
+  assert.equal(returning.at(50).getEntities().some((entity) => entity.defId === 't-stick-recall'), true, 'it is in the air')
+  assert.equal(wasCast(returning, 55), false)
+})
+
 test('a blink is not held by a root, but is stopped by a silence, and needs a stick to blink to', () => {
   // A root holds a walker but not a blink: the root lands on tick 41 and the blink on tick 48.
   const rooted = createStickDuel([[400, 300, new Champion({ ...brawler, abilities: ['t-root-test'] })]])
@@ -2938,7 +3055,7 @@ test('the throw needs no stick out and the recall needs one, so a second stick i
   const simulator = createStickDuel()
   throwStick(simulator)
   // The throw is ready again from tick 485, but a stick is still lying there, so this is dropped.
-  simulator.addOrder(1, cast(2, 600, 't-stick', EAST, TRINKET_AT))
+  simulator.addOrder(1, cast(2, 600, 't-stick', STICK_EAST, TRINKET_AT))
   assert.deepEqual(simulator.at(606).getEntities().map((entity) => entity.defId), ['t-stick'])
   assert.equal(throwCooldown(simulator, 606)?.ready, true, 'and no cooldown was spent')
 
@@ -3065,7 +3182,7 @@ test('a cast with no windup leaves the attack lock alone, and one with a windup 
   assert.equal(damageAt(hushed, 90), 3 * trinketmaster.attackDamage)
 
   // The stick takes a windup, so the trinketmaster stops to throw it and goes back to nothing.
-  const thrown = swing('t-stick', EAST)
+  const thrown = swing('t-stick', STICK_EAST)
   assert.equal(thrown.at(19).get(1)?.getAttackTarget(), 2)
   assert.equal(thrown.at(20).get(1)?.getAttackTarget(), undefined)
   assert.equal(damageAt(thrown, 90), trinketmaster.attackDamage)
@@ -3946,7 +4063,7 @@ test('the stick going out, the stick coming back and the auto hush readies are t
   // damage, hits the enemy on the way out and comes down about tick 45. The recall, called on tick 60,
   // hits it again on the way back. Hush is readied on tick 100 and the auto on 101 is the hush's.
   simulator.addOrder(1, { id: 'player-1:1', seq: 1, tick: 1, type: 'attack', targetId: 2 })
-  simulator.addOrder(1, cast(2, 10, 't-stick', EAST, TRINKET_AT))
+  simulator.addOrder(1, cast(2, 10, 't-stick', STICK_EAST, TRINKET_AT))
   simulator.addOrder(1, cast(3, 60, 't-recall', { mode: 'none' }, TRINKET_AT))
   simulator.addOrder(1, cast(4, 100, 't-hush', { mode: 'none' }, TRINKET_AT))
   simulator.addOrder(1, { id: 'player-1:5', seq: 5, tick: 101, type: 'attack', targetId: 2 })
@@ -3985,7 +4102,7 @@ test('hush counts wherever it comes in the count, as the first hit as much as th
   simulator.addOrder(1, { id: 'player-1:2', seq: 2, tick: 2, type: 'attack', targetId: 2 })
   const hushLanding = 2 + windup
   stopAttacking(simulator, 1, hushLanding, TRINKET_AT)
-  simulator.addOrder(1, cast(3, 10, 't-stick', EAST, TRINKET_AT))
+  simulator.addOrder(1, cast(3, 10, 't-stick', STICK_EAST, TRINKET_AT))
   simulator.addOrder(1, cast(4, 70, 't-recall', { mode: 'none' }, TRINKET_AT))
 
   assert.equal(trickHurt(simulator, hushLanding), 60, 'the hush auto does its own damage')
@@ -4004,7 +4121,7 @@ test('the passive counts each enemy on its own, so hits split between two never 
   const simulator = createStickDuel([[360, 300], [460, 300]])
   // The stick goes out through the first enemy and then the second, and the recall comes back through
   // the second and then the first: four hits, but only two on either of them.
-  simulator.addOrder(1, cast(1, 1, 't-stick', EAST, TRINKET_AT))
+  simulator.addOrder(1, cast(1, 1, 't-stick', STICK_EAST, TRINKET_AT))
   simulator.addOrder(1, cast(2, 60, 't-recall', { mode: 'none' }, TRINKET_AT))
 
   const end = 150
@@ -4017,7 +4134,7 @@ test('the passive counts each enemy on its own, so hits split between two never 
 
 test('the passive count is lost if the hits are more than five seconds apart', () => {
   const simulator = createStickDuel([[360, 300]])
-  simulator.addOrder(1, cast(1, 1, 't-stick', EAST, TRINKET_AT))
+  simulator.addOrder(1, cast(1, 1, 't-stick', STICK_EAST, TRINKET_AT))
   // The mark from the stick going out lasts five seconds. The recall, called on tick 400, hits the enemy
   // long after it has gone.
   simulator.addOrder(1, cast(2, 400, 't-recall', { mode: 'none' }, TRINKET_AT))
@@ -4185,7 +4302,7 @@ test('a flash, a fire and a thrown stick affect enemies and spare teammates stan
     { x: 400, y: 300, team: 1 },
     { x: 500, y: 300, team: 2 },
   ])
-  stick.addOrder(1, cast(1, 1, 't-stick', EAST, TRINKET_AT))
+  stick.addOrder(1, cast(1, 1, 't-stick', STICK_EAST, TRINKET_AT))
   assert.equal(stick.at(30).get(3)?.getHealth(), 940)
   assert.equal(stick.at(30).get(2)?.getHealth(), 1000)
 })

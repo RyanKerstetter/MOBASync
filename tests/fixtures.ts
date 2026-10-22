@@ -791,8 +791,8 @@ export const grenadier = defineChampion({
 })
 
 // ---------------------------------------------------------------------------- trinketmaster kit
-// A stick thrown in a straight line, 300 px, that hurts every enemy it passes through (60 damage)
-// and then lands where its flight ends and stays, with no timer, until its owner walks over it,
+// A stick thrown to a point of the player's choosing, 150 to 300 px away, that hurts every enemy it
+// passes through (60 damage) and then lands where it was thrown to and stays, with no timer, until its owner walks over it,
 // which caps what is left of the throw's cooldown at 1 s, or calls it back, which does not touch
 // the cooldown at all. The key does the throw while no stick is out and the recall while one is:
 // the recall flies the stick home through enemies (60 damage, 40% slow for 1.5 s) and the stick
@@ -830,9 +830,10 @@ const stickRecall: EntityDef = {
 }
 defineAbility({
   id: 't-stick',
-  targeting: 'direction',
+  targeting: 'point',
   range: 300,
-  indicator: { width: 16 },
+  minRange: 150,
+  indicator: { line: true, width: 16 },
   windUpTicks: 4,
   backswingTicks: 4,
   cooldownTicks: seconds(8),
@@ -843,7 +844,7 @@ defineAbility({
       id: 't-stick-shot',
       speed: 600,
       radius: 8,
-      lifetimeTicks: 30,
+      landAtAim: true,
       pierce: true,
       stopsAtWalls: true,
       onHit: [damage(60), ...trinketTrick],
@@ -880,8 +881,17 @@ defineAbility({
   windUpTicks: 3,
   backswingTicks: 2,
   cooldownTicks: seconds(10),
+  // A stick on the ground to blink to, or else no stick anywhere, out or flying, and the throw on
+  // cooldown, which it gives back whole.
   requires: { entity: 't-stick', out: true },
-  apply: [blink(ownEntity('t-stick'))],
+  orWhen: { none: ['t-stick', 't-stick-shot', 't-stick-recall'], onCooldown: 't-stick' },
+  apply: [
+    when<SimContext>(
+      (sim, src) => sim.entitiesOf(src.ownerId, 't-stick').length > 0,
+      [blink(ownEntity('t-stick'))],
+      [refundCooldown('t-stick', 1)],
+    ),
+  ],
 })
 
 export const trinketmaster = defineChampion({
