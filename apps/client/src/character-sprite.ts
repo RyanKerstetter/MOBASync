@@ -19,16 +19,23 @@ export async function loadSpriteSets(
   const loaded = new Map<string, LoadedSpriteSet>()
   for (const [championId, set] of Object.entries(sets)) {
     const frames: Partial<Record<AnimationKey, Texture[]>> = {}
-    for (const [key, clip] of Object.entries(set.clips) as Array<[AnimationKey, NonNullable<SpriteSet['clips'][AnimationKey]>]>) {
-      const override = overrides.get(spriteFileKey(clip.url))
-      const sheet = override
-        ? Texture.from(await createImageBitmap(override))
-        : await Assets.load<Texture>(clip.url)
-      sheet.source.scaleMode = 'nearest'
-      frames[key] = Array.from({ length: clip.frames }, (_, index) => new Texture({
-        source: sheet.source,
-        frame: new Rectangle(index * set.frameWidth, 0, set.frameWidth, set.frameHeight),
-      }))
+    // A set with a sheet that cannot be loaded is left out, so that champion is drawn as a circle, and
+    // the others keep their art.
+    try {
+      for (const [key, clip] of Object.entries(set.clips) as Array<[AnimationKey, NonNullable<SpriteSet['clips'][AnimationKey]>]>) {
+        const override = overrides.get(spriteFileKey(clip.url))
+        const sheet = override
+          ? Texture.from(await createImageBitmap(override))
+          : await Assets.load<Texture>(clip.url)
+        sheet.source.scaleMode = 'nearest'
+        frames[key] = Array.from({ length: clip.frames }, (_, index) => new Texture({
+          source: sheet.source,
+          frame: new Rectangle(index * set.frameWidth, 0, set.frameWidth, set.frameHeight),
+        }))
+      }
+    } catch (error) {
+      console.warn(`Could not load the sprites of "${championId}", so it is drawn as a circle.`, error)
+      continue
     }
     loaded.set(championId, { set, frames })
   }

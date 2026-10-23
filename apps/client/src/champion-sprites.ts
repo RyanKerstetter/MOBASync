@@ -37,7 +37,6 @@ const swordAndShield: SpriteSet = {
     idle: { url: new URL('../../../res/Champion_Swordsman/Idle.png', import.meta.url).href, frames: 4, fps: 6, loop: true },
     attack: { url: new URL('../../../res/Champion_Swordsman/Attack_1.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 3 },
     cast: { url: new URL('../../../res/Champion_Swordsman/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
-    // Sits on the first frame for 0.4 s, then falls and stays down.
     dead: { url: new URL('../../../res/Champion_Swordsman/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
     walk: { url: new URL('../../../res/Champion_Swordsman/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
   },
@@ -57,8 +56,7 @@ const crossbow: SpriteSet = {
     walk: { url: new URL('../../../res/Champion_Archer/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
     attack: { url: new URL('../../../res/Champion_Archer/Attack.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 2 },
     cast: { url: new URL('../../../res/Champion_Archer/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
-    // Sits on the first frame for 0.4 s, then falls and stays down.
-    dead: { url: new URL('../../../res/Champion_Archer/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [400, 1000] },
+    dead: { url: new URL('../../../res/Champion_Archer/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
   },
 }
 
@@ -76,27 +74,25 @@ const cursebearer: SpriteSet = {
     walk: { url: new URL('../../../res/Champion_Cursebearer/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
     attack: { url: new URL('../../../res/Champion_Cursebearer/Attack_1.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 2 },
     cast: { url: new URL('../../../res/Champion_Cursebearer/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
-    // Sits on the first frame for 0.4 s, then falls and stays down.
-    dead: { url: new URL('../../../res/Champion_Cursebearer/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [400, 1000] },
+    dead: { url: new URL('../../../res/Champion_Cursebearer/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
   },
 }
 
-// The ninja: the same frame size and the same 16 px figure in the same place as the crossbowman. Its
-// attack is a strike: the first two frames are the draw back over the windup, and the two that reach
-// out to the right play as it lands.
+// The ninja: a placeholder, the Swordsman's sheets copied into its own folder, with the same frame
+// size, place in the frame and timings, until it has art of its own.
 const ninja: SpriteSet = {
   frameWidth: 32,
   frameHeight: 32,
-  anchor: { x: 16, y: 24 },
+  anchor: { x: 14, y: 24 },
   scale: 3,
   facing: 1,
   clips: {
     idle: { url: new URL('../../../res/Champion_Ninja/Idle.png', import.meta.url).href, frames: 4, fps: 6, loop: true },
     walk: { url: new URL('../../../res/Champion_Ninja/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
-    attack: { url: new URL('../../../res/Champion_Ninja/Attack.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 2 },
+    attack: { url: new URL('../../../res/Champion_Ninja/Attack_1.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 3 },
     cast: { url: new URL('../../../res/Champion_Ninja/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
-    // Sits on the first frame for 0.4 s, then falls and stays down.
-    dead: { url: new URL('../../../res/Champion_Ninja/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [400, 1000] },
+    // Sits on the first frame for 0.2 s, then falls and stays down.
+    dead: { url: new URL('../../../res/Champion_Ninja/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
   },
 }
 
@@ -131,8 +127,7 @@ const capricorn: SpriteSet = {
     walk: { url: new URL('../../../res/Champion_Capricorn/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
     attack: { url: new URL('../../../res/Champion_Capricorn/Attack.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 2 },
     cast: { url: new URL('../../../res/Champion_Capricorn/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
-    // Sits on the first frame for 0.4 s, then falls and stays down.
-    dead: { url: new URL('../../../res/Champion_Capricorn/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [400, 1000] },
+    dead: { url: new URL('../../../res/Champion_Capricorn/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
   },
 }
 
@@ -147,8 +142,7 @@ const soldier: SpriteSet = {
     walk: { url: new URL('../../../res/Champion_Soldier/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
     attack: { url: new URL('../../../res/Champion_Soldier/Attack.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 2 },
     cast: { url: new URL('../../../res/Champion_Soldier/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
-    // Sits on the first frame for 0.4 s, then falls and stays down.
-    dead: { url: new URL('../../../res/Champion_Soldier/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [400, 1000] },
+    dead: { url: new URL('../../../res/Champion_Soldier/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
   },
 }
 
@@ -163,8 +157,7 @@ const grenadier: SpriteSet = {
     walk: { url: new URL('../../../res/Champion_Grenadier/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
     attack: { url: new URL('../../../res/Champion_Grenadier/Attack.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 2 },
     cast: { url: new URL('../../../res/Champion_Grenadier/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
-    // Sits on the first frame for 0.4 s, then falls and stays down.
-    dead: { url: new URL('../../../res/Champion_Grenadier/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [400, 1000] },
+    dead: { url: new URL('../../../res/Champion_Grenadier/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
   },
 }
 
