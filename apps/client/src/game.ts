@@ -30,6 +30,7 @@ import { createGameMenu, menuItems } from './game-menu.ts'
 import { loadSettings, saveSettings } from './game-settings.ts'
 import { CharacterSprite, loadSpriteSets, type LoadedSpriteSet } from './character-sprite.ts'
 import { championSprites } from './champion-sprites.ts'
+import { spriteFileKey, spriteOverridesFrom } from './sprite-overrides.ts'
 import { layoutHealthBar } from './health-bar.ts'
 import { hitboxShapes } from './hitboxes.ts'
 import { decodeSnapshot } from './snapshot-codec.ts'
@@ -192,10 +193,52 @@ export async function startGame({
   // The aimed ability's indicator, on the ground under the champions.
   const settings = loadSettings()
   const castControl = new CastControl(castMode ?? settings.castMode)
+  // Dev tool: redraw every champion from `overrides` (sheets picked from a folder, see
+  // `spriteOverridesFrom`) over the art the game came with, or from that art alone with none. The
+  // actors are dropped so the next frame draws them again from the new sets.
+  const applySprites = async (overrides?: ReadonlyMap<string, Blob>): Promise<void> => {
+    const next = await loadSpriteSets(championSprites, overrides)
+    spriteSets.clear()
+    for (const [championId, loaded] of next) spriteSets.set(championId, loaded)
+    for (const actor of actors.values()) {
+      scene.removeChild(actor.node)
+      actor.node.destroy({ children: true })
+    }
+    actors.clear()
+  }
+  const pickSpriteFolder = (): void => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.setAttribute('webkitdirectory', '')
+    input.addEventListener('change', () => {
+      const overrides = spriteOverridesFrom(Array.from(input.files ?? []))
+      const wanted = new Set(Object.values(championSprites).flatMap((set) =>
+        Object.values(set.clips).map((clip) => spriteFileKey(clip.url))))
+      const used = [...overrides.keys()].filter((key) => wanted.has(key))
+      if (used.length === 0) {
+        window.alert('No sheets in that folder match the game\'s. Pick a folder laid out like res/ (Character_X/Idle.png, …).')
+        return
+      }
+      applySprites(overrides)
+        .then(() => console.info(`Loaded ${used.length} sprite sheets from the folder; the rest are the game's own.`))
+        .catch((error: unknown) => console.warn('Could not load the sprites from that folder.', error))
+    })
+    input.click()
+  }
   // The escape menu. Its items are data (`menuItems`), so what it offers grows by adding to that list.
   const menu = createGameMenu({
     container,
     items: () => menuItems({
+      ...(import.meta.env.DEV
+        ? {
+          sprites: {
+            pickFolder: pickSpriteFolder,
+            reset: () => {
+              applySprites().catch((error: unknown) => console.warn('Could not reload the champion sprites.', error))
+            },
+          },
+        }
+        : {}),
       getCastMode: () => castControl.mode,
       setCastMode: (mode) => {
         castControl.setMode(mode)

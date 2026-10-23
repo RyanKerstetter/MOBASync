@@ -25,6 +25,9 @@ export function menuItems(actions: {
   getCastMode: () => CastMode
   setCastMode: (mode: CastMode) => void
   leaveLobby: () => void
+  // A dev tool, left out when not given: draw the champions from a folder of art picked from disk, or
+  // go back to the art the game came with.
+  sprites?: { pickFolder: () => void; reset: () => void }
 }): MenuItem[] {
   return [
     {
@@ -34,6 +37,12 @@ export function menuItems(actions: {
       get: actions.getCastMode,
       set: (value) => actions.setCastMode(value as CastMode),
     },
+    ...(actions.sprites
+      ? [
+        { kind: 'action', label: 'Dev: load sprites from folder…', run: actions.sprites.pickFolder } as const,
+        { kind: 'action', label: 'Dev: reset sprites', run: actions.sprites.reset } as const,
+      ]
+      : []),
     { kind: 'action', label: 'Leave lobby', danger: true, run: actions.leaveLobby },
   ]
 }

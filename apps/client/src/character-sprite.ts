@@ -1,6 +1,7 @@
 import { Assets, Rectangle, Sprite, Texture } from 'pixi.js'
 import { CharacterAnimator, type AnimationKey, type AnimatorInput } from './animation.ts'
 import type { SpriteSet } from './champion-sprites.ts'
+import { spriteFileKey } from './sprite-overrides.ts'
 
 // A sprite set with its sheets loaded and cut into frames, ready to draw from.
 export type LoadedSpriteSet = {
@@ -9,13 +10,20 @@ export type LoadedSpriteSet = {
 }
 
 // Loads every sheet of every set and cuts each into its frames. Pixel art is sampled nearest, so it
-// stays crisp when scaled up.
-export async function loadSpriteSets(sets: Readonly<Record<string, SpriteSet>>): Promise<Map<string, LoadedSpriteSet>> {
+// stays crisp when scaled up. A sheet that has a file in `overrides` (see `spriteOverridesFrom`) is
+// read from that instead of from the set's own url.
+export async function loadSpriteSets(
+  sets: Readonly<Record<string, SpriteSet>>,
+  overrides: ReadonlyMap<string, Blob> = new Map(),
+): Promise<Map<string, LoadedSpriteSet>> {
   const loaded = new Map<string, LoadedSpriteSet>()
   for (const [championId, set] of Object.entries(sets)) {
     const frames: Partial<Record<AnimationKey, Texture[]>> = {}
     for (const [key, clip] of Object.entries(set.clips) as Array<[AnimationKey, NonNullable<SpriteSet['clips'][AnimationKey]>]>) {
-      const sheet = await Assets.load<Texture>(clip.url)
+      const override = overrides.get(spriteFileKey(clip.url))
+      const sheet = override
+        ? Texture.from(await createImageBitmap(override))
+        : await Assets.load<Texture>(clip.url)
       sheet.source.scaleMode = 'nearest'
       frames[key] = Array.from({ length: clip.frames }, (_, index) => new Texture({
         source: sheet.source,

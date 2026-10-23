@@ -74,7 +74,7 @@ const cursebearer: SpriteSet = {
   clips: {
     idle: { url: new URL('../../../res/Character_Cursebearer/Idle.png', import.meta.url).href, frames: 4, fps: 6, loop: true },
     walk: { url: new URL('../../../res/Character_Cursebearer/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
-    attack: { url: new URL('../../../res/Character_Cursebearer/Attack_1.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 1 },
+    attack: { url: new URL('../../../res/Character_Cursebearer/Attack_1.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 2 },
     cast: { url: new URL('../../../res/Character_Cursebearer/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
     // Sits on the first frame for 0.4 s, then falls and stays down.
     dead: { url: new URL('../../../res/Character_Cursebearer/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [400, 1000] },
