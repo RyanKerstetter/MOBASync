@@ -208,9 +208,11 @@ them on a layer kept above everything else. A new kind of body is drawn by addin
 
 ### Sprites and animation
 
-A champion can be drawn from sprite sheets instead of as a plain circle. So far the Swordsman is, as the
-sword-and-shield knight in `res/Character_SwordShield`, the Archer, as the crossbowman in
-`res/Character_Crossbow`, and the Cursebearer, as the staff bearer in `res/Character_Cursebearer`. They are drawn a little bigger than their
+A champion can be drawn from sprite sheets instead of as a plain circle. Every champion has its own
+folder, `res/Champion_<name>`. The Swordsman is the sword-and-shield knight, the Archer the crossbowman,
+the Cursebearer the staff bearer, and the Ninja has art of its own. The Trinketmaster (melee) is a copy of
+the Swordsman's sheets, and the Capricorn, Soldier and Grenadier (ranged) are copies of the Archer's,
+as placeholders until they have art. They are drawn a little bigger than their
 bodies and with no circle behind them. The name above every champion is in its team's colour, which is how
 a sprite shows the team. The work is split in three, so animations can be added as data:
 

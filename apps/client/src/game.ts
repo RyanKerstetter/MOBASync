@@ -216,7 +216,7 @@ export async function startGame({
         Object.values(set.clips).map((clip) => spriteFileKey(clip.url))))
       const used = [...overrides.keys()].filter((key) => wanted.has(key))
       if (used.length === 0) {
-        window.alert('No sheets in that folder match the game\'s. Pick a folder laid out like res/ (Character_X/Idle.png, …).')
+        window.alert('No sheets in that folder match the game\'s. Pick a folder laid out like res/ (Champion_X/Idle.png, …).')
         return
       }
       applySprites(overrides)
