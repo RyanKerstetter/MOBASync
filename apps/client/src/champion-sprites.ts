@@ -81,9 +81,29 @@ const cursebearer: SpriteSet = {
   },
 }
 
+// The ninja: the same frame size and the same 16 px figure in the same place as the crossbowman. Its
+// attack is a strike: the first two frames are the draw back over the windup, and the two that reach
+// out to the right play as it lands.
+const ninja: SpriteSet = {
+  frameWidth: 32,
+  frameHeight: 32,
+  anchor: { x: 16, y: 24 },
+  scale: 3,
+  facing: 1,
+  clips: {
+    idle: { url: new URL('../../../res/Character_Ninja/Idle.png', import.meta.url).href, frames: 4, fps: 6, loop: true },
+    walk: { url: new URL('../../../res/Character_Ninja/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
+    attack: { url: new URL('../../../res/Character_Ninja/Attack.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 2 },
+    cast: { url: new URL('../../../res/Character_Ninja/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
+    // Sits on the first frame for 0.4 s, then falls and stays down.
+    dead: { url: new URL('../../../res/Character_Ninja/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [400, 1000] },
+  },
+}
+
 // By champion ID. A champion with no set here is drawn as a circle.
 export const championSprites: Readonly<Record<string, SpriteSet>> = {
   swordsman: swordAndShield,
   archer: crossbow,
   cursebearer,
+  ninja,
 }
