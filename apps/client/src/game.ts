@@ -8,7 +8,6 @@ import {
   GAME_ORDER_TIMEOUT_MS,
   GAME_PING_INTERVAL_MS,
   GameBroadcastOrderSchema,
-  GameDeathSchema,
   GameJoinedSchema,
   GameOrderAckSchema,
   GamePongSchema,
@@ -151,6 +150,20 @@ export async function startGame({
   hudAbilities.className = 'hud-abilities'
   hud.append(hudHealth, hudAbilities)
   container.appendChild(hud)
+
+  // The top right: who has how many kills, and under it the latest kills as they are confirmed. Plain
+  // elements over the canvas, rebuilt by `updateScoreboard` below whenever what they show changes.
+  const scoreboard = document.createElement('div')
+  scoreboard.className = 'game-scoreboard'
+  scoreboard.hidden = true
+  const leaderboardList = document.createElement('ol')
+  leaderboardList.className = 'leaderboard'
+  leaderboardList.setAttribute('aria-label', 'Kills')
+  const killFeedList = document.createElement('ul')
+  killFeedList.className = 'kill-feed'
+  killFeedList.setAttribute('aria-label', 'Kill feed')
+  scoreboard.append(leaderboardList, killFeedList)
+  container.appendChild(scoreboard)
   type HudSlot = { root: HTMLElement; fill: HTMLElement; key: HTMLElement; name: HTMLElement; time: HTMLElement }
   const hudSlots: HudSlot[] = []
 
@@ -890,15 +903,6 @@ export async function startGame({
     }
   })
 
-  channel.on('game:death', (data) => {
-    const parsed = GameDeathSchema.safeParse(data)
-    if (!parsed.success) {
-      onStatus('The server sent an invalid death.', true)
-      return
-    }
-    if (!gameState.applyDeath(parsed.data)) requestSnapshot()
-  })
-
   channel.on('game:error', (data) => {
     if (typeof data === 'object' && data !== null && 'message' in data && typeof data.message === 'string') {
       onStatus(data.message, true)
@@ -923,6 +927,47 @@ export async function startGame({
       channel.emit('game:ping', { clientTime: performance.now() })
     }
   }, GAME_PING_INTERVAL_MS)
+
+  const nameTag = (person: { name: string; team: number }): HTMLElement => {
+    const name = document.createElement('span')
+    name.className = 'scoreboard-name'
+    name.textContent = person.name
+    name.style.color = getTeam(person.team).color
+    return name
+  }
+  let shownLeaderboard = ''
+  let shownKillFeed = ''
+  const updateScoreboard = (now: number): void => {
+    scoreboard.hidden = !started
+    if (!started) return
+    const rows = gameState.getLeaderboard()
+    const leaderboardKey = JSON.stringify(rows)
+    if (leaderboardKey !== shownLeaderboard) {
+      shownLeaderboard = leaderboardKey
+      leaderboardList.replaceChildren(...rows.map((row) => {
+        const item = document.createElement('li')
+        item.classList.toggle('is-local', row.isLocal)
+        const kills = document.createElement('span')
+        kills.className = 'scoreboard-kills'
+        kills.textContent = String(row.kills)
+        item.append(nameTag(row), kills)
+        return item
+      }))
+    }
+    const feed = gameState.getKillFeed(now)
+    const killFeedKey = feed.map((entry) => entry.id).join(',')
+    if (killFeedKey !== shownKillFeed) {
+      shownKillFeed = killFeedKey
+      killFeedList.replaceChildren(...feed.map((entry) => {
+        const item = document.createElement('li')
+        const verb = document.createElement('span')
+        verb.className = 'kill-feed-verb'
+        verb.textContent = entry.killer ? 'defeated' : 'was defeated'
+        item.append(...(entry.killer ? [nameTag(entry.killer), verb, nameTag(entry.victim)] : [nameTag(entry.victim), verb]))
+        return item
+      }))
+    }
+  }
 
   const updateHud = (now: number): void => {
     hud.hidden = !started
@@ -1001,6 +1046,7 @@ export async function startGame({
     updateCamera(renderState(now) ?? cameraCenter)
     // The HUD reads what that frame drew, and the cooldowns refresh every frame so they fill smoothly.
     updateHud(now)
+    updateScoreboard(now)
     for (let index = floatingDamage.length - 1; index >= 0; index -= 1) {
       const floating = floatingDamage[index]
       const elapsed = now - floating.startedAt
@@ -1025,6 +1071,7 @@ export async function startGame({
     window.removeEventListener('blur', onBlur)
     debugOverlay.remove()
     hud.remove()
+    scoreboard.remove()
     menu.destroy()
     reliableMessenger.close()
     channel.close()

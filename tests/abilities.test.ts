@@ -12,6 +12,7 @@ import {
   enemiesInRadius,
   entityPosAt,
   GAME_ARENA_WIDTH,
+  GAME_RESPAWN_TICKS,
   GAME_TPS,
   GameSnapshotSchema,
   getAbilityDef,
@@ -44,6 +45,7 @@ import {
   defineAbility,
   grenadier,
   gunner,
+  killAt,
   ninja,
   soldier,
   spouter,
@@ -671,13 +673,14 @@ test('a shot has no timer: a slow one keeps chasing and still lands', () => {
 
 test('a shot is dropped without damage when its target dies, and does not hit the respawned one', () => {
   const simulator = createGunnerDuel({ x: 300, y: 100 })
-  simulator.addDeath(2, { tick: 10, respawnTick: 130 })
+  killAt(simulator, 2, 10)
 
-  assert.equal(simulator.at(9).getEntities().length, 1)
+  assert.equal(simulator.at(10).getEntities().length, 1, 'it is still on its way on the tick the target dies')
   assert.equal(simulator.at(10).get(2)?.isDead(), true)
-  assert.equal(simulator.at(10).getEntities().length, 0, 'the shot has nothing left to chase')
-  assert.equal(simulator.at(130).get(2)?.getHealth(), 1000, 'the respawned unit is whole')
-  assert.equal(simulator.at(160).get(2)?.getHealth(), 1000)
+  assert.equal(simulator.at(11).getEntities().length, 0, 'and has nothing left to chase on the next')
+  const respawn = 10 + GAME_RESPAWN_TICKS
+  assert.equal(simulator.at(respawn).get(2)?.getHealth(), 1000, 'the respawned unit is whole')
+  assert.equal(simulator.at(respawn + 30).get(2)?.getHealth(), 1000)
 })
 
 test('a ranged champion without a projectile still lands the moment its windup finishes', () => {
@@ -870,7 +873,7 @@ test('dying ends a dash where the character stood', () => {
   const simulator = createArcherDuel()
   simulator.addOrder(1, cast(1, 1, 't-leap', { mode: 'point', point: LEAP_TARGET }))
   simulator.at(5)
-  assert.equal(simulator.addDeath(1, { tick: 8, respawnTick: 200 }), true)
+  killAt(simulator, 1, 8)
 
   const dead = simulator.at(9).get(1)
   assert.equal(dead?.isDashing(), false)
@@ -2303,7 +2306,7 @@ test('medic\'s shield, bot and healing survive a checkpoint restore, and end if 
   // If the soldier dies, the shield is cleared with the rest of its statuses and the bot ends.
   const dying = build()
   dying.at(60)
-  assert.equal(dying.addDeath(1, { tick: 70, respawnTick: 400 }), true)
+  killAt(dying, 1, 70)
   assert.equal(dying.at(71).getEntities().length, 0)
 })
 
@@ -3716,7 +3719,7 @@ test('a dash back to the shadow that passes through nobody loses it when it fini
 test('a shadow never times out, but does not outlive the ninja', () => {
   const simulator = createNinjaDuel()
   simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
-  simulator.addDeath(1, { tick: 1000, respawnTick: 1100 })
+  killAt(simulator, 1, 1000)
 
   assert.equal(shadowsOut(simulator, CONTACT).length, 1)
   assert.equal(shadowsOut(simulator, 600).length, 1, 'ten seconds on')

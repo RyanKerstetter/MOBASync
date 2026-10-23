@@ -463,7 +463,7 @@ bot is killed; casting Medic again replaces the bot and refreshes the shield.
 
 Stim's cost is `loseHealth(amount)`: it ignores shields and resistance, and never takes the last
 point, so it cannot kill. `heal(amount)` restores up to the maximum and does nothing for a unit
-already at 0 health, since only the server can confirm a death and a heal must not undo one.
+already at 0 health, since a champion with none left is dead and a heal must not bring it back.
 `resist(fraction, ticks)` is a status. Resistances add up to 90% and cut each hit before shields
 absorb what is left.
 
@@ -714,20 +714,30 @@ every tick at its position), a `speed` of 0 for something stationary, and a
 re-applies two-tick haste and slow statuses to whoever is inside, so the effect
 ends right after a unit leaves.
 
-Death is the one outcome clients never derive. Reaching 0 health leaves a
-champion alive in every simulator. Once the lethal tick is committed (so no late
-order can undo it) the server sends a reliable `game:death` message naming the
-tick it takes effect (`GAME_DEATH_LEAD_TICKS` ahead) and the respawn tick
-(`GAME_RESPAWN_TICKS` later). Clients add it to the simulator with
-`addDeath`, which stops the champion at that tick and respawns it at its
-starting position with full health at the respawn tick. Pending deaths travel
-in snapshots, so a lost message is recovered by a resync.
+Death is worked out by the simulator, so every client predicts it and the server sends nothing. A
+champion left with no health dies on that tick: it stops, becomes a ghost, and respawns at its
+starting position with full health `GAME_RESPAWN_TICKS` later. Everything about it is in the
+frames, so a rollback undoes a death that a late order saves, and a checkpoint carries a dead
+champion with it. The damage that took the last health decides the killer (`DeathRecord`), and
+a champion that dealt it to itself has none.
+
+What cannot be taken back waits for the commit tick, after which no late order can arrive (the
+server refuses them) and a death is certain. The simulator keeps the deaths after the commit tick
+as pending, and when the commit tick passes one it adds a kill to the killer's `kills` and calls
+`onDeathConfirmed`. The champion falling on screen is predicted; the leaderboard and the killfeed
+only show confirmed deaths, so a kill that was undone is never shown. Snapshots carry each
+character's confirmed `kills`, which also corrects a client that had drifted.
+
+The top right of the screen holds both. `scoreboard.ts` orders the leaderboard (most kills
+first, ties in join order, the local player marked) and keeps the killfeed lines fresh for six
+seconds, five at a time; `ClientGameState` hands them to `game.ts`, which redraws the elements
+only when what they show changes. Names are in their team's colour.
 
 Pending order messages are retried with exponential backoff. Silence does not
 undo a prediction: after the retry timeout the client requests a full state
 snapshot, and retries continue until an acknowledgement arrives. Server-side
 broadcast timeout also triggers a snapshot. Handshake and lifecycle messages (joining,
-starting, cancelling, deaths, errors) use Geckos reliable delivery, which sends a message ten times.
+starting, cancelling, errors) use Geckos reliable delivery, which sends a message ten times.
 Snapshots and order acknowledgements deliberately do not: the next snapshot is a second away and a
 client that falls behind asks for one, and an order whose acknowledgement is lost is resent by the
 client and acknowledged again from the server's cache. Orders themselves use the reliable messenger's

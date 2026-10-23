@@ -1,5 +1,12 @@
 import type { ActionView } from './animation.ts'
 import {
+  leaderboardRows,
+  visibleKillFeed,
+  type KillFeedEntry,
+  type KillFeedPerson,
+  type LeaderboardRow,
+} from './scoreboard.ts'
+import {
   GAME_REMOTE_CATCHUP_EASE_TICKS,
   GAME_REMOTE_CATCHUP_MAX_SPEED_MULTIPLIER,
   GAME_REMOTE_RENDER_BUFFER_TICKS,
@@ -22,9 +29,9 @@ import {
   type Champion,
   type CharacterOrder,
   type CharacterTickSnapshot,
+  type DeathRecord,
   type GameAttackOrder,
   type GameBroadcastOrder,
-  type GameDeath,
   type GameCharacterSnapshot,
   type GameHealthStats,
   type GameTickSnapshot,
@@ -52,7 +59,8 @@ export type RenderedCharacter =
     // Active shield statuses.
     totalShield: number
     position: Vector2
-    // Set only by a death the server has confirmed; 0 health alone does not kill.
+    // Dead as far as this client can tell: it has no health left. A late order from someone else can
+    // still undo it until the commit tick passes it.
     dead: boolean
     // Markers on this character by key, such as 'curse' stacks.
     stacks: Record<string, number>
@@ -126,6 +134,8 @@ type RenderedRemotePosition = {
 
 export class ClientGameState {
   readonly simulator = new Simulator()
+  private killFeed: KillFeedEntry[] = []
+  private readonly announcedDeaths = new Set<string>()
   private localCharacterId: number | undefined
   private serverSnapshot: GameSnapshot | undefined
   private readonly localOrders = new Map<number, TrackedOrder>()
@@ -138,6 +148,10 @@ export class ClientGameState {
   private averageRttMs = 0
   private lastRttMs: number | undefined
   private lastServerUpdateAt = performance.now()
+
+  constructor() {
+    this.simulator.onDeathConfirmed = (death) => this.recordConfirmedDeath(death)
+  }
 
   setLocalCharacterId(characterId: number): void {
     this.localCharacterId = characterId
@@ -564,16 +578,48 @@ export class ClientGameState {
     return applied
   }
 
-  // Returns false when the death is too old to schedule, so the caller should resync.
-  applyDeath(death: GameDeath): boolean {
-    const character = this.simulator.characters.get(death.characterId)
-    if (!character) return false
-    if (character.deaths.some(({ tick, respawnTick }) =>
-      tick === death.tick && respawnTick === death.respawnTick)) return true
-    return this.simulator.addDeath(death.characterId, {
-      tick: death.tick,
-      respawnTick: death.respawnTick,
-    })
+  // Everyone's kills, most first. They count only deaths the commit tick has passed, which no late
+  // order can undo any more, so a kill that is still a prediction is not on the board yet.
+  getLeaderboard(): LeaderboardRow[] {
+    return leaderboardRows(
+      [...this.simulator.characters.values()].map((character) => ({
+        id: character.id,
+        name: character.player?.name ?? `Player ${character.id}`,
+        team: character.team,
+        kills: character.kills,
+      })),
+      this.localCharacterId,
+    )
+  }
+
+  // The lines of the killfeed to show now. Like the leaderboard, a line is added once its death can
+  // no longer be undone, although the champion itself fell on screen at once.
+  getKillFeed(now = performance.now()): KillFeedEntry[] {
+    this.killFeed = visibleKillFeed(this.killFeed, now)
+    return this.killFeed
+  }
+
+  private recordConfirmedDeath(death: DeathRecord): void {
+    const id = `${death.tick}:${death.victimId}`
+    // A checkpoint can take the commit tick back, so a death may be confirmed a second time.
+    if (this.announcedDeaths.has(id)) return
+    this.announcedDeaths.add(id)
+    if (this.announcedDeaths.size > 64) this.announcedDeaths.delete(this.announcedDeaths.values().next().value as string)
+    const person = (characterId: number): KillFeedPerson | undefined => {
+      const character = this.simulator.characters.get(characterId)
+      return character
+        ? { name: character.player?.name ?? `Player ${character.id}`, team: character.team }
+        : undefined
+    }
+    const victim = person(death.victimId)
+    if (!victim) return
+    const killer = death.killerId === undefined ? undefined : person(death.killerId)
+    this.killFeed = [...this.killFeed, {
+      id,
+      victim,
+      ...(killer ? { killer } : {}),
+      at: performance.now(),
+    }]
   }
 
   isLocalDead(now = performance.now()): boolean {

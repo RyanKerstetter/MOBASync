@@ -88,7 +88,7 @@ test('ability cooldowns count down continuously between whole ticks', () => {
   assert.ok(steps.every((step) => step > 0 && step < 0.5), `steps ${steps}`)
 })
 
-test('client only shows a death once the server confirms it', () => {
+test('the client shows a death as soon as it predicts it, but counts the kill only once it is committed', () => {
   const gameState = new ClientGameState()
   gameState.simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, new Champion({
     ...championDef(brawler),
@@ -101,23 +101,32 @@ test('client only shows a death once the server confirms it', () => {
       id: `attack-${index + 1}`, seq: index + 1, tick: index + 1, type: 'attack', targetId: 2,
     })
   }
-  gameState.simulator.at(12)
+  gameState.simulator.advanceTo(12)
 
+  // It fell on screen at once: the server has not been asked.
   const predicted = gameState.getCharacters(0).find((character) => character.id === 2)
   assert.equal(predicted?.health?.hp, 0)
-  assert.equal(predicted?.dead, false)
-  assert.equal(gameState.isLocalDead(0), false)
-
-  const death = { characterId: 2, tick: 14, respawnTick: 44 }
-  assert.equal(gameState.applyDeath(death), true)
-  gameState.simulator.at(14)
-  assert.equal(gameState.applyDeath(death), true, 'a repeated message is not an error')
-  assert.equal(gameState.getCharacters(0).find((character) => character.id === 2)?.dead, true)
+  assert.equal(predicted?.dead, true)
   assert.equal(gameState.isLocalDead(0), true)
+  // But the kill is not taken as certain yet: a late order could still undo it.
+  assert.deepEqual(gameState.getLeaderboard().map(({ characterId, kills }) => [characterId, kills]), [[1, 0], [2, 0]])
+  assert.deepEqual(gameState.getKillFeed(0), [])
 
-  gameState.simulator.at(44)
-  assert.equal(gameState.applyDeath({ characterId: 2, tick: 5, respawnTick: 9 }), false)
-  assert.equal(gameState.isLocalDead(0), false)
+  gameState.simulator.setCommitTick(12)
+  const [first, second] = gameState.getLeaderboard()
+  assert.deepEqual([first.name, first.kills, first.team], ['Player 1', 1, 1], 'the killer leads')
+  assert.deepEqual([second.name, second.kills, second.isLocal], ['Player 2', 0, true])
+  const feed = gameState.getKillFeed(performance.now())
+  assert.equal(feed.length, 1)
+  assert.deepEqual([feed[0].killer?.name, feed[0].victim.name], ['Player 1', 'Player 2'])
+
+  // A death told of again (a checkpoint can take the commit tick back) is not a second line.
+  const snapshot = gameState.simulator.snapshot()
+  gameState.applySnapshot(snapshot)
+  gameState.simulator.advanceTo(14)
+  gameState.simulator.setCommitTick(14)
+  assert.equal(gameState.getKillFeed(performance.now()).length, 1)
+  assert.equal(gameState.getLeaderboard()[0].kills, 1)
 })
 
 function createArcherClient(): ClientGameState {

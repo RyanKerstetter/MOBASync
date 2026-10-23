@@ -55,6 +55,7 @@ import {
   type EntityDef,
   type Selector,
   type SimContext,
+  type Simulator,
   type Vector2,
 } from '../packages/shared/src/index.js'
 
@@ -1071,3 +1072,50 @@ export const bigHitter = defineChampion({
   attackWindupTicks: 0,
   abilities: [],
 })
+
+// ---------------------------------------------------------------------------- killing on a tick
+
+// Dying is worked out from health, so a test that needs someone dead on an exact tick has someone
+// kill them on it: an executioner who stands in a corner, far from any fight, and is an enemy of
+// everyone. It casts an ability that does more damage than anyone has health, so its target dies
+// at the end of that tick.
+defineAbility({
+  id: 't-execute',
+  targeting: 'unit',
+  range: 10_000,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: 0,
+  apply: [damage(1_000_000, targetUnit())],
+})
+export const executioner = defineChampion({
+  id: 't-executioner',
+  name: 'Test Executioner',
+  maxHp: 1_000_000,
+  moveSpeed: 100,
+  radius: 10,
+  attackDamage: 1,
+  attackSpeed: 1,
+  attackRange: 10,
+  attackWindupTicks: 1,
+  abilities: ['t-execute'],
+})
+
+// Makes `victimId` die on `tick`, killed by the executioner (which is character `1000 + victimId`).
+export function killAt(simulator: Simulator, victimId: number, tick: number): void {
+  const id = 1000 + victimId
+  if (!simulator.characters.has(id)) {
+    simulator.addPlayer(id, `executioner-${id}`, 'Executioner', { x: 2350, y: 1300 }, executioner)
+  }
+  const origin = simulator.characters.get(id)?.initialPosition
+  if (!origin) throw new Error('The executioner is missing.')
+  simulator.addOrder(id, {
+    id: `${id}:${tick}`,
+    seq: tick,
+    tick,
+    type: 'cast',
+    abilityId: 't-execute',
+    target: { mode: 'unit', unitId: victimId },
+    origin: { ...origin },
+  })
+}

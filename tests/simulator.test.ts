@@ -7,12 +7,14 @@ import {
   GAME_ARENA_WIDTH,
   GAME_COLLISION_STIFFNESS,
   GAME_MAX_PLAYERS,
+  GAME_RESPAWN_TICKS,
   GAME_TPS,
   Simulator,
   type ChampionDef,
   type CharacterOrder,
+  type DeathRecord,
 } from '../packages/shared/src/index.js'
-import { brawler } from './fixtures.js'
+import { brawler, killAt } from './fixtures.js'
 
 // Tests derive travel distances from the champion so rebalancing move speed does not break them.
 const SPEED = brawler.moveSpeed
@@ -192,18 +194,19 @@ test('the edge of the map holds a character that is pushed against it', () => {
 test('a dead character is a ghost others walk through, and a respawn on top of someone is pushed off', () => {
   const simulator = createPair([100, 300], [400, 300])
   simulator.addOrder(1, { id: 'move-1', seq: 1, tick: 1, type: 'move', target: { x: 400, y: 300 } })
-  simulator.addDeath(2, { tick: 5, respawnTick: 100 })
+  killAt(simulator, 2, 5)
+  const respawn = 5 + GAME_RESPAWN_TICKS
 
   // The walker goes straight through the body and stops exactly on the spot it died on.
   assert.equal(simulator.at(90).get(2)?.isDead(), true)
   assert.deepEqual(simulator.at(90).get(1)?.getPosition(), { x: 400, y: 300 })
-  assert.deepEqual(simulator.at(99).get(1)?.getPosition(), { x: 400, y: 300 })
+  assert.deepEqual(simulator.at(respawn - 1).get(1)?.getPosition(), { x: 400, y: 300 })
   // It respawns exactly where the walker is standing; the pair slide apart from there.
-  const respawned = simulator.at(100)
+  const respawned = simulator.at(respawn)
   assert.equal(respawned.get(2)?.isDead(), false)
   assertPositionClose(respawned.get(1)?.getPosition(), { x: 400 - REACH * SPRING / 2, y: 300 })
   assertPositionClose(respawned.get(2)?.getPosition(), { x: 400 + REACH * SPRING / 2, y: 300 })
-  assert.ok(Math.abs(gapAt(simulator, 140) - REACH) < 1e-9)
+  assert.ok(Math.abs(gapAt(simulator, respawn + 40) - REACH) < 1e-9)
 })
 
 test('a crowd squeezing together resolves the same in any arrival order and after a checkpoint restore', () => {
@@ -498,86 +501,122 @@ function createKillSimulator(): Simulator {
   return simulator
 }
 
-test('reaching 0 health does not kill; only a confirmed death does', () => {
+test('a character left with no health dies on that tick, and the damage is credited to who did it', () => {
   const simulator = createKillSimulator()
 
-  assert.equal(simulator.at(11).get(2)?.getHealth(), 0)
-  assert.equal(simulator.at(11).get(2)?.getDeathTick(), undefined)
-  assert.equal(simulator.at(14).get(2)?.isDead(), false)
+  assert.equal(simulator.at(9).get(2)?.isDead(), false)
+  const dead = simulator.at(10).get(2)
+  assert.equal(dead?.getHealth(), 0)
+  assert.equal(dead?.getDeathTick(), 10)
+  assert.equal(dead?.isDead(), true)
+  assert.deepEqual(simulator.at(10).deaths, [{ tick: 10, victimId: 2, killerId: 1 }])
+  assert.deepEqual(simulator.at(11).deaths, [], 'and only once')
 })
 
-test('a confirmed death stops the character and a later attack on it is rejected', () => {
+test('a dead character stops where it died, and orders for it or against it change nothing', () => {
   const simulator = createKillSimulator()
-  simulator.at(12)
-  assert.equal(simulator.addDeath(2, { tick: 14, respawnTick: 14 + 30 }), true)
-  simulator.addOrder(2, { id: 'move-1', seq: 1, tick: 13, type: 'move', target: { x: 700, y: 100 } })
+  simulator.addOrder(2, { id: 'move-late', seq: 1, tick: 13, type: 'move', target: { x: 700, y: 100 } })
   simulator.addOrder(1, { id: 'attack-late', seq: 13, tick: 16, type: 'attack', targetId: 2 })
 
   const dead = simulator.at(20).get(2)
-  assert.equal(dead?.getDeathTick(), 14)
+  assert.equal(dead?.getDeathTick(), 10)
   assert.equal(dead?.isDead(), true)
   assert.equal(dead?.getHealth(), 0)
-  assert.ok((dead?.getPosition().x ?? 0) > 140, 'it moved until it died')
-  assert.deepEqual(simulator.at(30).get(2)?.getPosition(), dead?.getPosition())
-  // It swung every tick up to the one before the death took effect, on tick 13, and then had no one
-  // left to attack: the late order for a dead character changed nothing.
-  assert.equal(simulator.at(20).get(1)?.getNextAttackTick(), 14)
+  assert.deepEqual(simulator.at(30).get(2)?.getPosition(), dead?.getPosition(), 'the move order for a ghost does nothing')
+  // It swung every tick up to the lethal one, on tick 10, and then had no one left to attack: the late
+  // order for a dead character changed nothing.
+  assert.equal(simulator.at(20).get(1)?.getNextAttackTick(), 11)
   assert.equal(simulator.at(20).get(1)?.getAttackTarget(), undefined)
 })
 
 test('an attacker that dies stops going after its target, and does not go back to it when it respawns', () => {
   const simulator = createSimulator([{ id: 'attack-1', seq: 1, tick: 1, type: 'attack', targetId: 2 }])
-  assert.equal(simulator.addDeath(1, { tick: 20, respawnTick: 80 }), true)
+  killAt(simulator, 1, 20)
+  const respawn = 20 + GAME_RESPAWN_TICKS
 
   assert.equal(simulator.at(19).get(1)?.getAttackTarget(), 2)
   const hurtAtDeath = simulator.at(19).get(2)?.getHealth()
   assert.ok((hurtAtDeath ?? 1000) < 1000, 'it had been hitting its target')
   assert.equal(simulator.at(20).get(1)?.getAttackTarget(), undefined)
-  assert.equal(simulator.at(79).get(2)?.getHealth(), hurtAtDeath, 'nothing lands while it is dead')
-  assert.equal(simulator.at(80).get(1)?.isDead(), false)
-  assert.equal(simulator.at(80).get(1)?.getAttackTarget(), undefined)
-  assert.equal(simulator.at(200).get(2)?.getHealth(), hurtAtDeath, 'and it never swings again')
+  assert.equal(simulator.at(respawn - 1).get(2)?.getHealth(), hurtAtDeath, 'nothing lands while it is dead')
+  assert.equal(simulator.at(respawn).get(1)?.isDead(), false)
+  assert.equal(simulator.at(respawn).get(1)?.getAttackTarget(), undefined)
+  assert.equal(simulator.at(respawn + 120).get(2)?.getHealth(), hurtAtDeath, 'and it never swings again')
 })
 
-test('a dead character respawns at its start with full health', () => {
+test('a dead character respawns at its start with full health when the respawn time is up', () => {
   const simulator = createKillSimulator()
-  simulator.at(12)
-  simulator.addDeath(2, { tick: 14, respawnTick: 44 })
   simulator.addOrder(2, { id: 'move-1', seq: 1, tick: 13, type: 'move', target: { x: 700, y: 100 } })
+  const respawn = 10 + GAME_RESPAWN_TICKS
 
-  const respawned = simulator.at(44).get(2)
+  assert.equal(simulator.at(respawn - 1).get(2)?.isDead(), true)
+  const respawned = simulator.at(respawn).get(2)
   assert.equal(respawned?.isDead(), false)
   assert.equal(respawned?.getHealth(), 1000)
   assert.deepEqual(respawned?.getPosition(), { x: 140, y: 100 })
-  assert.deepEqual(simulator.at(46).get(2)?.getPosition(), { x: 140, y: 100 })
+  assert.deepEqual(simulator.at(respawn + 2).get(2)?.getPosition(), { x: 140, y: 100 })
 })
 
-test('a death is rejected when it overlaps another or is too old to schedule', () => {
+test('a death is confirmed, and its kill counted, only once the commit tick passes it', () => {
   const simulator = createKillSimulator()
-  for (let tick = 1; tick <= 30; tick += 1) simulator.at(tick)
+  const confirmed: DeathRecord[] = []
+  simulator.onDeathConfirmed = (death) => confirmed.push(death)
+  simulator.advanceTo(15)
 
-  assert.equal(simulator.addDeath(2, { tick: 5, respawnTick: 40 }), false)
-  assert.equal(simulator.addDeath(2, { tick: 32, respawnTick: 32 }), false)
-  assert.equal(simulator.addDeath(2, { tick: 32, respawnTick: 60 }), true)
-  assert.equal(simulator.addDeath(2, { tick: 40, respawnTick: 70 }), false)
+  simulator.setCommitTick(9)
+  assert.deepEqual(confirmed, [], 'a late order could still save it')
+  assert.equal(simulator.characters.get(1)?.kills, 0)
+
+  simulator.setCommitTick(10)
+  assert.deepEqual(confirmed, [{ tick: 10, victimId: 2, killerId: 1 }])
+  assert.equal(simulator.characters.get(1)?.kills, 1)
+  simulator.setCommitTick(15)
+  assert.equal(confirmed.length, 1, 'told of once')
+  assert.equal(simulator.characters.get(1)?.kills, 1)
+  assert.equal(simulator.characters.get(2)?.kills, 0)
 })
 
-test('snapshots carry pending deaths so a resync cannot lose one', () => {
-  const original = createKillSimulator()
-  original.advanceTo(12)
-  original.addDeath(2, { tick: 20, respawnTick: 80 })
-  original.advanceTo(15)
-  original.setCommitTick(3)
-  const snapshot = original.snapshot()
-  assert.deepEqual(snapshot.characters.find(({ id }) => id === 2)?.deaths, [{ tick: 20, respawnTick: 80 }])
+test('a death that a late order undoes is never confirmed', () => {
+  const simulator = createKillSimulator()
+  const confirmed: DeathRecord[] = []
+  simulator.onDeathConfirmed = (death) => confirmed.push(death)
+  assert.equal(simulator.at(12).get(2)?.isDead(), true, 'it looks dead for now')
+
+  assert.equal(simulator.removeOrder(1, 1), true, 'the order that attacked it turns out never to have been given')
+  simulator.advanceTo(30)
+  simulator.setCommitTick(30)
+
+  assert.equal(simulator.at(30).get(2)?.isDead(), false)
+  assert.deepEqual(confirmed, [])
+  assert.equal(simulator.characters.get(1)?.kills, 0)
+})
+
+test('snapshots carry the kills that can no longer be undone, and a checkpoint confirms the deaths up to it', () => {
+  const server = createKillSimulator()
+  server.advanceTo(15)
+  server.setCommitTick(15)
+  const snapshot = server.snapshot()
+  assert.deepEqual(snapshot.characters.map(({ id, kills }) => [id, kills]), [[1, 1], [2, 0]])
   assert.equal(GameSnapshotSchema.safeParse(snapshot).success, true)
 
-  const restored = new Simulator()
-  restored.replaceFromSnapshot(snapshot)
+  // A client that has predicted the death but has not heard the commit tick reach it yet.
+  const client = createKillSimulator()
+  const confirmed: DeathRecord[] = []
+  client.onDeathConfirmed = (death) => confirmed.push(death)
+  client.advanceTo(15)
+  assert.deepEqual(confirmed, [])
 
-  assert.equal(restored.at(20).get(2)?.isDead(), true)
-  assert.equal(restored.at(80).get(2)?.isDead(), false)
-  assert.deepEqual(restored.at(80).get(2)?.getPosition(), { x: 140, y: 100 })
+  client.replaceFromSnapshot(snapshot)
+  assert.deepEqual(confirmed, [{ tick: 10, victimId: 2, killerId: 1 }])
+  assert.equal(client.characters.get(1)?.kills, 1, 'the snapshot has the count, so it is not counted twice')
+  assert.equal(client.at(15).get(2)?.isDead(), true, 'and the checkpoint holds the death')
+
+  client.advanceTo(20)
+  client.setCommitTick(20)
+  assert.equal(confirmed.length, 1)
+  assert.equal(client.characters.get(1)?.kills, 1)
+  assert.equal(client.at(20).get(2)?.isDead(), true)
+  assert.equal(client.at(10 + GAME_RESPAWN_TICKS).get(2)?.isDead(), false, 'it still respawns on time')
 })
 
 test('ring buffer rejects corrections older than retained state', () => {

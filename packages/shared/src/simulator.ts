@@ -5,6 +5,7 @@ import {
   GAME_BURN_PULSE_TICKS,
   GAME_CAST_ORIGIN_TOLERANCE,
   GAME_COLLISION_STIFFNESS,
+  GAME_RESPAWN_TICKS,
   GAME_SNAPSHOT_HISTORY_TICKS,
   GAME_TPS,
 } from './constants.js'
@@ -23,7 +24,6 @@ import type {
   CastTarget,
   CharacterOrder,
   GameAttackOrder,
-  GameDeathTiming,
   GameCharacterSnapshot,
   GameFrame,
   GameFrameAction,
@@ -38,6 +38,14 @@ import type {
 
 const DIRECTION_LENGTH_TOLERANCE = 0.01
 
+// A character dying: the tick it died on, who it was, and who did the damage that took its last
+// health (nobody, if it was its own).
+export type DeathRecord = {
+  tick: number
+  victimId: number
+  killerId?: number
+}
+
 // A step of a dash that has effects of its own: where it started from this tick, what the dash
 // carries (and the enemies it has touched so far), and whether this step finished it.
 type DashStep = {
@@ -49,8 +57,9 @@ type DashStep = {
 
 export class SimCharacter {
   readonly orders: CharacterOrder[]
-  // Server-confirmed deaths; each one also names the tick the character respawns.
-  readonly deaths: GameDeathTiming[]
+  // The deaths it has caused that can no longer be undone, which are the ones at or before the
+  // commit tick. A death after it may still be undone by an order that has not arrived yet.
+  kills: number
   private lastOrderSequence: number
 
   constructor(
@@ -60,13 +69,13 @@ export class SimCharacter {
     readonly champion: Champion,
     readonly player?: GameCharacterSnapshot['player'],
     highestOrderSequence = 0,
-    deaths: GameDeathTiming[] = [],
+    kills = 0,
     // Characters on the same team are teammates. By default each is on a team of its own, so
     // everyone is an enemy of everyone else.
     readonly team: number = id,
   ) {
     this.orders = orders.map(cloneOrder).sort(compareCharacterOrders)
-    this.deaths = deaths.map((death) => ({ ...death })).sort((left, right) => left.tick - right.tick)
+    this.kills = kills
     this.lastOrderSequence = Math.max(
       highestOrderSequence,
       ...this.orders.map((order) => order.seq),
@@ -86,7 +95,7 @@ export class SimCharacter {
       id: this.id,
       initialPosition: { ...this.initialPosition },
       orders: this.orders.map(cloneOrder),
-      deaths: this.deaths.map((death) => ({ ...death })),
+      kills: this.kills,
       highestOrderSequence: this.highestOrderSequence,
       championId: this.champion.id,
       team: this.team,
@@ -184,6 +193,8 @@ export class GameTickSnapshot {
     frame: GameFrame,
     // Events emitted while computing this tick; empty for restored checkpoints.
     readonly events: readonly GameEvent[] = [],
+    // The characters that died on this tick; empty for restored checkpoints.
+    readonly deaths: readonly DeathRecord[] = [],
   ) {
     this.characterStates = new Map(frame.characters.map((character) => [
       character.characterId,
@@ -378,8 +389,14 @@ export class Simulator {
   private readonly frameBuffer: Array<GameTickSnapshot | undefined> =
     new Array(GAME_SNAPSHOT_HISTORY_TICKS)
   private latestComputedTick = 0
+  // Deaths on ticks after the commit tick, as the frames now stand. They move to the killers' tallies
+  // when the commit tick reaches them, and are dropped with the frames when an order undoes them.
+  private readonly pendingDeaths = new Map<number, readonly DeathRecord[]>()
   tick = 0
   commitTick = 0
+  // Told of each death as it can no longer be undone: the commit tick has reached it, so no order
+  // that could save the character can still arrive.
+  onDeathConfirmed: ((death: DeathRecord) => void) | undefined
 
   get latestSnapshotTick(): number {
     return this.latestComputedTick
@@ -405,7 +422,7 @@ export class Simulator {
       champion,
       { playerId, name },
       0,
-      [],
+      0,
       team,
     )
     this.characters.set(id, character)
@@ -425,20 +442,6 @@ export class Simulator {
     character.orders.sort((left, right) => compareCharacterOrders(left, right, character, character))
     character.recordOrderSequence(order.seq)
     this.invalidateFrom(order.tick)
-    return true
-  }
-
-  // Schedules a server-confirmed death. Nothing else kills a character: reaching 0 health
-  // leaves it alive until the server's message arrives.
-  addDeath(characterId: number, death: GameDeathTiming): boolean {
-    const character = this.characters.get(characterId)
-    if (!character || death.tick <= this.commitTick || death.respawnTick <= death.tick) return false
-    if (death.tick <= this.latestComputedTick && !this.getCachedFrame(death.tick - 1)) return false
-    if (character.deaths.some((existing) =>
-      death.tick < existing.respawnTick && existing.tick < death.respawnTick)) return false
-    character.deaths.push({ ...death })
-    character.deaths.sort((left, right) => left.tick - right.tick)
-    this.invalidateFrom(death.tick)
     return true
   }
 
@@ -468,6 +471,9 @@ export class Simulator {
     const previous = this.at(tick - 1)
     const frame = this.computeFrame(tick, previous)
     this.storeFrame(frame)
+    if (frame.deaths.length > 0) this.pendingDeaths.set(tick, frame.deaths)
+    // A frame computed after its tick was committed is already beyond undoing.
+    if (tick <= this.commitTick) this.confirmDeathsUpTo(this.commitTick)
     return frame
   }
 
@@ -483,9 +489,23 @@ export class Simulator {
         index += 1
       }
       character.orders.splice(0, index)
-      // The checkpoint frame already holds a finished death; keep one until it respawns.
-      while (character.deaths.length > 0 && character.deaths[0].respawnTick < tick) {
-        character.deaths.shift()
+    }
+    this.confirmDeathsUpTo(tick)
+  }
+
+  // Credits the kills of the deaths up to `tick`, oldest first, and tells `onDeathConfirmed` of each.
+  private confirmDeathsUpTo(tick: number): void {
+    const confirmed = [...this.pendingDeaths]
+      .filter(([deathTick]) => deathTick <= tick)
+      .sort(([left], [right]) => left - right)
+    for (const [deathTick, deaths] of confirmed) {
+      this.pendingDeaths.delete(deathTick)
+      for (const death of deaths) {
+        if (death.killerId !== undefined) {
+          const killer = this.characters.get(death.killerId)
+          if (killer) killer.kills += 1
+        }
+        this.onDeathConfirmed?.({ ...death })
       }
     }
   }
@@ -520,9 +540,6 @@ export class Simulator {
         orders: character.orders
           .filter((order) => order.tick > this.commitTick)
           .map(cloneOrder),
-        deaths: character.deaths
-          .filter((death) => death.respawnTick > this.commitTick)
-          .map((death) => ({ ...death })),
       })),
       checkpoint: checkpoint.toData(),
     }
@@ -536,6 +553,12 @@ export class Simulator {
       throw new RangeError('Snapshot checkpoint must match its commit tick and not exceed its current tick.')
     }
     const champions = snapshot.characters.map((character) => getChampion(character.championId))
+    // The deaths up to the checkpoint that this simulator had not yet seen confirmed are confirmed by
+    // it now (their kills are already in the snapshot's tallies). Later ones are worked out again.
+    const confirmedByCheckpoint = [...this.pendingDeaths]
+      .filter(([deathTick]) => deathTick <= snapshot.commitTick)
+      .sort(([left], [right]) => left - right)
+    this.pendingDeaths.clear()
     this.characters.clear()
     this.commitTick = snapshot.commitTick
     snapshot.characters.forEach((character, index) => {
@@ -546,10 +569,13 @@ export class Simulator {
         champions[index],
         character.player,
         character.highestOrderSequence,
-        character.deaths,
+        character.kills,
         character.team,
       ))
     })
+    for (const [, deaths] of confirmedByCheckpoint) {
+      for (const death of deaths) this.onDeathConfirmed?.({ ...death })
+    }
     this.frameBuffer.fill(undefined)
     this.latestComputedTick = snapshot.commitTick
     this.storeFrame(new GameTickSnapshot(snapshot.checkpoint.tick, snapshot.checkpoint))
@@ -584,9 +610,9 @@ export class Simulator {
       }
       state.statuses = state.statuses.filter((status) => status.endTick > tick)
       state.markers = state.markers.filter((marker) => marker.endTick > tick)
-      for (const death of character.deaths) {
-        if (death.tick === tick) killCharacter(state, tick)
-        if (death.respawnTick === tick) respawnCharacter(character, state, tick)
+      // A dead character comes back a fixed time after the tick it died on.
+      if (state.health?.deathTick !== undefined && tick === state.health.deathTick + GAME_RESPAWN_TICKS) {
+        respawnCharacter(character, state, tick)
       }
       states.set(characterId, state)
     }
@@ -669,13 +695,13 @@ export class Simulator {
     for (const state of states.values()) {
       if (state.action && state.action.endTick <= tick) state.action = undefined
     }
-    this.applyWrites(context, states, entities, tick)
+    const deaths = this.applyWrites(context, states, entities, tick)
 
     return new GameTickSnapshot(tick, {
       tick,
       characters: [...states.values()].sort((left, right) => left.characterId - right.characterId),
       entities,
-    }, context.events)
+    }, context.events, deaths)
   }
 
   // A dash with effects of its own: every enemy its body reached on this tick's step, each once for
@@ -1143,7 +1169,7 @@ export class Simulator {
     states: ReadonlyMap<number, GameFrameCharacter>,
     entities: SimEntity[],
     tick: number,
-  ): void {
+  ): DeathRecord[] {
     for (const { unitId, status } of context.statusWrites) {
       const state = states.get(unitId)
       if (!state || !isAlive(state)) continue
@@ -1185,10 +1211,16 @@ export class Simulator {
         ...(contact ? { contact: { ...contact, origin: { ...contact.origin }, hitIds: [] } } : {}),
       }
     }
+    // Who did the damage that took each character's last health.
+    const killers = new Map<number, number>()
     for (const event of context.events) {
       if (event.type === 'damage') {
         const state = states.get(event.targetId)
-        if (state) applyDamage(state, event.amount, tick)
+        if (state) {
+          const hadHealth = (state.health?.hp ?? 0) > 0
+          applyDamage(state, event.amount, tick)
+          if (hadHealth && state.health?.hp === 0) killers.set(event.targetId, event.ownerId)
+        }
       } else if (event.type === 'lose-health') {
         const health = states.get(event.unitId)?.health
         if (health && health.deathTick === undefined && health.hp > 1) {
@@ -1229,6 +1261,20 @@ export class Simulator {
         if (state) state.nextAttackTick = Math.min(state.nextAttackTick, tick)
       }
     }
+    // Whoever the tick's damage left with no health dies on this tick, before anything else can
+    // act for it.
+    const deaths: DeathRecord[] = []
+    for (const state of [...states.values()].sort((left, right) => left.characterId - right.characterId)) {
+      const health = state.health
+      if (!health || health.deathTick !== undefined || health.hp > 0) continue
+      const killerId = killers.get(state.characterId)
+      killCharacter(state, tick)
+      deaths.push({
+        tick,
+        victimId: state.characterId,
+        ...(killerId !== undefined && killerId !== state.characterId ? { killerId } : {}),
+      })
+    }
     // A blink lands after the tick's damage and pushes but before anything else can move the unit,
     // so the next frame has it at the point.
     for (const { unitId, target } of context.blinkWrites) {
@@ -1252,6 +1298,7 @@ export class Simulator {
       if (!state) continue
       state.queuedOrders.push({ ...order, tick: Math.max(order.tick, tick + 1) })
     }
+    return deaths
   }
 
   private createInitialFrame(): GameTickSnapshot {
@@ -1299,6 +1346,9 @@ export class Simulator {
       this.resetFrameHistory()
       return
     }
+    for (const deathTick of this.pendingDeaths.keys()) {
+      if (deathTick >= tick) this.pendingDeaths.delete(deathTick)
+    }
     for (let frameTick = tick; frameTick <= this.latestComputedTick; frameTick += 1) {
       const slot = frameTick % this.frameBuffer.length
       if (this.frameBuffer[slot]?.tick === frameTick) this.frameBuffer[slot] = undefined
@@ -1307,6 +1357,7 @@ export class Simulator {
   }
 
   private resetFrameHistory(): void {
+    this.pendingDeaths.clear()
     this.frameBuffer.fill(undefined)
     this.latestComputedTick = 0
     this.storeFrame(this.createInitialFrame())
@@ -1359,7 +1410,7 @@ function applyDamage(state: GameFrameCharacter, amount: number, tick: number): v
   health.finalizedTick = tick
 }
 
-// Reaching 0 health does not kill: only the server's confirmed death does.
+// Whoever has no health left is dead: it stops what it was doing and is a ghost until it respawns.
 function killCharacter(state: GameFrameCharacter, tick: number): void {
   const health = state.health
   if (!health || health.deathTick !== undefined) return

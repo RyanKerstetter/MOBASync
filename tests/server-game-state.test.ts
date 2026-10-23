@@ -4,16 +4,13 @@ import { ServerGameState } from '../apps/server/src/game-state.ts'
 import {
   Champion,
   FINALIZE_LAG,
-  GAME_DEATH_LEAD_TICKS,
   GAME_ARENA_HEIGHT,
   GAME_ARENA_WIDTH,
   GAME_MAX_PLAYERS,
-  GAME_RESPAWN_TICKS,
   GAME_SPAWN_MARGIN,
   GAME_SPAWN_RADIUS,
   GAME_SPAWN_TEAMMATE_SPACING,
   GAME_TPS,
-  type GameDeath,
 } from '../packages/shared/src/index.ts'
 import { brawler, cursebearer, trinketmaster } from './fixtures.ts'
 
@@ -170,7 +167,7 @@ test('a full lobby picks, loads and starts together, with every character in its
   assert.equal(spots.size, GAME_MAX_PLAYERS, 'nobody starts on top of anybody')
 })
 
-test('server announces a death once, only after the lethal tick is committed', () => {
+test('the server counts a kill once the lethal tick is committed, and has no death to announce', () => {
   const game = new ServerGameState()
   startGame(game, [{ id: 'player-1', name: 'Player 1' }], brawler.id)
   const targetId = game.getCharacterId('player-1')
@@ -190,24 +187,22 @@ test('server announces a death once, only after the lethal tick is committed', (
     })
   }
 
-  const announced: Array<{ at: number; death: GameDeath }> = []
-  let healthAtLethalTick: number | undefined
+  let creditedAt: number | undefined
   for (let tick = 1; tick <= 30; tick += 1) {
-    for (const death of game.advanceTick()) announced.push({ at: tick, death })
-    if (tick === hitsToKill + 1) healthAtLethalTick = game.simulator.at(hitsToKill).get(targetId)?.getHealth()
+    game.advanceTick()
+    if (creditedAt === undefined && game.simulator.characters.get(99)?.kills === 1) creditedAt = tick
   }
 
-  // The target reaches 0 health on the last hit and that tick is committed FINALIZE_LAG later.
-  assert.equal(healthAtLethalTick, 0)
-  assert.equal(announced.length, 1)
-  const { at, death } = announced[0]
-  assert.equal(at, hitsToKill + FINALIZE_LAG)
-  assert.deepEqual(death, {
-    characterId: targetId,
-    tick: at + GAME_DEATH_LEAD_TICKS,
-    respawnTick: at + GAME_DEATH_LEAD_TICKS + GAME_RESPAWN_TICKS,
-  })
-  assert.equal(game.simulator.at(death.tick).get(targetId)?.isDead(), true)
+  // The target dies on the lethal hit, which can still be undone by a late order until that tick is
+  // committed FINALIZE_LAG later. Only then is the kill the attacker's, and nothing is sent to anyone.
+  const deathTick = game.simulator.at(30).get(targetId)?.getDeathTick()
+  assert.ok(deathTick !== undefined && deathTick <= hitsToKill + 1)
+  assert.equal(creditedAt, deathTick + FINALIZE_LAG)
+  assert.equal(game.simulator.at(30).get(targetId)?.isDead(), true)
+  assert.deepEqual(
+    game.snapshot().characters.map(({ id, kills }) => [id, kills]).sort(([left], [right]) => left - right),
+    [[targetId, 0], [99, 1]],
+  )
 })
 
 test('the server accepts the recast of an ability the champion has, and still refuses ones it does not', () => {

@@ -2,15 +2,12 @@ import {
   champions,
   DEFAULT_CHAMPION_ID,
   FINALIZE_LAG,
-  GAME_DEATH_LEAD_TICKS,
   GAME_ORDER_VERDICT_RETENTION_MS,
-  GAME_RESPAWN_TICKS,
   GameStatusSchema,
   getChampion,
   Simulator,
   teamSpawnPositions,
   type GameBroadcastOrder,
-  type GameDeath,
   type GameOrder,
   type GameOrderAck,
   type GameSnapshot,
@@ -142,32 +139,12 @@ export class ServerGameState {
     return this.simulator.snapshot()
   }
 
-  // Returns the deaths confirmed this tick; the caller announces them to the players.
-  advanceTick(): GameDeath[] {
+  advanceTick(): void {
     this.simulator.advanceTo(this.simulator.tick + 1)
     const commitTick = Math.max(0, this.simulator.tick - FINALIZE_LAG)
     if (commitTick > this.simulator.commitTick) {
       this.simulator.setCommitTick(commitTick)
     }
-    return this.confirmDeaths()
-  }
-
-  // A character at 0 health on a committed tick can no longer be saved by a late order, so
-  // its death is definitive. It takes effect a few ticks ahead so every client can still
-  // receive the message before the tick it names.
-  private confirmDeaths(): GameDeath[] {
-    const commitTick = this.simulator.commitTick
-    const committed = this.simulator.at(commitTick)
-    const deaths: GameDeath[] = []
-    for (const character of this.simulator.characters.values()) {
-      const health = committed.get(character.id)?.getHealthState()
-      if (!health || health.hp > 0 || health.deathTick !== undefined) continue
-      if (character.deaths.some((death) => death.respawnTick > commitTick)) continue
-      const tick = this.simulator.tick + GAME_DEATH_LEAD_TICKS
-      const timing = { tick, respawnTick: tick + GAME_RESPAWN_TICKS }
-      if (this.simulator.addDeath(character.id, timing)) deaths.push({ characterId: character.id, ...timing })
-    }
-    return deaths
   }
 
   getCharacterId(playerId: string): number | undefined {

@@ -574,9 +574,7 @@ function runGameTick(): void {
   const now = performance.now()
   for (const lobby of lobbies.values()) {
     if (lobby.game.status === 'running') {
-      for (const death of lobby.game.advanceTick()) {
-        emitToRoom(lobby.code, 'game:death', death, { reliable: true })
-      }
+      lobby.game.advanceTick()
     }
   }
 

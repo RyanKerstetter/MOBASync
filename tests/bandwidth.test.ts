@@ -16,14 +16,14 @@ test('a plain message counts as its size, to each player it goes to', () => {
 test('a reliable message counts as many times as Geckos sends it, 10 unless it says otherwise, and its wrapper', () => {
   const meter = new BandwidthMeter()
   meter.record('game:snapshot', 6000, { reliable: true }, 2)
-  meter.record('game:death', 100, { reliable: true, runs: 3 })
+  meter.record('game:resync', 100, { reliable: true, runs: 3 })
 
   const report = meter.flush(1000)
   assert.ok(report)
   const byEvent = Object.fromEntries(report.events.map((entry) => [entry.event, entry]))
   assert.equal(byEvent['game:snapshot'].bytesPerSecond, (6000 + 40) * 10 * 2)
   assert.equal(byEvent['game:snapshot'].copies, 10)
-  assert.equal(byEvent['game:death'].bytesPerSecond, (100 + 40) * 3)
+  assert.equal(byEvent['game:resync'].bytesPerSecond, (100 + 40) * 3)
 })
 
 test('the report is a rate over the time given, busiest first, and counting starts again after it', () => {

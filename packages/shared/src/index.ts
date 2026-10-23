@@ -80,17 +80,6 @@ export const GameHealthStatsSchema = z.object({
 
 export const CharacterOrderSchema = GameOrderSchema
 
-// Deaths are authoritative inputs: the server confirms one, and every simulator applies
-// it at the named tick instead of deriving it from health.
-export const GameDeathTimingSchema = z.object({
-  tick: TickSchema,
-  respawnTick: TickSchema,
-})
-
-export const GameDeathSchema = GameDeathTimingSchema.extend({
-  characterId: z.number().int().positive(),
-})
-
 export const GameOrderAckSchema = z.object({
   id: z.string().min(1).max(160),
   seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
@@ -125,7 +114,8 @@ export const GameCharacterSchema = z.object({
   id: z.number().int().positive(),
   initialPosition: Vector2Schema,
   orders: z.array(CharacterOrderSchema),
-  deaths: z.array(GameDeathTimingSchema).default([]),
+  // Kills made up to the snapshot's commit tick: the ones that can no longer be undone.
+  kills: z.number().int().nonnegative().default(0),
   highestOrderSequence: TickSchema,
   championId: z.string().min(1).max(64),
   // Who it is on. Characters with the same team are teammates; anyone else is an enemy.
@@ -286,8 +276,6 @@ export type GameAttack = z.infer<typeof GameAttackSchema>
 export type GameCast = z.infer<typeof GameCastSchema>
 export type GameBroadcastOrder = z.infer<typeof GameBroadcastOrderSchema>
 export type GameHealthStats = z.infer<typeof GameHealthStatsSchema>
-export type GameDeathTiming = z.infer<typeof GameDeathTimingSchema>
-export type GameDeath = z.infer<typeof GameDeathSchema>
 export type GameFrame = z.infer<typeof GameFrameSchema>
 export type GameFrameCharacter = z.infer<typeof GameFrameCharacterSchema>
 export type GameFrameMovement = z.infer<typeof GameFrameMovementSchema>
@@ -397,6 +385,7 @@ export {
   SimCharacter,
   Simulator,
 } from './simulator.js'
+export type { DeathRecord } from './simulator.js'
 export { ReliableMessenger, parseIdentifiedMessage } from './reliable-messages.js'
 export type { IdentifiedMessage } from './reliable-messages.js'
 export { lagConfigFromQuery, noLag, withLag } from './lag-simulator.js'
