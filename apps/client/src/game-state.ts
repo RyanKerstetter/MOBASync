@@ -1,11 +1,12 @@
 import type { ActionView } from './animation.ts'
+import { hillFraction, rankScores, type FlagView, type ModeView } from './ui/mode-hud.ts'
 import {
   leaderboardRows,
   visibleKillFeed,
   type KillFeedEntry,
   type KillFeedPerson,
   type LeaderboardRow,
-} from './scoreboard.ts'
+} from './ui/scoreboard.ts'
 import {
   GAME_REMOTE_CATCHUP_EASE_TICKS,
   GAME_REMOTE_CATCHUP_MAX_SPEED_MULTIPLIER,
@@ -17,6 +18,11 @@ import {
   getAbilityDef,
   getEntityDef,
   entityPosAt,
+  hillCaptureTicks,
+  hillLeader,
+  hillMovement,
+  hillOwner,
+  hillPresence,
   meetsRequirement,
   quantizeDirection,
   Simulator,
@@ -40,7 +46,10 @@ import {
   type GameSnapshot,
   type Marker,
   type MoveOrder,
+  type SimCharacter,
+  type ObjectiveUnit,
   type SimEntity,
+  type Status,
   type Vector2,
 } from '../../../packages/shared/src/index.ts'
 
@@ -49,9 +58,24 @@ export type TrackedOrder = {
   sentAt: number
 }
 
+// What a monster is doing, for the debug view and whatever else wants to show it: how far it notices and gives up, where
+// home is, and what it is up to.
+export type RenderedMonster = {
+  aggroRange: number
+  deaggroRange: number
+  leashRange: number
+  home: Vector2
+  mode: 'idle' | 'chase' | 'return'
+  targetId?: number
+}
+
 export type RenderedCharacter =
   Pick<GameCharacterSnapshot, 'id' | 'player'>
   & {
+    // What to call it: a player's name, or a monster's.
+    name?: string
+    // Present for a monster.
+    monster?: RenderedMonster
     champion: Champion
     // Who it is on: the same team is teammates, and it decides the colour it is drawn in.
     team: number
@@ -112,6 +136,15 @@ export type CastPreview = {
   target?: CastTarget
   // A unit ability aimed at an enemy beyond its range: the target is shown, but it would not cast.
   outOfRange?: boolean
+}
+
+// What a character is called: a player's name, or a monster's.
+function characterName(character: SimCharacter): string {
+  return character.player?.name ?? character.monster?.name ?? `Player ${character.id}`
+}
+
+function hasStatus(statuses: readonly Status[], kind: Status['kind']): boolean {
+  return statuses.some((status) => status.kind === kind)
 }
 
 function countMarkers(markers: readonly Marker[]): Record<string, number> {
@@ -276,20 +309,7 @@ export class ClientGameState {
     if (this.localCharacterId === undefined || !this.simulator.characters.has(this.localCharacterId)) {
       return undefined
     }
-    const character = this.simulator.characters.get(this.localCharacterId)
-    if (!character) return undefined
-    const seq = this.nextOrderSequence
-    const order: MoveOrder = {
-      id: `${this.localCharacterId}:${seq}`,
-      seq,
-      tick: this.nextOrderTick(now),
-      type: 'move',
-      target: { ...target },
-    }
-    this.nextOrderSequence += 1
-    if (!this.simulator.addOrder(this.localCharacterId, order)) return undefined
-    this.trackOrder(order, now)
-    return order
+    return this.issueOrder<MoveOrder>({ tick: this.nextOrderTick(now), type: 'move', target: { ...target } }, now)
   }
 
   createAttackOrder(targetId: number, now = performance.now()): GameAttackOrder | undefined {
@@ -298,19 +318,7 @@ export class ClientGameState {
       || !this.simulator.characters.has(this.localCharacterId)
       || !this.simulator.characters.has(targetId)
     ) return undefined
-
-    const seq = this.nextOrderSequence
-    const order: GameAttackOrder = {
-      id: `${this.localCharacterId}:${seq}`,
-      seq,
-      tick: this.nextOrderTick(now),
-      targetId,
-      type: 'attack',
-    }
-    this.nextOrderSequence += 1
-    if (!this.simulator.addOrder(this.localCharacterId, order)) return undefined
-    this.trackOrder(order, now)
-    return order
+    return this.issueOrder<GameAttackOrder>({ tick: this.nextOrderTick(now), type: 'attack', targetId }, now)
   }
 
   // Aim is in arena coordinates. The ability is resolved from the slot now, so
@@ -334,22 +342,8 @@ export class ClientGameState {
     if (!aimed.ok) return { ok: false, reason: aimed.reason }
     const { target } = aimed
 
-    const seq = this.nextOrderSequence
-    const order: CastOrder = {
-      id: `${localCharacterId}:${seq}`,
-      seq,
-      tick,
-      type: 'cast',
-      abilityId: def.id,
-      target,
-      origin,
-    }
-    this.nextOrderSequence += 1
-    if (!this.simulator.addOrder(localCharacterId, order)) {
-      return { ok: false, reason: 'The cast could not be scheduled.' }
-    }
-    this.trackOrder(order, now)
-    return { ok: true, order }
+    const order = this.issueOrder<CastOrder>({ tick, type: 'cast', abilityId: def.id, target, origin }, now)
+    return order ? { ok: true, order } : { ok: false, reason: 'The cast could not be scheduled.' }
   }
 
   // Whether the ability in a slot has something to aim; a self-cast does not. A key that has
@@ -382,8 +376,8 @@ export class ClientGameState {
   ): string | undefined {
     if (!state.getAbilityCooldown(def.id).ready) return `${def.id} is on cooldown.`
     const statuses = state.getStatuses()
-    if (statuses.some((status) => status.kind === 'stun')) return 'You cannot cast while stunned.'
-    if (statuses.some((status) => status.kind === 'silence')) return 'You cannot cast while silenced.'
+    if (hasStatus(statuses, 'stun')) return 'You cannot cast while stunned.'
+    if (hasStatus(statuses, 'silence')) return 'You cannot cast while silenced.'
     if (!meetsRequirement(def, entityOut, (abilityId) => !state.getAbilityCooldown(abilityId).ready) && def.requires) {
       const base = def.requires.out
         ? `${def.id} needs your ${def.requires.entity} out`
@@ -404,7 +398,12 @@ export class ClientGameState {
   // Resolves the cast as createCastOrder would, without issuing anything. It is called every
   // frame, so it reads the frame being drawn rather than the next order's tick: reading ahead
   // would advance the simulation a tick per frame and stamp later orders in the future.
-  getCastPreview(slot: number, aim: Vector2, now = performance.now()): CastPreview | undefined {
+  getCastPreview(
+    slot: number,
+    aim: Vector2,
+    now = performance.now(),
+    characters?: readonly RenderedCharacter[],
+  ): CastPreview | undefined {
     const ability = this.abilityInSlot(slot)
     if (!ability.ok) return undefined
     const { localCharacterId } = ability
@@ -412,7 +411,7 @@ export class ClientGameState {
     const def = abilityOnKey(ability.def, this.entityOut(frame, localCharacterId))
     const origin = frame.get(localCharacterId)?.getPosition()
     if (!origin) return undefined
-    const aimed = this.castTarget(def, origin, aim, now, frame)
+    const aimed = this.castTarget(def, origin, aim, now, frame, characters)
     const shown = aimed.ok ? aimed.target : aimed.outOfRange
     return {
       abilityId: def.id,
@@ -445,6 +444,7 @@ export class ClientGameState {
     aim: Vector2,
     now: number,
     frame: GameTickSnapshot,
+    characters?: readonly RenderedCharacter[],
   ): { ok: true; target: CastTarget } | { ok: false; reason: string; outOfRange?: CastTarget } {
     if (def.targeting === 'none') return { ok: true, target: { mode: 'none' } }
     if (def.targeting === 'point') {
@@ -464,7 +464,7 @@ export class ClientGameState {
       if (!dir) return { ok: false, reason: 'Aim away from your champion.' }
       return { ok: true, target: { mode: 'direction', dir } }
     }
-    const unit = this.getEnemyNear(aim, now)
+    const unit = this.getEnemyNear(aim, now, characters)
     if (!unit) return { ok: false, reason: `Aim ${def.id} at an enemy.` }
     const target: CastTarget = { mode: 'unit', unitId: unit.id }
     const unitAt = frame.get(unit.id)?.getPosition()
@@ -501,13 +501,16 @@ export class ClientGameState {
 
   // The enemy under a point: the click that attacks, and the aim of an ability aimed at a unit.
   // Teammates are never one, so clicking on one just walks there.
-  getEnemyNear(point: Vector2, now = performance.now()): RenderedCharacter | undefined {
+  getEnemyNear(
+    point: Vector2,
+    now = performance.now(),
+    characters: readonly RenderedCharacter[] = this.getCharacters(now),
+  ): RenderedCharacter | undefined {
     const localTeam = this.localCharacterId === undefined
       ? undefined
       : this.simulator.characters.get(this.localCharacterId)?.team
-    return this.getCharacters(now)
+    return characters
       .filter((character) => character.id !== this.localCharacterId
-        && character.player
         && !character.dead
         && character.team !== localTeam)
       .map((character) => ({
@@ -518,15 +521,17 @@ export class ClientGameState {
       .sort((left, right) => left.distance - right.distance)[0]?.character
   }
 
-  getClosestEnemyInRange(now = performance.now()): RenderedCharacter | undefined {
+  // The living enemy nearest the local champion, however far away: the one Space attacks. One out of
+  // reach is walked up to and attacked, as when it is clicked.
+  getClosestEnemy(now = performance.now()): RenderedCharacter | undefined {
     if (this.localCharacterId === undefined) return undefined
     const characters = this.getCharacters(now)
     const local = characters.find((character) => character.id === this.localCharacterId)
     if (!local) return undefined
     let closest: RenderedCharacter | undefined
-    let closestDistance = local.attackRange
+    let closestDistance = Infinity
     for (const character of characters) {
-      if (!character.player || character.dead || character.team === local.team) continue
+      if (character.dead || character.team === local.team) continue
       const distance = Math.hypot(
         character.position.x - local.position.x,
         character.position.y - local.position.y,
@@ -543,20 +548,30 @@ export class ClientGameState {
     return this.localCharacterId
   }
 
+  // The team of the controlled champion, which the results are told from the point of view of.
+  getLocalTeam(): number | undefined {
+    return this.localCharacterId === undefined ? undefined : this.simulator.characters.get(this.localCharacterId)?.team
+  }
+
   // Who the local champion is going after: set by an attack order, and kept (through walking up to
   // them, and through every swing) until it moves, casts something with a windup, or the target goes.
+  // The way the controlled champion is walking, for the debug view: where it is, then each point of the
+  // path round the walls that it heads for, ending at where it is going. Nothing while it is not walking.
+  getLocalPath(now = performance.now()): Vector2[] | undefined {
+    const characterId = this.localCharacterId
+    const champion = characterId === undefined ? undefined : this.simulator.characters.get(characterId)?.champion
+    if (characterId === undefined || !champion) return undefined
+    const state = this.getSnapshotAtEstimatedTick(now).get(characterId)
+    const target = state?.getMoveTarget()
+    if (!state || !target || state.isDashing() || state.isDead()) return undefined
+    const from = state.getPosition()
+    const route = this.simulator.terrain.path(from, target, champion.radius)
+    return route && [from, ...route]
+  }
+
   getLocalAttackTarget(now = performance.now()): number | undefined {
     if (this.localCharacterId === undefined) return undefined
     return this.getSnapshotAtEstimatedTick(now).get(this.localCharacterId)?.getAttackTarget()
-  }
-
-  getLocalAttackRange(now = performance.now()): number | undefined {
-    const champion = this.localCharacterId === undefined
-      ? undefined
-      : this.simulator.characters.get(this.localCharacterId)?.champion
-    if (this.localCharacterId === undefined || !champion) return undefined
-    const statuses = this.getSnapshotAtEstimatedTick(now).get(this.localCharacterId)?.getStatuses() ?? []
-    return champion.attackRangeWith(statuses)
   }
 
   getAttackCooldownProgress(now = performance.now()): number {
@@ -574,22 +589,101 @@ export class ClientGameState {
   }
 
   applyOrder(order: GameBroadcastOrder): boolean {
-    const applied = this.applySimulationOrder(order.characterId, order)
-    return applied
+    return this.applySimulationOrder(order.characterId, order)
   }
 
   // Everyone's kills, most first. They count only deaths the commit tick has passed, which no late
   // order can undo any more, so a kill that is still a prediction is not on the board yet.
   getLeaderboard(): LeaderboardRow[] {
     return leaderboardRows(
-      [...this.simulator.characters.values()].map((character) => ({
+      [...this.simulator.characters.values()].filter((character) => !character.monster).map((character) => ({
         id: character.id,
-        name: character.player?.name ?? `Player ${character.id}`,
+        name: characterName(character),
         team: character.team,
         kills: character.kills,
       })),
       this.localCharacterId,
     )
+  }
+
+  // The score of each team, and for a game on the hill or with flags how they stand, as of the frame being
+  // drawn. All of it is the simulation's own, so it is as predicted as the champions on screen, and a late
+  // order that changes who was where, or who killed whom, changes it too. (The leaderboard, which counts
+  // each player's kills, shows only the kills that can no longer be undone.)
+  getModeView(now = performance.now()): ModeView {
+    const setup = this.simulator.mode
+    // Monsters are no team of the game: they hold no hill, have no score, and are on no scoreboard.
+    const characters = [...this.simulator.characters.values()].filter((character) => !character.monster)
+    const frame = this.getSnapshotAtEstimatedTick(now)
+    const objective = frame.getObjective()
+    const teamsInGame = (extra: readonly number[] = []): number[] =>
+      [...new Set([...characters.map((character) => character.team), ...extra])]
+    const pointsOf = (scores: Record<string, number>) => (team: number): number => scores[String(team)] ?? 0
+    const limit = setup.scoreLimit === undefined ? {} : { limit: setup.scoreLimit }
+
+    if (setup.kind === 'koth' && objective?.kind === 'koth') {
+      const units: ObjectiveUnit[] = characters.map((character) => ({
+        id: character.id,
+        team: character.team,
+        position: frame.get(character.id)?.getPosition() ?? character.initialPosition,
+        radius: character.champion.radius,
+        alive: frame.get(character.id)?.isDead() === false,
+      }))
+      const presence = hillPresence(setup.hill, units)
+      const leader = hillLeader(presence)
+      const captureTicks = hillCaptureTicks(setup)
+      const owner = hillOwner(objective, captureTicks)
+      return {
+        kind: 'koth',
+        scores: rankScores(teamsInGame(), pointsOf(objective.scores)),
+        ...limit,
+        hill: setup.hill,
+        fraction: hillFraction(objective.progress, captureTicks),
+        ...(objective.capturer !== undefined ? { capturer: objective.capturer } : {}),
+        ...(owner !== undefined ? { owner } : {}),
+        ...(leader !== undefined ? { leader } : {}),
+        contested: leader === undefined && presence.size > 1,
+        direction: hillMovement(objective, presence).direction,
+      }
+    }
+
+    if (setup.kind === 'ctf' && objective?.kind === 'ctf') {
+      const flags = objective.flags.map((flag): FlagView => {
+        const home = setup.flags.find((setupFlag) => setupFlag.team === flag.team)?.home ?? flag.position
+        const carrier = flag.carrierId === undefined ? undefined : this.simulator.characters.get(flag.carrierId)
+        const atHome = flag.position.x === home.x && flag.position.y === home.y
+        return {
+          team: flag.team,
+          status: carrier ? 'carried' : atHome ? 'home' : 'dropped',
+          home: { ...home },
+          position: { ...flag.position },
+          ...(carrier
+            ? { carrier: { id: carrier.id, name: characterName(carrier), team: carrier.team } }
+            : {}),
+        }
+      })
+      return {
+        kind: 'ctf',
+        scores: rankScores(teamsInGame(flags.map((flag) => flag.team)), pointsOf(objective.scores)),
+        ...limit,
+        flags,
+      }
+    }
+
+    return {
+      kind: 'deathmatch',
+      scores: rankScores(teamsInGame(), pointsOf(objective?.kind === 'deathmatch' ? objective.scores : {})),
+      ...limit,
+    }
+  }
+
+  // How long until the controlled champion is back, in seconds, while it is dead: the game's respawn time
+  // from the tick it died on, which the rules can set.
+  getRespawnSecondsLeft(now = performance.now()): number | undefined {
+    if (this.localCharacterId === undefined) return undefined
+    const deathTick = this.getSnapshotAtEstimatedTick(now).get(this.localCharacterId)?.getDeathTick()
+    if (deathTick === undefined) return undefined
+    return Math.max(0, (deathTick + this.simulator.respawnTicks - this.estimateTick(now)) / GAME_TPS)
   }
 
   // The lines of the killfeed to show now. Like the leaderboard, a line is added once its death can
@@ -608,7 +702,7 @@ export class ClientGameState {
     const person = (characterId: number): KillFeedPerson | undefined => {
       const character = this.simulator.characters.get(characterId)
       return character
-        ? { name: character.player?.name ?? `Player ${character.id}`, team: character.team }
+        ? { name: characterName(character), team: character.team }
         : undefined
     }
     const victim = person(death.victimId)
@@ -632,14 +726,11 @@ export class ClientGameState {
     this.setServerTick(ack.serverTick, receivedAt)
     if (!tracked || tracked.order.id !== ack.id) return false
 
-    if (ack.status === 'accepted') {
-      this.localOrders.delete(ack.seq)
-      return false
-    } else {
-      this.localOrders.delete(ack.seq)
-      if (this.localCharacterId === undefined) return true
-      return !this.simulator.removeOrder(this.localCharacterId, ack.seq)
-    }
+    this.localOrders.delete(ack.seq)
+    if (ack.status === 'accepted') return false
+    // A refused order is taken back out of the simulation; if that cannot be done, the caller resyncs.
+    if (this.localCharacterId === undefined) return true
+    return !this.simulator.removeOrder(this.localCharacterId, ack.seq)
   }
 
   getCharacters(now = performance.now()): RenderedCharacter[] {
@@ -650,25 +741,40 @@ export class ClientGameState {
       activeCharacterIds.add(character.id)
       const state = snapshot.get(character.id)
       const health = state?.getHealthState()
+      const statuses = state?.getStatuses() ?? []
+      const mind = state?.getAi()
       characters.push({
         id: character.id,
         ...(character.player ? { player: { ...character.player } } : {}),
+        name: characterName(character),
+        ...(character.monster
+          ? {
+            monster: {
+              aggroRange: character.monster.ai.aggroRange,
+              deaggroRange: character.monster.ai.deaggroRange,
+              leashRange: character.monster.ai.leashRange,
+              home: { ...character.initialPosition },
+              mode: mind?.mode ?? 'idle',
+              ...(mind?.targetId !== undefined ? { targetId: mind.targetId } : {}),
+            },
+          }
+          : {}),
         champion: character.champion,
         team: character.team,
         ...(health ? { health } : {}),
         totalShield: state?.getShield() ?? 0,
         stacks: countMarkers(state?.getMarkers() ?? []),
-        hasted: state?.getStatuses().some((status) => status.kind === 'haste') ?? false,
-        slowed: state?.getStatuses().some((status) => status.kind === 'slow') ?? false,
-        rooted: state?.getStatuses().some((status) => status.kind === 'root') ?? false,
-        stunned: state?.getStatuses().some((status) => status.kind === 'stun') ?? false,
-        burning: state?.getStatuses().some((status) => status.kind === 'burn') ?? false,
-        blinded: state?.getStatuses().some((status) => status.kind === 'blind') ?? false,
-        silenced: state?.getStatuses().some((status) => status.kind === 'silence') ?? false,
-        dodging: state?.getStatuses().some((status) => status.kind === 'dodge') ?? false,
+        hasted: hasStatus(statuses, 'haste'),
+        slowed: hasStatus(statuses, 'slow'),
+        rooted: hasStatus(statuses, 'root'),
+        stunned: hasStatus(statuses, 'stun'),
+        burning: hasStatus(statuses, 'burn'),
+        blinded: hasStatus(statuses, 'blind'),
+        silenced: hasStatus(statuses, 'silence'),
+        dodging: hasStatus(statuses, 'dodge'),
         ...this.getActionView(snapshot, state, now),
-        attackRange: character.champion.attackRangeWith(state?.getStatuses() ?? []),
-        attackCooldownTicks: character.champion.attackCooldownTicksWith(state?.getStatuses() ?? []),
+        attackRange: character.champion.attackRangeWith(statuses),
+        attackCooldownTicks: character.champion.attackCooldownTicksWith(statuses),
         ...this.getRenderedCharacterView(character.id, now, snapshot),
       })
     }
@@ -901,6 +1007,20 @@ export class ClientGameState {
     const character = this.simulator.characters.get(characterId)
     if (!character) return false
     return this.simulator.addOrder(characterId, order)
+  }
+
+  // Gives the local champion's order the next sequence number and puts it in the simulation at once,
+  // keeping it until the server answers. Nothing if the simulation turns it down, such as for a tick
+  // that is already final; the number is used all the same.
+  private issueOrder<T extends GameOrder>(order: Omit<T, 'id' | 'seq'>, now: number): T | undefined {
+    const characterId = this.localCharacterId
+    if (characterId === undefined) return undefined
+    const seq = this.nextOrderSequence
+    this.nextOrderSequence += 1
+    const issued = { ...order, id: `${characterId}:${seq}`, seq } as T
+    if (!this.simulator.addOrder(characterId, issued)) return undefined
+    this.trackOrder(issued, now)
+    return issued
   }
 
   private trackOrder(order: GameOrder, now: number): void {

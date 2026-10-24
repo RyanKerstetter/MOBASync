@@ -52,6 +52,7 @@ import {
   stopAttacking,
   trinketmaster,
 } from './fixtures.js'
+import { testSpawns } from './test-spawns.ts'
 
 const ORIGIN = { x: 100, y: 100 }
 
@@ -584,7 +585,6 @@ test('attackDamage() makes an auto deal whatever the champion stat says', () => 
 // Projectile autos, against the gunner in fixtures.ts: windup 3, a shot at 10 px per tick that is
 // 8 px across, hitting a brawler (18 px across) once the two are within 8 + 18 = 26 px.
 
-const GUNNER_STEP = 600 / GAME_TPS
 const GUNNER_LAUNCH = 1 + gunner.attackWindupTicks
 
 function createGunnerDuel(targetAt: Vector2, shooter: Champion = gunner): Simulator {
@@ -1772,7 +1772,7 @@ test('an entity definition has a radius or a box, not both and not neither', () 
 })
 
 test('the server accepts casts from the picked champion\'s kit and rejects other abilities', () => {
-  const game = new ServerGameState()
+  const game = new ServerGameState(testSpawns)
   const players = [{ id: 'player-1', name: 'One' }, { id: 'player-2', name: 'Two' }]
   game.beginSelection(players)
   game.pickChampion('player-1', 't-cursebearer')
@@ -3658,6 +3658,10 @@ test('with a shadow out, a dash back through the enemy hurts it again as the nin
 
   assert.equal(simulator.at(castTick + STEP_TICKS + 1).get(1)?.isDashing(), false)
   assert.deepEqual(simulator.at(castTick + STEP_TICKS + 1).get(1)?.getPosition(), NINJA_AT, 'and it ends on the old shadow')
+  // The new shadow has 8 s of its own from when it was left, and not what was left of the old one.
+  assert.equal(shadowsOut(simulator, CONTACT + 480 + 20).length, 1, 'the old one would have gone by now')
+  assert.equal(shadowsOut(simulator, touched + 480).length, 1)
+  assert.equal(shadowsOut(simulator, touched + 481).length, 0, 'it goes 8 s after it was left')
 })
 
 test('the dash back goes to the shadow from any distance, and reaches the enemy on the way when it gets there', () => {
@@ -3716,16 +3720,47 @@ test('a dash back to the shadow that passes through nobody loses it when it fini
   assert.equal(shadowsOut(simulator, after + 2).length, 0)
 })
 
-test('a shadow never times out, but does not outlive the ninja', () => {
+test('a shadow lasts 8 seconds, and then the key is Shadow Step again, which has been ready all along', () => {
   const simulator = createNinjaDuel()
   simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
-  killAt(simulator, 1, 1000)
+  const step = getAbilityDef('t-shadowstep')
+  assert.ok(step)
+  const keyAt = (tick: number): string =>
+    abilityOnKey(step, (defId) => shadowsOut(simulator, tick).some((entity) => entity.defId === defId)).id
+
+  // It is left when the dash reaches its enemy, and is there on that tick and for the 8 s (480 ticks) after.
+  assert.equal(shadowsOut(simulator, CONTACT).length, 1)
+  assert.equal(keyAt(CONTACT), 't-shadowreturn', 'the key is the dash back while it is out')
+  const ready = 1 + 480 - 360
+  assert.equal(simulator.at(ready).get(1)?.getAbilityCooldown('t-shadowstep').ready, true, 'Shadow Step was ready after two seconds, with three quarters handed back')
+  assert.equal(keyAt(ready), 't-shadowreturn', 'but the key stays the dash back while the shadow is out')
+
+  const last = CONTACT + 480
+  assert.equal(shadowsOut(simulator, last).length, 1, 'there for the whole 8 s')
+  assert.equal(keyAt(last), 't-shadowreturn')
+  assert.equal(shadowsOut(simulator, last + 1).length, 0, 'and gone the tick after')
+  assert.equal(simulator.at(last + 1).get(1)?.getAbilityCooldown('t-shadowstep').ready, true)
+  assert.equal(keyAt(last + 1), 't-shadowstep', 'when the key is Shadow Step again')
+
+  // The forward dash can be cast again, and the dash back, with no shadow, is refused.
+  const at = last + 5
+  const from = simulator.at(at).get(1)?.getPosition()
+  assert.ok(from)
+  simulator.addOrder(1, stepAlong(2, at, from, -100))
+  simulator.addOrder(1, cast(3, at + 40, 't-shadowreturn', { mode: 'none' }, from))
+  assert.equal(simulator.at(at + 2).get(1)?.isDashing(), true, 'Shadow Step can be cast')
+  assert.equal(simulator.at(at + 43).get(1)?.isDashing(), false, 'and there is nothing to dash back to')
+})
+
+test('a shadow does not outlive the ninja', () => {
+  const simulator = createNinjaDuel()
+  simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
+  killAt(simulator, 1, 300)
 
   assert.equal(shadowsOut(simulator, CONTACT).length, 1)
-  assert.equal(shadowsOut(simulator, 600).length, 1, 'ten seconds on')
-  assert.equal(shadowsOut(simulator, 999).length, 1, 'and sixteen')
-  assert.equal(shadowsOut(simulator, 1002).length, 0, 'but not past its owner\'s death')
-  assert.equal(shadowsOut(simulator, 1200).length, 0, 'nor back with it')
+  assert.equal(shadowsOut(simulator, 299).length, 1, 'there while the ninja is alive')
+  assert.equal(shadowsOut(simulator, 301).length, 0, 'and gone when it dies, long before its 8 s are up')
+  assert.equal(shadowsOut(simulator, 300 + GAME_RESPAWN_TICKS + 5).length, 0, 'not back with the ninja')
 })
 
 test('shadow stacks stop at two however many dashes through an enemy there are, and wear off after six seconds', () => {

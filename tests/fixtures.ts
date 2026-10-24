@@ -26,6 +26,8 @@ import {
   linear,
   loseHealth,
   mark,
+  Monster,
+  monsters,
   missingHealth,
   ownEntity,
   popMarkers,
@@ -53,6 +55,7 @@ import {
   type CharacterOrder,
   type DashDef,
   type EntityDef,
+  type MonsterDef,
   type Selector,
   type SimContext,
   type Simulator,
@@ -70,6 +73,13 @@ const seconds = (value: number): number => Math.round(value * 60)
 export function defineAbility(def: AbilityDef): AbilityDef {
   ;(abilityDefs as unknown as Map<string, AbilityDef>).set(def.id, def)
   return def
+}
+
+// A monster for a test, which the simulator finds by the id of its champion. Like the rest it stays registered.
+export function defineMonster(def: MonsterDef): Monster {
+  const monster = new Monster(def)
+  ;(monsters as unknown as Map<string, Monster>).set(monster.id, monster)
+  return monster
 }
 
 export function defineChampion(def: ChampionDef): Champion {
@@ -915,7 +925,8 @@ export const trinketmaster = defineChampion({
 // Q's cooldown back, starts the dash back's 1 s cooldown, and leaves a shadow where the dash was cast
 // from. While the shadow is out, the key dashes back to it instead, from any distance, and does the
 // same for the enemies it passes; if it finishes having passed none, the shadow is lost and Q starts
-// its whole 8 s over, whatever had run down while the shadow was out. A shadow has no timer. Each
+// its whole 8 s over, whatever had run down while the shadow was out. A shadow lasts 8 s, as long as
+// Q's whole cooldown, and then the key is Q again, which was ready long before. Each
 // shadow stack is an enhanced auto: an auto spends one for 60 bonus damage. W is a piercing kunai
 // (60 damage and a 40% slow for 1.5 s), or, if the ninja has a shadow stack, which it spends one of,
 // 110 damage and a 1 s root instead. E is a 40% haste for 1.5 s and a dodge of every auto for 1.2 s.
@@ -926,6 +937,7 @@ const shadowEntity: EntityDef = {
   radius: 14,
   visual: 'field',
   color: '#7a5cff',
+  lifetimeTicks: seconds(8),
   stayWhile: (sim, src) => sim.isAlive(src.ownerId),
 }
 const ninjaDashHit = [damage(60), slow(0.4, seconds(1.5))]

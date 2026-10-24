@@ -10,11 +10,9 @@ type ReliableChannel = {
 
 type PendingMessage<T> = {
   message: T
-  sentAt: number
   timeoutAt: number
   nextRetryAt: number
   retryDelayMs: number
-  timeoutReported: boolean
 }
 
 type ReliableMessengerOptions<
@@ -61,11 +59,9 @@ export class ReliableMessenger<
     const retryDelayMs = this.options.timeoutMs / 4
     this.pending.set(message.id, {
       message,
-      sentAt: now,
       timeoutAt: now + this.options.timeoutMs,
       nextRetryAt: now + retryDelayMs,
       retryDelayMs,
-      timeoutReported: false,
     })
     this.options.channel.emit(this.options.messageEvent, message)
     this.scheduleNextUpdate()
@@ -99,16 +95,6 @@ export class ReliableMessenger<
     })
   }
 
-  getOldestPendingAge(now = performance.now()): number | undefined {
-    let oldestSentAt: number | undefined
-    for (const pending of this.pending.values()) {
-      if (oldestSentAt === undefined || pending.sentAt < oldestSentAt) {
-        oldestSentAt = pending.sentAt
-      }
-    }
-    return oldestSentAt === undefined ? undefined : Math.max(0, now - oldestSentAt)
-  }
-
   close(): void {
     if (this.closed) return
     this.closed = true
@@ -137,12 +123,10 @@ export class ReliableMessenger<
     if (this.closed) return
     const now = performance.now()
     for (const pending of this.pending.values()) {
+      // Reported once: the deadline is put out of reach so it is never passed again.
       if (now >= pending.timeoutAt) {
-        if (!pending.timeoutReported) {
-          pending.timeoutReported = true
-          pending.timeoutAt = Number.POSITIVE_INFINITY
-          this.options.onTimeout?.(pending.message)
-        }
+        pending.timeoutAt = Number.POSITIVE_INFINITY
+        this.options.onTimeout?.(pending.message)
       }
       if (now >= pending.nextRetryAt) {
         this.options.channel.emit(this.options.messageEvent, pending.message)

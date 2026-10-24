@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { HITBOX_COLORS, hitboxShapes } from '../apps/client/src/hitboxes.ts'
+import { HITBOX_COLORS, hitboxShapes } from '../apps/client/src/render/hitboxes.ts'
 import type { RenderedCharacter, RenderedEntity } from '../apps/client/src/game-state.ts'
 
 const character = (id: number, x: number, dead = false): RenderedCharacter =>

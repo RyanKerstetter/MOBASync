@@ -14,9 +14,9 @@ function fakeStorage(initial?: string) {
   }
 }
 
-test('the menu offers the cast mode as a choice of every mode, with the current one selected, and leaving the lobby', () => {
+test('the menu offers the cast mode as a choice of every mode, with the current one selected, and leaving the game', () => {
   let mode = DEFAULT_CAST_MODE
-  const items = menuItems({ getCastMode: () => mode, setCastMode: (next) => { mode = next }, leaveLobby: () => undefined })
+  const items = menuItems({ getCastMode: () => mode, setCastMode: (next) => { mode = next }, leaveGame: () => undefined })
 
   const [castMode, leave] = items
   assert.equal(castMode.kind, 'choice')
@@ -27,7 +27,7 @@ test('the menu offers the cast mode as a choice of every mode, with the current 
     'one option for every cast mode there is',
   )
   assert.equal(castMode.kind === 'choice' && castMode.get(), DEFAULT_CAST_MODE)
-  assert.deepEqual([leave.kind, leave.label, leave.kind === 'action' && leave.danger], ['action', 'Leave lobby', true])
+  assert.deepEqual([leave.kind, leave.label, leave.kind === 'action' && leave.danger], ['action', 'Leave game', true])
 })
 
 test('choosing a cast mode in the menu sets it, and leaving runs what it was given', () => {
@@ -36,7 +36,7 @@ test('choosing a cast mode in the menu sets it, and leaving runs what it was giv
   const [castMode, leave] = menuItems({
     getCastMode: () => mode,
     setCastMode: (next) => { mode = next },
-    leaveLobby: () => { left += 1 },
+    leaveGame: () => { left += 1 },
   })
 
   if (castMode.kind === 'choice') castMode.set('quick')

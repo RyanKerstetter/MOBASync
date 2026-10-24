@@ -1,41 +1,32 @@
 import './style.css'
 import { createChampionSelect } from './champion-select.ts'
 import { startGame } from './game.ts'
-import { GAME_TEAMS, getTeam, type GameStatus } from '../../../packages/shared/src/index.ts'
-
-type Player = {
-  id: string
-  name: string
-  team: number
-}
-
-type Lobby = {
-  code: string
-  players: Player[]
-  leaderId: string
-  messages: ChatMessage[]
-  maxPlayers: number
-  game: {
-    status: GameStatus
-    readyPlayerIds: string[]
-    selections: Array<{ playerId: string; championId: string; locked: boolean }>
-  }
-}
-
-type ChatMessage = {
-  id: number
-  playerId: string
-  name: string
-  text: string
-}
+import { lobbySummary } from './ui/results.ts'
+import {
+  GAME_MODES,
+  GAME_TEAMS,
+  getGameMode,
+  getTeam,
+  isGameMode,
+  CAPTURE_SECONDS,
+  mapRoomText,
+  modeSupportProblem,
+  RESPAWN_SECONDS,
+  startProblem,
+  supportedModes,
+  teamHasRoom,
+  type GameMode,
+  type MapSummary,
+  type PublicLobby as Lobby,
+  type PublicPlayer as Player,
+  type RulesChange,
+} from '../../../packages/shared/src/index.ts'
 
 type LobbyResponse = {
   lobby: Lobby
   player: Player
 }
 
-// The dev and preview servers proxy /api to the lobby server, so the page only needs its own origin.
-const apiUrl = ''
 const sessionKey = 'lobby-session-id'
 const sessionId = sessionStorage.getItem(sessionKey) ?? createSessionId()
 sessionStorage.setItem(sessionKey, sessionId)
@@ -55,6 +46,18 @@ const lobbyUsernameInput = requiredElement<HTMLInputElement>('#lobby-username')
 const playerCount = requiredElement<HTMLSpanElement>('#player-count')
 const playerList = requiredElement<HTMLUListElement>('#player-list')
 const teamPicker = requiredElement<HTMLDivElement>('#team-picker')
+const mapSelect = requiredElement<HTMLSelectElement>('#map-select')
+const mapSummary = requiredElement<HTMLParagraphElement>('#map-summary')
+const modeSelect = requiredElement<HTMLSelectElement>('#mode-select')
+const modeSummary = requiredElement<HTMLParagraphElement>('#mode-summary')
+const modeWarning = requiredElement<HTMLParagraphElement>('#mode-warning')
+const respawnInput = requiredElement<HTMLInputElement>('#rule-respawn')
+const captureRow = requiredElement<HTMLElement>('#rule-capture-row')
+const captureInput = requiredElement<HTMLInputElement>('#rule-capture')
+const limitList = requiredElement<HTMLDivElement>('#rule-limits')
+const gameActivity = requiredElement<HTMLParagraphElement>('#game-activity')
+const lastResult = requiredElement<HTMLParagraphElement>('#last-result')
+const endButton = requiredElement<HTMLButtonElement>('#end-button')
 const chatMessages = requiredElement<HTMLUListElement>('#chat-messages')
 const chatForm = requiredElement<HTMLFormElement>('#chat-form')
 const chatInput = requiredElement<HTMLInputElement>('#chat-input')
@@ -81,6 +84,12 @@ let gameRunning = false
 let stopGame: (() => void) | undefined
 let isEnteringGame = false
 let gameGeneration = 0
+// While the leader's pick of mode is on its way to the server, the lobby as it was polled would put the old
+// one back in the list.
+let modeChangePending = false
+let mapChangePending = false
+let shownMaps = ''
+let rulesChangePending = false
 
 // crypto.randomUUID only exists on HTTPS pages and localhost; a VPS served over plain
 // HTTP still has getRandomValues.
@@ -99,7 +108,8 @@ function requiredElement<T extends HTMLElement>(selector: string): T {
 }
 
 async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
-  const response = await fetch(`${apiUrl}${path}`, {
+  // The dev and preview servers proxy /api to the lobby server, so the page only needs its own origin.
+  const response = await fetch(path, {
     method,
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -118,6 +128,17 @@ async function request<T>(path: string, method = 'GET', body?: unknown): Promise
     throw new Error(result.error ?? `Request failed (${response.status})`)
   }
   return result
+}
+
+// A request about a lobby the player is in, which always says who is asking. Most answer with the
+// lobby as it now is.
+function lobbyRequest<T = { lobby: Lobby }>(
+  lobby: Lobby,
+  action: string,
+  method = 'POST',
+  body: Record<string, unknown> = {},
+): Promise<T> {
+  return request<T>(`/api/lobbies/${encodeURIComponent(lobby.code)}/${action}`, method, { sessionId, ...body })
 }
 
 function setEntryMessage(text: string, isError = false): void {
@@ -146,12 +167,24 @@ function hideGameToast(): void {
 function renderLobby(lobby: Lobby): void {
   playerList.replaceChildren()
   const isLeader = lobby.leaderId === sessionId
-  startButton.disabled = !isLeader || lobby.game.status !== 'idle'
+  // Said to everyone, so the players can fix it, and the leader cannot start until it is fixed.
+  const map = lobby.maps.find((candidate) => candidate.id === lobby.map)
+  const setupProblem = map
+    ? startProblem(lobby.mode, lobby.players.map((player) => player.team), map)
+    : 'The map this lobby picked is not on the server any more. Pick another.'
+  startButton.disabled = !isLeader || lobby.game.status !== 'idle' || setupProblem !== undefined
+  startButton.title = isLeader && setupProblem ? setupProblem : ''
+  renderMapPicker(lobby, isLeader, map)
+  renderModePicker(lobby, isLeader, setupProblem, map)
+  renderRules(lobby, isLeader)
+  renderGameActivity(lobby, isLeader)
   startButton.textContent = lobby.game.status === 'starting'
     ? 'Waiting for players…'
     : lobby.game.status === 'running'
       ? 'Game in progress'
-      : 'Start game'
+      : lobby.game.status === 'finished'
+        ? 'Game finished'
+        : 'Start game'
   for (const player of lobby.players) {
     const item = document.createElement('li')
     item.className = 'player-row'
@@ -171,6 +204,13 @@ function renderLobby(lobby: Lobby): void {
     teamName.className = 'team-name'
     teamName.textContent = team.name
     item.append(indicator, swatch, name, teamName)
+    // Who is still in the game, for a lobby whose players have gone back to it while it goes on.
+    if (lobby.game.playingPlayerIds.includes(player.id) && (lobby.game.status === 'running' || lobby.game.status === 'finished')) {
+      const playing = document.createElement('span')
+      playing.className = 'player-status'
+      playing.textContent = lobby.game.status === 'finished' ? 'Results' : 'In game'
+      item.append(playing)
+    }
 
     if (player.id !== lobby.leaderId && isLeader) {
       const actions = document.createElement('span')
@@ -212,31 +252,219 @@ function renderLobby(lobby: Lobby): void {
 }
 
 // One button per team in its colour, the player's own ringed. Teams can only be changed in the
-// lobby, so the buttons are off once a game is starting.
+// lobby, so the buttons are off once a game is starting, and so are those of teams that are full.
 function renderTeamPicker(lobby: Lobby): void {
   const own = lobby.players.find((player) => player.id === sessionId)?.team
+  const others = lobby.players.filter((player) => player.id !== sessionId).map((player) => player.team)
   teamPicker.replaceChildren()
   for (const team of GAME_TEAMS) {
+    const full = !teamHasRoom(others, team.id)
     const button = document.createElement('button')
     button.type = 'button'
     button.style.background = team.color
-    button.title = team.name
-    button.setAttribute('aria-label', `${team.name} team`)
+    button.title = full ? `${team.name} (full)` : team.name
+    button.setAttribute('aria-label', `${team.name} team${full ? ', full' : ''}`)
     button.setAttribute('aria-pressed', String(team.id === own))
-    button.disabled = lobby.game.status !== 'idle'
+    button.disabled = lobby.game.status !== 'idle' || full
     button.addEventListener('click', () => void chooseTeam(team.id))
     teamPicker.append(button)
+  }
+}
+
+respawnInput.min = String(RESPAWN_SECONDS.min)
+respawnInput.max = String(RESPAWN_SECONDS.max)
+respawnInput.step = '1'
+captureInput.min = String(CAPTURE_SECONDS.min)
+captureInput.max = String(CAPTURE_SECONDS.max)
+captureInput.step = '1'
+
+// One score limit for each mode, and only the selected mode's is shown: a kill limit means nothing to a game of
+// capture the flag. A limit of 0 is no limit.
+const limitRows = new Map<GameMode, { row: HTMLElement; input: HTMLInputElement }>()
+for (const mode of GAME_MODES) {
+  const row = document.createElement('label')
+  row.className = 'rule-row'
+  row.hidden = true
+  const text = document.createElement('span')
+  text.textContent = `${mode.limitLabel} (0 for no limit)`
+  const input = document.createElement('input')
+  input.type = 'number'
+  input.min = '0'
+  input.max = String(mode.maxLimit)
+  input.step = '1'
+  input.addEventListener('change', () => void changeRules({ scoreLimits: { [mode.id]: input.valueAsNumber } }))
+  row.append(text, input)
+  limitList.append(row)
+  limitRows.set(mode.id, { row, input })
+}
+respawnInput.addEventListener('change', () => void changeRules({ respawnSeconds: respawnInput.valueAsNumber }))
+captureInput.addEventListener('change', () => void changeRules({ captureSeconds: captureInput.valueAsNumber }))
+
+// A number box shows what the lobby says, unless it is the one being typed in, or its change is on its way.
+function showNumber(input: HTMLInputElement, value: number, force: boolean): void {
+  if (!force && (rulesChangePending || document.activeElement === input)) return
+  if (input.value !== String(value)) input.value = String(value)
+}
+
+// The leader's rules: how long a champion stays dead, how long the hill takes to capture (only for a game on
+// the hill), and the limit of the mode that is selected. Everyone sees them; only the leader can change them,
+// and only until the game starts.
+function renderRules(lobby: Lobby, isLeader: boolean, force = false): void {
+  const editable = isLeader && lobby.game.status === 'idle'
+  respawnInput.disabled = !editable
+  showNumber(respawnInput, lobby.rules.respawnSeconds, force)
+  captureRow.hidden = lobby.mode !== 'koth'
+  captureInput.disabled = !editable
+  showNumber(captureInput, lobby.rules.captureSeconds, force)
+  for (const [id, { row, input }] of limitRows) {
+    row.hidden = id !== lobby.mode
+    input.disabled = !editable
+    showNumber(input, lobby.rules.scoreLimits[id], force)
+  }
+}
+
+async function changeRules(change: RulesChange): Promise<void> {
+  if (!currentLobby) return
+  rulesChangePending = true
+  try {
+    const result = await lobbyRequest(currentLobby, 'rules', 'POST', change)
+    currentLobby = result.lobby
+    setLobbyMessage('')
+  } catch (error) {
+    setLobbyMessage(errorMessage(error), true)
+    // Whatever was typed was not taken, so the boxes go back to what the lobby has.
+    if (currentLobby) renderRules(currentLobby, currentLobby.leaderId === sessionId, true)
+  } finally {
+    rulesChangePending = false
+    if (currentLobby) renderLobby(currentLobby)
+  }
+}
+
+// What is happening to the game that has begun, who is in it, how the last one ended, and the leader's way
+// to end the one that is on.
+function renderGameActivity(lobby: Lobby, isLeader: boolean): void {
+  const { status, playingPlayerIds } = lobby.game
+  const waiting = playingPlayerIds.length
+  gameActivity.hidden = status !== 'running' && status !== 'finished'
+  gameActivity.textContent = status === 'finished'
+    ? `The game is over. ${waiting} ${waiting === 1 ? 'player is' : 'players are'} still looking at the results.`
+    : `A game is in progress: ${waiting} of ${lobby.players.length} players still playing.`
+  endButton.hidden = !isLeader || (status !== 'running' && status !== 'finished')
+  endButton.textContent = status === 'finished' ? 'Close game' : 'End game'
+  lastResult.hidden = !lobby.lastResult
+  lastResult.textContent = lobby.lastResult ? lobbySummary(lobby.lastResult) : ''
+}
+
+async function endGame(): Promise<void> {
+  if (!currentLobby) return
+  const finished = currentLobby.game.status === 'finished'
+  const question = finished
+    ? 'Close the game? Anyone still looking at its results goes back to the lobby.'
+    : 'End the game for everyone? The team that is ahead wins.'
+  if (!window.confirm(question)) return
+  try {
+    const result = await lobbyRequest(currentLobby, 'end')
+    currentLobby = result.lobby
+    renderLobby(result.lobby)
+  } catch (error) {
+    setLobbyMessage(errorMessage(error), true)
+  }
+}
+
+for (const mode of GAME_MODES) {
+  const option = document.createElement('option')
+  option.value = mode.id
+  option.textContent = mode.name
+  modeSelect.append(option)
+}
+
+// The list of maps: the leader picks, and everyone else sees what was picked. A map that cannot be played on is
+// in the list so it is known to be there, but cannot be picked, and what is wrong with it is shown if it is the
+// one that is picked. Under it, what the map is: how big, what team setups it takes, and which modes it has what
+// they need for.
+function renderMapPicker(lobby: Lobby, isLeader: boolean, map: MapSummary | undefined): void {
+  const listKey = JSON.stringify(lobby.maps.map((candidate) => [candidate.id, candidate.name, candidate.problem !== undefined]))
+  if (listKey !== shownMaps) {
+    shownMaps = listKey
+    mapSelect.replaceChildren(...lobby.maps.map((candidate) => {
+      const option = document.createElement('option')
+      option.value = candidate.id
+      option.textContent = candidate.problem ? `${candidate.name} (cannot be played on)` : candidate.name
+      option.disabled = candidate.problem !== undefined
+      return option
+    }))
+  }
+  if (!mapChangePending && mapSelect.value !== lobby.map) mapSelect.value = lobby.map
+  mapSelect.disabled = !isLeader || lobby.game.status !== 'idle'
+  mapSummary.textContent = !map
+    ? ''
+    : map.problem
+      ? `Cannot be played on: ${map.problem}`
+      : [
+        map.description,
+        `Size ${map.width} by ${map.height}. ${mapRoomText(map.spawns)}`,
+        `Modes: ${supportedModes(map).map((mode) => getGameMode(mode).name).join(', ')}.`,
+        map.monsters > 0 ? `${map.monsters} monster${map.monsters === 1 ? '' : 's'}.` : '',
+      ].filter(Boolean).join(' ')
+}
+
+// The list of game modes: the leader picks, and everyone else sees what was picked. Like the teams, the mode is
+// fixed once the game is starting. A mode the map has nothing for is in the list but cannot be picked, with why.
+// `problem` is what stops the game from starting as the lobby is (the mode, the teams, the map), if anything.
+function renderModePicker(lobby: Lobby, isLeader: boolean, problem: string | undefined, map: MapSummary | undefined): void {
+  for (const option of Array.from(modeSelect.options)) {
+    const reason = map && isGameMode(option.value) ? modeSupportProblem(option.value, map) : undefined
+    const name = getGameMode(option.value as GameMode).name
+    option.disabled = reason !== undefined
+    option.title = reason ?? ''
+    option.textContent = reason ? `${name} (not on this map)` : name
+  }
+  if (!modeChangePending && modeSelect.value !== lobby.mode) modeSelect.value = lobby.mode
+  modeSelect.disabled = !isLeader || lobby.game.status !== 'idle'
+  modeSummary.textContent = getGameMode(lobby.mode).summary
+  modeWarning.textContent = problem ?? ''
+  modeWarning.hidden = problem === undefined
+}
+
+async function chooseMap(id: string): Promise<void> {
+  if (!currentLobby) return
+  const before = currentLobby
+  mapChangePending = true
+  try {
+    const result = await lobbyRequest(currentLobby, 'map', 'POST', { map: id })
+    currentLobby = result.lobby
+    const chosen = result.lobby.maps.find((candidate) => candidate.id === result.lobby.map)
+    // A mode the new map cannot be played in is dropped for the default one, which is worth saying.
+    setLobbyMessage(before.mode !== result.lobby.mode && chosen
+      ? `${chosen.name} has no ${getGameMode(before.mode).name}, so the mode is now ${getGameMode(result.lobby.mode).name}.`
+      : '')
+  } catch (error) {
+    setLobbyMessage(errorMessage(error), true)
+  } finally {
+    mapChangePending = false
+    if (currentLobby) renderLobby(currentLobby)
+  }
+}
+
+async function chooseMode(mode: string): Promise<void> {
+  if (!currentLobby || !isGameMode(mode)) return
+  modeChangePending = true
+  try {
+    const result = await lobbyRequest(currentLobby, 'mode', 'POST', { mode })
+    currentLobby = result.lobby
+    setLobbyMessage('')
+  } catch (error) {
+    setLobbyMessage(errorMessage(error), true)
+  } finally {
+    modeChangePending = false
+    if (currentLobby) renderLobby(currentLobby)
   }
 }
 
 async function chooseTeam(team: number): Promise<void> {
   if (!currentLobby) return
   try {
-    const result = await request<{ lobby: Lobby }>(
-      `/api/lobbies/${encodeURIComponent(currentLobby.code)}/team`,
-      'POST',
-      { sessionId, team },
-    )
+    const result = await lobbyRequest(currentLobby, 'team', 'POST', { team })
     currentLobby = result.lobby
     renderLobby(result.lobby)
   } catch (error) {
@@ -283,11 +511,7 @@ async function sendSelectionRequest(
 ): Promise<void> {
   if (!currentLobby) return
   try {
-    const result = await request<{ lobby: Lobby }>(
-      `/api/lobbies/${encodeURIComponent(currentLobby.code)}/${action}`,
-      'POST',
-      { sessionId, ...body },
-    )
+    const result = await lobbyRequest(currentLobby, action, 'POST', body)
     currentLobby = result.lobby
     renderLobby(result.lobby)
     if (result.lobby.game.status === 'starting') void enterGame(result.lobby)
@@ -305,11 +529,7 @@ async function managePlayer(action: 'leader' | 'players/kick', player: Player): 
   if (!window.confirm(confirmation)) return
 
   try {
-    const result = await request<{ lobby: Lobby }>(
-      `/api/lobbies/${encodeURIComponent(currentLobby.code)}/${action}`,
-      'POST',
-      { sessionId, targetSessionId: player.id },
-    )
+    const result = await lobbyRequest(currentLobby, action, 'POST', { targetSessionId: player.id })
     currentLobby = result.lobby
     renderLobby(result.lobby)
     setLobbyMessage(action === 'leader' ? `${player.name} is now the leader.` : `${player.name} was kicked.`)
@@ -378,6 +598,13 @@ async function refreshLobby(): Promise<void> {
       `/api/lobbies/${encodeURIComponent(currentLobby.code)}?sessionId=${encodeURIComponent(sessionId)}`,
     )
     currentLobby = result.lobby
+    // The leader closed the game while this player was looking at its results: back to the lobby.
+    if (stopGame && gameRunning && result.lobby.game.status !== 'running' && result.lobby.game.status !== 'finished') {
+      stopActiveGame()
+      gamePanel.hidden = true
+      lobbyPanel.hidden = false
+      setLobbyMessage('The game was closed.')
+    }
     renderLobby(result.lobby)
     if (result.lobby.game.status === 'starting') void enterGame(result.lobby)
   } catch (error) {
@@ -399,11 +626,7 @@ async function sendChatMessage(event: SubmitEvent): Promise<void> {
   const sendButton = chatForm.querySelector<HTMLButtonElement>('button[type="submit"]')
   if (sendButton) sendButton.disabled = true
   try {
-    const result = await request<{ lobby: Lobby }>(
-      `/api/lobbies/${encodeURIComponent(currentLobby.code)}/messages`,
-      'POST',
-      { sessionId, text },
-    )
+    const result = await lobbyRequest(currentLobby, 'messages', 'POST', { text })
     currentLobby = result.lobby
     renderLobby(result.lobby)
     chatInput.value = ''
@@ -430,11 +653,7 @@ async function renamePlayer(event: SubmitEvent): Promise<void> {
   if (saveButton) saveButton.disabled = true
   setLobbyMessage('Saving username…')
   try {
-    const result = await request<LobbyResponse>(
-      `/api/lobbies/${encodeURIComponent(currentLobby.code)}/player`,
-      'PATCH',
-      { sessionId, name: lobbyUsernameInput.value },
-    )
+    const result = await lobbyRequest<LobbyResponse>(currentLobby, 'player', 'PATCH', { name: lobbyUsernameInput.value })
     currentLobby = result.lobby
     lobbyUsernameInput.value = result.player.name
     usernameInput.value = result.player.name
@@ -452,7 +671,7 @@ async function leaveLobby(): Promise<void> {
   const lobby = currentLobby
   window.clearInterval(pollTimer)
   try {
-    await request(`/api/lobbies/${encodeURIComponent(lobby.code)}/player`, 'DELETE', { sessionId })
+    await lobbyRequest<unknown>(lobby, 'player', 'DELETE')
   } catch (error) {
     setLobbyMessage(errorMessage(error), true)
     beginPolling()
@@ -472,15 +691,30 @@ function returnToEntry(): void {
   setLobbyMessage('')
 }
 
+// A player goes back to the lobby, and the game goes on without them (if it is not over). They can see who is
+// still playing there, and the game shuts down when the last of them has gone.
+async function leaveGame(): Promise<void> {
+  const lobby = currentLobby
+  stopActiveGame()
+  gamePanel.hidden = true
+  lobbyPanel.hidden = false
+  if (lobby) {
+    try {
+      const result = await lobbyRequest(lobby, 'leave-game')
+      currentLobby = result.lobby
+    } catch (error) {
+      setLobbyMessage(errorMessage(error), true)
+    }
+  }
+  if (currentLobby) renderLobby(currentLobby)
+  beginPolling()
+}
+
 async function startActiveGame(): Promise<void> {
   if (!currentLobby || stopGame || isEnteringGame || currentLobby.leaderId !== sessionId) return
   startButton.disabled = true
   try {
-    const result = await request<{ lobby: Lobby }>(
-      `/api/lobbies/${encodeURIComponent(currentLobby.code)}/start`,
-      'POST',
-      { sessionId },
-    )
+    const result = await lobbyRequest(currentLobby, 'start')
     currentLobby = result.lobby
     renderLobby(result.lobby)
     setLobbyMessage('Starting game. Waiting for every player to be ready…')
@@ -506,11 +740,12 @@ async function enterGame(lobby: Lobby): Promise<void> {
   gameLoadingProgress.textContent = `0/${lobby.players.length} players ready`
 
   try {
+    const picked = lobby.maps.find((candidate) => candidate.id === lobby.map)
     const stop = await startGame({
       container: gameContainer,
       lobbyCode: lobby.code,
       sessionId,
-      playerName: lobbyUsernameInput.value || 'Player',
+      map: { id: lobby.map, width: picked?.width ?? 0, height: picked?.height ?? 0 },
       onStatus: (text, isError = false) => {
         if (gameRunning) {
           if (isError) showGameToast(text)
@@ -528,7 +763,7 @@ async function enterGame(lobby: Lobby): Promise<void> {
         gameLoading.hidden = true
       },
       onDisconnected: () => showGameToast('Disconnected from the game server.', true),
-      onLeave: () => void leaveLobby(),
+      onLeave: () => void leaveGame(),
       onCancelled: (text) => {
         stopActiveGame()
         gamePanel.hidden = true
@@ -569,6 +804,9 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 }
 
+mapSelect.addEventListener('change', () => void chooseMap(mapSelect.value))
+modeSelect.addEventListener('change', () => void chooseMode(modeSelect.value))
+endButton.addEventListener('click', () => void endGame())
 createButton.addEventListener('click', () => void createLobby())
 joinForm.addEventListener('submit', (event) => void joinLobby(event))
 renameForm.addEventListener('submit', (event) => void renamePlayer(event))
@@ -580,11 +818,7 @@ returnButton.addEventListener('click', () => void returnFromGame())
 async function returnFromGame(): Promise<void> {
   if (currentLobby?.game.status === 'starting') {
     try {
-      const result = await request<{ lobby: Lobby }>(
-        `/api/lobbies/${encodeURIComponent(currentLobby.code)}/cancel-start`,
-        'POST',
-        { sessionId },
-      )
+      const result = await lobbyRequest(currentLobby, 'cancel-start')
       currentLobby = result.lobby
     } catch (error) {
       gameStatus.textContent = errorMessage(error)
@@ -611,7 +845,7 @@ copyButton.addEventListener('click', () => {
 
 window.addEventListener('beforeunload', () => {
   if (!currentLobby) return
-  void fetch(`${apiUrl}/api/lobbies/${encodeURIComponent(currentLobby.code)}/player`, {
+  void fetch(`/api/lobbies/${encodeURIComponent(currentLobby.code)}/player`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId }),

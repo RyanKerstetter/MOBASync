@@ -34,8 +34,22 @@
             </form>
             <h2>Players (<span id="player-count">0</span>)</h2>
             <ul id="player-list"></ul>
+            <p id="game-activity" class="game-activity" role="status" aria-live="polite" hidden></p>
             <h2>Your team</h2>
             <div id="team-picker" class="team-picker" role="group" aria-label="Choose your team"></div>
+            <h2><label for="map-select">Map</label></h2>
+            <select id="map-select"></select>
+            <p id="map-summary" class="mode-summary"></p>
+            <h2><label for="mode-select">Game mode</label></h2>
+            <select id="mode-select"></select>
+            <p id="mode-summary" class="mode-summary"></p>
+            <p id="mode-warning" class="mode-warning" role="status" aria-live="polite" hidden></p>
+            <h2>Game rules</h2>
+            <div id="rules" class="rules">
+              <label class="rule-row"><span>Respawn time (seconds)</span><input id="rule-respawn" type="number" /></label>
+              <label id="rule-capture-row" class="rule-row" hidden><span>Seconds to capture the hill</span><input id="rule-capture" type="number" /></label>
+              <div id="rule-limits"></div>
+            </div>
           </aside>
           <section class="chat-panel" aria-label="Lobby chat">
             <h2>Chat</h2>
@@ -49,9 +63,11 @@
             </form>
           </section>
         </div>
+        <p id="last-result" class="last-result" hidden></p>
         <p>
           <button id="leave-button" type="button">Leave lobby</button>
           <button id="start-button" type="button">Start game</button>
+          <button id="end-button" type="button" hidden>End game</button>
         </p>
         <p id="lobby-message" role="status" aria-live="polite"></p>
       </section>

@@ -13,7 +13,7 @@ type LagChannel = {
   on(eventName: string, callback: (data: any) => void): unknown
 }
 
-export const noLag: Readonly<LagConfig> = { latencyMs: 0, jitterMs: 0, loss: 0 }
+const noLag: Readonly<LagConfig> = { latencyMs: 0, jitterMs: 0, loss: 0 }
 
 // Wraps a geckos channel so everything sent or received through it is delayed, jittered
 // and dropped according to `config`. `config` is read for every message, so mutating the

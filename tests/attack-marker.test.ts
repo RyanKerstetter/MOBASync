@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ATTACK_MARKER_STYLE, chooseAttackMarkers, layoutAttackMarker } from '../apps/client/src/attack-marker.ts'
+import { ATTACK_MARKER_STYLE, chooseAttackMarkers, layoutAttackMarker } from '../apps/client/src/render/attack-marker.ts'
 
 test('an enemy under the mouse is marked as one a click would attack', () => {
   assert.deepEqual(

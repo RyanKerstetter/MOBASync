@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { statusLabels, type StatusFlags } from '../apps/client/src/status-labels.ts'
+import { statusLabels, type StatusFlags } from '../apps/client/src/render/status-labels.ts'
 
 const none: StatusFlags & { dead: boolean } = {
   stunned: false,

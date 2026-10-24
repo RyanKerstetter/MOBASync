@@ -4,7 +4,9 @@ import { ServerGameState } from '../apps/server/src/game-state.ts'
 import {
   abilityDefs,
   champions,
+  monsters,
   DEFAULT_CHAMPION_ID,
+  GAME_MAX_CHAMPION_RADIUS,
   GAME_TPS,
   getEntityDef,
   Simulator,
@@ -13,6 +15,7 @@ import {
   type Champion,
   type Vector2,
 } from '../packages/shared/src/index.ts'
+import { testSpawns } from './test-spawns.ts'
 
 // These check the real roster is well-formed and that every ability and auto attack actually
 // runs. They read nothing tuned (damage, cooldowns, ranges), so rebalancing never breaks them.
@@ -44,6 +47,8 @@ test('the roster has a default champion and every champion is complete', () => {
     const who = `champion ${champion.id}`
     assert.ok(champion.name.length > 0, `${who} has a name`)
     assert.ok(champion.maxHp > 0 && champion.moveSpeed > 0 && champion.radius > 0, `${who} has body stats`)
+    // A map is checked to have room for the widest body, so none may be wider.
+    assert.ok(champion.radius <= GAME_MAX_CHAMPION_RADIUS, `${who} is no wider than a map has room for`)
     assert.ok(champion.attackDamage > 0 && champion.attackSpeed > 0 && champion.attackRange > 0, `${who} can attack`)
     assert.ok(champion.abilities.length >= 1 && champion.abilities.length <= 4, `${who} fits the Q/W/E/R slots`)
     assert.equal(new Set(champion.abilities).size, champion.abilities.length, `${who} has no repeated ability`)
@@ -61,8 +66,8 @@ function castable(champion: Champion): string[] {
   })
 }
 
-test('every ability is well-formed and belongs to a champion', () => {
-  const used = new Set([...champions.values()].flatMap(castable))
+test('every ability is well-formed and belongs to a champion or a monster', () => {
+  const used = new Set([...champions.values(), ...[...monsters.values()].map((monster) => monster.champion)].flatMap(castable))
   for (const def of abilityDefs.values()) {
     assert.ok(used.has(def.id), `${def.id} is on a champion`)
     if (def.requires) {
@@ -88,7 +93,7 @@ test('every ability is well-formed and belongs to a champion', () => {
 
 test('the server accepts every ability of every champion', () => {
   for (const champion of champions.values()) {
-    const game = new ServerGameState()
+    const game = new ServerGameState(testSpawns)
     const players = [{ id: 'player-1', name: 'One' }, { id: 'player-2', name: 'Two' }]
     game.beginSelection(players)
     assert.equal(game.pickChampion('player-1', champion.id), true, `${champion.id} can be picked`)

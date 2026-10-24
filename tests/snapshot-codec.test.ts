@@ -5,10 +5,11 @@ import { ServerGameState } from '../apps/server/src/game-state.ts'
 import { encodeSnapshot } from '../apps/server/src/snapshot-codec.ts'
 import { GameSnapshotSchema } from '../packages/shared/src/index.ts'
 import { brawler } from './fixtures.ts'
+import { testSpawns } from './test-spawns.ts'
 
 function runningGame(playerCount: number): ServerGameState {
   const players = Array.from({ length: playerCount }, (_, index) => ({ id: `${'a'.repeat(31)}${index}`, name: `Player ${index + 1}` }))
-  const game = new ServerGameState()
+  const game = new ServerGameState(testSpawns)
   game.beginSelection(players)
   for (const player of players) {
     game.pickChampion(player.id, brawler.id)

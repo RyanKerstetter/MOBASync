@@ -1,13 +1,4 @@
-import { GAME_ARENA_HEIGHT, GAME_ARENA_WIDTH } from './constants.js'
 import type { Vector2 } from './index.js'
-
-// The point held inside the arena for a body of this radius.
-export function clampPosition(position: Vector2, radius: number): Vector2 {
-  return {
-    x: Math.max(radius, Math.min(GAME_ARENA_WIDTH - radius, position.x)),
-    y: Math.max(radius, Math.min(GAME_ARENA_HEIGHT - radius, position.y)),
-  }
-}
 
 // How far a point is from the nearest point of a line segment. Only additions, multiplications and
 // one square root, so every peer gets the same answer.

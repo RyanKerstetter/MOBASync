@@ -1,40 +1,134 @@
 import {
   champions,
+  createModeSetup,
   DEFAULT_CHAMPION_ID,
+  DEFAULT_GAME_MODE,
   FINALIZE_LAG,
   GAME_ORDER_VERDICT_RETENTION_MS,
   GameStatusSchema,
   getChampion,
+  getMonster,
+  assignSpawns,
+  leadingTeam,
+  mapDisplayName,
+  NO_OBJECTIVES,
+  objectiveScores,
   Simulator,
-  teamSpawnPositions,
+  startProblem,
+  teamSetupProblem,
+  Terrain,
+  winningTeam,
   type GameBroadcastOrder,
+  type GameMode,
   type GameOrder,
   type GameOrderAck,
+  type GameResult,
   type GameSnapshot,
   type GameStatus,
+  type MapMonster,
+  type MapObjectives,
+  type ModeRules,
+  type SpawnSlots,
 } from '../../../packages/shared/src/index.js'
 
 // `team` is the team the player picked in the lobby; leave it out for a team of their own.
 type LobbyPlayer = { id: string; name: string; team?: number }
+// A player with no team of their own is on one by themselves.
+const teamsOf = (roster: readonly LobbyPlayer[]): number[] => roster.map((player, index) => player.team ?? index + 1)
 type CachedOrderAck = { ack: GameOrderAck; expiresAt: number }
 type OrderVerdict = { ack: GameOrderAck; broadcast?: GameBroadcastOrder }
 export type ChampionSelection = { championId: string; locked: boolean }
+// What a game is played on: the map's spawn points and ground, and its hill and flags if it has them. `id` is what
+// the map is called to players (and in the snapshot), and `name` what the messages call it.
+export type GameMap = {
+  id?: string
+  name?: string
+  spawns: SpawnSlots
+  terrain: Terrain
+  // The monsters it starts with.
+  monsters?: readonly MapMonster[]
+} & Partial<MapObjectives>
 export class ServerGameState {
   status: GameStatus = GameStatusSchema.enum.idle
-  readonly simulator = new Simulator()
+  // How the game that is starting or running is played, set when its champion select opens.
+  mode: GameMode = DEFAULT_GAME_MODE
+  readonly simulator: Simulator
   // Champion select: one pick per player until the game begins.
   readonly selections = new Map<string, ChampionSelection>()
   private readonly readyPlayers = new Set<string>()
   private readonly characterIdsByPlayerId = new Map<string, number>()
   private readonly orderAcksByPlayerId = new Map<string, Map<string, CachedOrderAck>>()
   private nextCharacterId = 1
+  // The map the game is on, by id, and what it is called: set with the map when champion select opens.
+  private mapId: string | undefined
+  private mapName = 'This map'
+  private monsters: readonly MapMonster[] = []
+  // How long a champion stays dead and what a team wins at, set with the mode when champion select opens.
+  private rules: ModeRules = {}
+  // The teams the game began with, and the players who went back to the lobby while it was running (with
+  // what they had done), so how it ended can say how everyone did, and no team goes missing from it.
+  private startTeams: number[] = []
+  private readonly departed = new Map<string, GameResult['players'][number]>()
+  // How the game ended, once it has.
+  result: GameResult | undefined
+
+  // `spawns` are the map's spawn points, where each team starts (see `assignSpawns`), and `terrain`
+  // the ground it is played on: the map's arena and walls, or the plain arena with none. `objectives` are
+  // the map's hill and flags, for the modes that use them. Starting a game can give it another map (see
+  // `beginSelection`).
+  constructor(
+    private spawns: SpawnSlots,
+    private terrain: Terrain = Terrain.plain(),
+    private objectives: MapObjectives = NO_OBJECTIVES,
+  ) {
+    this.simulator = new Simulator(terrain)
+  }
 
   get readyPlayerIds(): string[] {
     return [...this.readyPlayers]
   }
 
-  beginSelection(players: Iterable<LobbyPlayer>): boolean {
+  // Who is in the game: everyone it began with who has not gone back to the lobby since.
+  get playingPlayerIds(): string[] {
+    return [...this.characterIdsByPlayerId.keys()]
+  }
+
+  // Why the game could not be played in its mode by these players, if it could not: the map has nothing for the
+  // mode, the teams are too many or too few for it, or they do not fit the map's start places (see
+  // `startProblem`). Asked before a game starts, of the map as it is now, and again when the last player locks
+  // in, since players can leave while champions are picked. With no map given, it is the map the game is on.
+  modeProblem(players: Iterable<LobbyPlayer>, mode: GameMode = this.mode, map?: Partial<GameMap>): string | undefined {
+    const spawns = map?.spawns ?? this.spawns
+    const objectives = map ? { hill: map.hill, flags: map.flags ?? [] } : this.objectives
+    return startProblem(mode, teamsOf([...players]), {
+      name: map?.name ?? (map?.id ? mapDisplayName(map.id) : this.mapName),
+      spawns: spawns.map((points) => points.length),
+      hill: objectives.hill !== undefined,
+      flags: Boolean(objectives.flags[0] && objectives.flags[1]),
+    })
+  }
+
+  // Opens champion select. With a map, the game is played on it: the server reads the map again for
+  // every game, so one changed in Tiled is played on without restarting the server. The game is played
+  // in `mode`, by `rules` (see `modeRules`).
+  beginSelection(
+    players: Iterable<LobbyPlayer>,
+    map?: GameMap,
+    mode: GameMode = DEFAULT_GAME_MODE,
+    rules: ModeRules = {},
+  ): boolean {
     if (this.status !== GameStatusSchema.enum.idle) return false
+    if (map) {
+      this.spawns = map.spawns
+      this.terrain = map.terrain
+      this.objectives = { flags: map.flags ?? [], ...(map.hill ? { hill: map.hill } : {}) }
+      this.mapId = map.id
+      this.monsters = map.monsters ?? []
+      this.mapName = map.name ?? (map.id ? mapDisplayName(map.id) : 'This map')
+    }
+    this.mode = mode
+    this.rules = rules
+    this.result = undefined
     this.status = GameStatusSchema.enum.selecting
     this.selections.clear()
     for (const player of players) {
@@ -69,18 +163,24 @@ export class ServerGameState {
   }
 
   begin(players: Iterable<LobbyPlayer>): void {
+    const roster = [...players]
+    const teams = teamsOf(roster)
+    // The biggest team starts at the first of the map's spawn points, the next biggest at the second.
+    // Worked out before anything changes, since it throws if the map has too few points for the teams,
+    // and so is what the mode is played for, since it throws if the teams or the map do not suit it.
+    const fit = teamSetupProblem(teams, this.spawns.map((points) => points.length), this.mapName)
+    if (fit) throw new RangeError(fit)
+    const positions = assignSpawns(teams, this.spawns)
+    const setup = createModeSetup(this.mode, teams, this.objectives, this.rules)
+
     this.status = GameStatusSchema.enum.starting
     this.readyPlayers.clear()
-    this.simulator.reset()
+    this.simulator.reset(this.terrain, setup)
     this.characterIdsByPlayerId.clear()
     this.orderAcksByPlayerId.clear()
+    this.departed.clear()
+    this.startTeams = [...new Set(teams)]
     this.nextCharacterId = 1
-
-    const roster = [...players]
-    // A player with no team of their own is on one by themselves.
-    const teams = roster.map((player, index) => player.team ?? index + 1)
-    // Each team starts in its own slice of a circle round the middle of the map, side by side.
-    const positions = teamSpawnPositions(teams)
     roster.forEach((player, index) => {
       const characterId = this.nextCharacterId
       this.nextCharacterId += 1
@@ -94,6 +194,12 @@ export class ServerGameState {
         teams[index],
       )
     })
+    // The map's monsters come with the game, after the players, so every player's character has the ID it always had.
+    for (const camp of this.monsters) {
+      const id = this.nextCharacterId
+      this.nextCharacterId += 1
+      this.simulator.addMonster(id, getMonster(camp.monster), camp.at)
+    }
     this.selections.clear()
   }
 
@@ -109,6 +215,77 @@ export class ServerGameState {
     this.simulator.reset()
     this.characterIdsByPlayerId.clear()
     this.orderAcksByPlayerId.clear()
+  }
+
+  // Shuts the game down, whatever it was doing, so the lobby is a lobby again and another can be started.
+  // How it ended is kept for whoever asks (see `result`) until the next game opens champion select.
+  close(): void {
+    this.status = GameStatusSchema.enum.idle
+    this.selections.clear()
+    this.readyPlayers.clear()
+    this.simulator.reset()
+    this.characterIdsByPlayerId.clear()
+    this.orderAcksByPlayerId.clear()
+    this.departed.clear()
+  }
+
+  // A game that has begun and has no one left in it is shut down. It is asked whenever players go.
+  closeIfEmpty(): boolean {
+    const begun = this.status === GameStatusSchema.enum.running || this.status === GameStatusSchema.enum.finished
+    if (!begun || this.characterIdsByPlayerId.size > 0) return false
+    this.close()
+    return true
+  }
+
+  // A player goes back to the lobby from a game that is running or over. Their champion leaves the game (a
+  // flag it carried is dropped where it stood), and what they had done is kept for the results. Nothing
+  // happens for a player who is not in such a game.
+  leaveGame(playerId: string): boolean {
+    const begun = this.status === GameStatusSchema.enum.running || this.status === GameStatusSchema.enum.finished
+    if (!begun || !this.characterIdsByPlayerId.has(playerId)) return false
+    this.removePlayer(playerId)
+    return true
+  }
+
+  // The game is over because the leader said so: the score as it stands is final, and the team that is
+  // ahead, if any is, is the winner. Ending a game that is already over shuts it down, sending whoever is
+  // still looking at its results back to the lobby.
+  end(): GameResult | undefined {
+    if (this.status === GameStatusSchema.enum.finished) {
+      this.close()
+      return undefined
+    }
+    return this.finish('ended')
+  }
+
+  // Ends the game with its results, from the score as the commit tick has it: no late order can still change
+  // it, so no one is told of a win that is then taken back.
+  private finish(reason: GameResult['reason']): GameResult | undefined {
+    if (this.status !== GameStatusSchema.enum.running) return undefined
+    const objective = this.simulator.at(this.simulator.commitTick).getObjective()
+    const scores = objectiveScores(objective)
+    const teams = [...new Set([...this.startTeams, ...Object.keys(scores).map(Number)])]
+      .map((team) => ({ team, score: scores[String(team)] ?? 0 }))
+      .sort((left, right) => right.score - left.score || left.team - right.team)
+    const winner = reason === 'limit' ? winningTeam(this.simulator.mode, objective) : leadingTeam(scores)
+    const players = [
+      ...[...this.simulator.characters.values()].filter((character) => !character.monster).map((character) => ({
+        name: character.player?.name ?? `Player ${character.id}`,
+        team: character.team,
+        kills: character.kills,
+      })),
+      ...this.departed.values(),
+    ].sort((left, right) => right.kills - left.kills || left.name.localeCompare(right.name))
+    this.status = GameStatusSchema.enum.finished
+    this.result = {
+      mode: this.mode,
+      reason,
+      ...(winner !== undefined ? { winner } : {}),
+      ...(this.simulator.mode.scoreLimit !== undefined ? { scoreLimit: this.simulator.mode.scoreLimit } : {}),
+      teams,
+      players,
+    }
+    return this.result
   }
 
   markReady(playerId: string): boolean {
@@ -136,15 +313,20 @@ export class ServerGameState {
   }
 
   snapshot(): GameSnapshot {
-    return this.simulator.snapshot()
+    return { ...this.simulator.snapshot(), ...(this.mapId ? { map: this.mapId } : {}) }
   }
 
-  advanceTick(): void {
+  // Runs the game a tick on. It gives how the game ended if that tick made a team the winner, which it is
+  // once the score the commit tick has reached the limit: the game is over, and no tick is run after it.
+  advanceTick(): GameResult | undefined {
     this.simulator.advanceTo(this.simulator.tick + 1)
     const commitTick = Math.max(0, this.simulator.tick - FINALIZE_LAG)
     if (commitTick > this.simulator.commitTick) {
       this.simulator.setCommitTick(commitTick)
     }
+    if (this.status !== GameStatusSchema.enum.running) return undefined
+    const objective = this.simulator.at(this.simulator.commitTick).getObjective()
+    return winningTeam(this.simulator.mode, objective) === undefined ? undefined : this.finish('limit')
   }
 
   getCharacterId(playerId: string): number | undefined {
@@ -216,7 +398,18 @@ export class ServerGameState {
   removePlayer(playerId: string): void {
     this.selections.delete(playerId)
     const characterId = this.characterIdsByPlayerId.get(playerId)
-    if (characterId !== undefined) this.simulator.remove(characterId)
+    if (characterId !== undefined) {
+      const character = this.simulator.characters.get(characterId)
+      if (character && this.status === GameStatusSchema.enum.running) {
+        this.departed.set(playerId, {
+          name: character.player?.name ?? `Player ${character.id}`,
+          team: character.team,
+          kills: character.kills,
+          left: true,
+        })
+      }
+      this.simulator.remove(characterId)
+    }
     this.characterIdsByPlayerId.delete(playerId)
     this.readyPlayers.delete(playerId)
     this.orderAcksByPlayerId.delete(playerId)

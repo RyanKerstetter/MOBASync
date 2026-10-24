@@ -295,7 +295,7 @@ export const TRICK_HASTE = 0.6
 export const TRICK_HASTE_TICKS = seconds(1.5)
 const tricksOnTarget = stacks(TRICK_KEY, subject())
 // Run for each enemy one of his ability hits lands on, after the hit's own damage.
-export const trickEffects: readonly Effect[] = [
+const trickEffects: readonly Effect[] = [
   when<SimContext>(
     (sim, src) => tricksOnTarget(sim, src) >= TRICK_HITS - 1,
     [
@@ -461,9 +461,13 @@ const spendShadowStack = popMarkers(SHADOW_KEY, self(), { count: 1 })
 // one it passes also gives the Ninja a shadow stack (an enhanced auto), hands back most of the
 // cooldown, and leaves a shadow behind at the spot it was cast from. With a shadow out, the key dashes
 // back to it instead, from any distance, and does the same.
-// A shadow has no timer and stays for as long as each dash back to it passes through an enemy; one
-// that passes through none ends it when it finishes, and Shadow Step starts its whole cooldown over,
-// so the time that ran while the shadow was out is no help to a miss. It goes when its owner dies.
+// A shadow lasts 8 seconds, as long as Shadow Step's whole cooldown. The first enemy hands most of that
+// cooldown back, so Shadow Step is ready long before the shadow goes, and the key (Shadow Return while
+// the shadow is out) turns back into it the moment the shadow fades. One that is dashed back to
+// without passing through an enemy ends when the dash finishes, and Shadow Step starts its whole
+// cooldown over, so the time that ran while the shadow was out is no help to a miss. It also goes when
+// its owner dies.
+const SHADOW_STEP_COOLDOWN_TICKS = seconds(8)
 const SHADOW_STEP_RANGE = 300
 const SHADOW_STEP_SPEED = 1200
 const SHADOW_STEP_REFUND = 0.75
@@ -474,6 +478,7 @@ const shadow = {
   radius: 14,
   visual: 'field',
   color: '#7a5cff',
+  lifetimeTicks: SHADOW_STEP_COOLDOWN_TICKS,
   stayWhile: (sim, src) => sim.isAlive(src.ownerId),
 } satisfies EntityDef
 
@@ -907,12 +912,12 @@ const abilityList: AbilityDef[] = [
   },
   {
     id: 'shadowstep',
-    description: 'Dashes to the target point. Each enemy you pass through is hurt and slowed as you pass, and the first also gives you a shadow stack (up to two) for an enhanced auto, gets most of this cooldown back and leaves a shadow where you cast it. With a shadow out, this key dashes back to it instead.',
+    description: 'Dashes to the target point. Each enemy you pass through is hurt and slowed as you pass, and the first also gives you a shadow stack (up to two) for an enhanced auto, gets most of this cooldown back and leaves a shadow where you cast it, which fades after 8 seconds. With a shadow out, this key dashes back to it instead.',
     targeting: 'point',
     range: SHADOW_STEP_RANGE,
     windUpTicks: 0,
     backswingTicks: 0,
-    cooldownTicks: seconds(8),
+    cooldownTicks: SHADOW_STEP_COOLDOWN_TICKS,
     movement: true,
     indicator: { line: true },
     // Only one shadow at a time. While it is out, this key dashes toward it instead.
@@ -922,7 +927,7 @@ const abilityList: AbilityDef[] = [
   },
   {
     id: 'shadowreturn',
-    description: 'Dashes back to your shadow from any distance. Passing through an enemy does the same as Shadow Step and leaves a new shadow where you cast this; passing through none loses the shadow and puts Shadow Step on its whole cooldown.',
+    description: 'Dashes back to your shadow from any distance. Passing through an enemy does the same as Shadow Step and leaves a new shadow where you cast this; passing through none loses the shadow and puts Shadow Step on its whole cooldown. The shadow fades after 8 seconds, and then the key is Shadow Step again.',
     targeting: 'none',
     range: 0,
     windUpTicks: 0,
@@ -961,6 +966,18 @@ const abilityList: AbilityDef[] = [
     backswingTicks: 0,
     cooldownTicks: seconds(12),
     apply: [haste(0.4, seconds(1.5)), dodge(seconds(1.5))],
+  },
+  // Monsters' abilities. A monster is a champion as far as the simulator goes, so its abilities are defined here like
+  // any other, and listed on its monster (see monsters.ts); no player champion has them.
+  {
+    id: 'monster-slam',
+    description: 'A placeholder monster ability: a heavy blow to everything round the caster.',
+    targeting: 'none',
+    range: 0,
+    windUpTicks: 14,
+    backswingTicks: 10,
+    cooldownTicks: seconds(6),
+    apply: [damage(60, enemiesInRadius(130))],
   },
 ]
 

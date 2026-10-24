@@ -683,3 +683,398 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
     transform: translateX(0.75rem);
   }
 }
+
+/* The game mode the leader picks in the lobby, with what it is and why it cannot start yet. */
+#mode-select {
+  max-width: 100%;
+}
+
+.mode-summary {
+  margin: 0.35rem 0 0;
+  color: #666;
+  font-size: 0.8rem;
+  line-height: 1.3;
+}
+
+.mode-warning {
+  margin: 0.35rem 0 0;
+  color: #a02828;
+  font-size: 0.8rem;
+  line-height: 1.3;
+}
+
+/* The top middle of the game: the mode, each team's score, the hill's bar, and the flags. */
+.game-mode-hud {
+  position: absolute;
+  z-index: 2;
+  top: 0.5rem;
+  left: 50%;
+  box-sizing: border-box;
+  display: grid;
+  gap: 0.4rem;
+  justify-items: center;
+  width: max-content;
+  max-width: min(30rem, calc(100% - 2rem));
+  padding: 0.45rem 0.7rem 0.5rem;
+  transform: translateX(-50%);
+  color: #e8f4ff;
+  background: rgb(8 14 24 / 82%);
+  border: 1px solid rgb(190 215 240 / 24%);
+  border-radius: 0.5rem;
+  font: 0.8rem/1.2 system-ui, sans-serif;
+  pointer-events: none;
+}
+
+.mode-title {
+  color: rgb(232 244 255 / 65%);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mode-scores,
+.mode-flags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mode-scores li,
+.mode-flags li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.55rem;
+  background: rgb(190 215 240 / 8%);
+  border: 2px solid transparent;
+  border-radius: 0.35rem;
+}
+
+.mode-scores li {
+  border-bottom-color: var(--team-color);
+}
+
+.mode-scores li.is-local {
+  background: rgb(190 215 240 / 18%);
+}
+
+.mode-swatch {
+  flex: 0 0 0.7rem;
+  width: 0.7rem;
+  height: 0.7rem;
+  background: var(--team-color);
+  border: 1px solid rgb(0 0 0 / 45%);
+  border-radius: 50%;
+}
+
+.mode-score {
+  min-width: 1.2ch;
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.mode-hill {
+  display: grid;
+  gap: 0.25rem;
+  width: min(22rem, 100%);
+}
+
+.mode-hill[hidden],
+.mode-flags[hidden],
+.mode-hint[hidden] {
+  display: none;
+}
+
+.mode-hill-bar {
+  height: 0.9rem;
+  overflow: hidden;
+  background: #0b1220;
+  border: 1px solid rgb(0 0 0 / 55%);
+  border-radius: 0.3rem;
+}
+
+.mode-hill-fill {
+  height: 100%;
+  width: 0;
+}
+
+.mode-hill.is-held .mode-hill-bar {
+  box-shadow: 0 0 0 2px rgb(255 255 255 / 70%);
+}
+
+.mode-hill.is-contested .mode-hill-bar {
+  animation: mode-contested 0.6s ease-in-out infinite alternate;
+}
+
+.mode-hill-text {
+  text-align: center;
+  font-weight: 600;
+}
+
+/* A flag at its base is calm; one that is carried or on the ground is lit in its team's colour. */
+.mode-flags li {
+  border-color: rgb(190 215 240 / 12%);
+}
+
+.mode-flags li.is-carried,
+.mode-flags li.is-dropped {
+  border-color: var(--team-color);
+  background: rgb(190 215 240 / 16%);
+}
+
+.mode-flags li.is-dropped {
+  animation: mode-flag-pulse 0.7s ease-in-out infinite alternate;
+}
+
+.mode-flag-icon {
+  color: var(--team-color);
+  font-size: 1.1rem;
+  text-shadow: 0 0 2px #000;
+}
+
+.mode-flag-name {
+  font-weight: 600;
+}
+
+.mode-flag-state {
+  color: rgb(232 244 255 / 78%);
+}
+
+.mode-flags li.is-carried .mode-flag-state {
+  color: var(--carrier-color, #e8f4ff);
+  font-weight: 700;
+}
+
+.mode-hint {
+  margin: 0;
+  color: #f2e8a0;
+  font-weight: 600;
+  text-align: center;
+}
+
+@keyframes mode-flag-pulse {
+  from {
+    box-shadow: 0 0 0 0 transparent;
+  }
+  to {
+    box-shadow: 0 0 10px 1px var(--team-color);
+  }
+}
+
+@keyframes mode-contested {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.55;
+  }
+}
+
+/* The leader's rules in the lobby: number boxes, with the score limit of the selected mode only. */
+.rules {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.rule-row {
+  display: grid;
+  gap: 0.15rem;
+  font-size: 0.85rem;
+}
+
+.rule-row[hidden] {
+  display: none;
+}
+
+.rule-row input {
+  box-sizing: border-box;
+  width: 6rem;
+}
+
+/* Who is still in the game, and how the last one ended, for players back in the lobby. */
+.game-activity,
+.last-result {
+  margin: 0.4rem 0;
+  font-size: 0.85rem;
+  line-height: 1.3;
+}
+
+.game-activity {
+  color: #a66b00;
+}
+
+.last-result {
+  color: #444;
+}
+
+.player-status {
+  padding: 0.05rem 0.4rem;
+  color: #fff;
+  background: #3a7d5a;
+  border-radius: 0.6rem;
+  font-size: 0.7rem;
+}
+
+/* The screen over a game that is over. */
+.game-results {
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow-y: auto;
+  background: rgb(8 14 24 / 72%);
+}
+
+.game-results[hidden] {
+  display: none;
+}
+
+.results-panel {
+  box-sizing: border-box;
+  display: grid;
+  gap: 0.8rem;
+  width: min(30rem, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
+  padding: 1.2rem 1.4rem 1.3rem;
+  overflow-y: auto;
+  color: #e8f4ff;
+  background: #121c2c;
+  border: 2px solid rgb(190 215 240 / 28%);
+  border-radius: 0.7rem;
+  font: 0.9rem/1.3 system-ui, sans-serif;
+  text-align: center;
+}
+
+.results-panel[data-tone='win'] {
+  border-color: #79dfb1;
+}
+
+.results-panel[data-tone='loss'] {
+  border-color: #e5535b;
+}
+
+.results-title {
+  margin: 0;
+  font-size: 2.2rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.results-panel[data-tone='win'] .results-title {
+  color: #79dfb1;
+}
+
+.results-panel[data-tone='loss'] .results-title {
+  color: #ff9d9d;
+}
+
+.results-subtitle {
+  margin: 0;
+  color: rgb(232 244 255 / 75%);
+}
+
+.results-teams {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.results-teams li {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.3rem 0.7rem;
+  background: rgb(190 215 240 / 8%);
+  border: 2px solid transparent;
+  border-bottom-color: var(--team-color);
+  border-radius: 0.4rem;
+}
+
+.results-teams li.is-winner {
+  background: rgb(190 215 240 / 18%);
+  border-color: var(--team-color);
+}
+
+.results-teams li.is-local .results-team::after {
+  content: ' (you)';
+  color: rgb(232 244 255 / 60%);
+  font-weight: 400;
+}
+
+.results-swatch {
+  flex: 0 0 0.75rem;
+  width: 0.75rem;
+  height: 0.75rem;
+  background: var(--team-color);
+  border: 1px solid rgb(0 0 0 / 45%);
+  border-radius: 50%;
+}
+
+.results-team {
+  font-weight: 600;
+}
+
+.results-score {
+  font-size: 1.3rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.results-players {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.results-players th {
+  padding: 0.2rem 0.4rem;
+  color: rgb(232 244 255 / 60%);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.results-players th:last-child,
+.results-players td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.results-players td {
+  padding: 0.2rem 0.4rem;
+  font-weight: 600;
+  border-top: 1px solid rgb(190 215 240 / 10%);
+}
+
+.results-players tr.has-left td {
+  opacity: 0.6;
+}
+
+.results-return {
+  justify-self: center;
+  padding: 0.5rem 1.2rem;
+  color: #0b1220;
+  background: #79dfb1;
+  border: 0;
+  border-radius: 0.4rem;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.results-return:hover {
+  background: #96ebc6;
+}

@@ -24,7 +24,8 @@ export const CAST_MODE_LABELS: Readonly<Record<CastMode, string>> = {
 export function menuItems(actions: {
   getCastMode: () => CastMode
   setCastMode: (mode: CastMode) => void
-  leaveLobby: () => void
+  // Goes back to the lobby, leaving the game to the others.
+  leaveGame: () => void
   // A dev tool, left out when not given: draw the champions from a folder of art picked from disk, or
   // go back to the art the game came with.
   sprites?: { pickFolder: () => void; reset: () => void }
@@ -43,7 +44,7 @@ export function menuItems(actions: {
         { kind: 'action', label: 'Dev: reset sprites', run: actions.sprites.reset } as const,
       ]
       : []),
-    { kind: 'action', label: 'Leave lobby', danger: true, run: actions.leaveLobby },
+    { kind: 'action', label: 'Leave game', danger: true, run: actions.leaveGame },
   ]
 }
 

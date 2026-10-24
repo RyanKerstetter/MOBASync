@@ -8,6 +8,19 @@ a lightweight HTTP server.
 - `apps/client` contains the lobby interface and PixiJS game.
 - `apps/server` contains the in-memory lobby API and Geckos game server.
 
+The client's game code is split by what it does:
+
+- `game.ts` runs one game: the connection to the server, the player's input, and each frame. It works out
+  what to show from `ClientGameState` and hands it on; it draws nothing itself.
+- `render/` draws the world with PixiJS and knows nothing of the network or the simulation.
+  `WorldRenderer` stacks its layers in a fixed order (the map, the hill and flags, ground effects, indicators,
+  champions, carried flags, shots, damage numbers, debug), and each frame it is given a plain `WorldFrame` to draw. The ground is a
+  `MapView` handed to it: `createGameMap` gives it the Tiled map, or the plain arena floor when there
+  is none (see "Maps from Tiled"). The pure layout code the layers draw from (`health-bar.ts`, `stack-pips.ts`,
+  `attack-marker.ts`, `status-labels.ts`, `hitboxes.ts`) is beside them.
+- `ui/` is what is drawn over the canvas as ordinary page elements: the HUD, the game mode's scores, hill bar
+  and flags, the scoreboard and killfeed, and the diagnostics overlay, each a `*-view.ts` over its pure logic.
+
 ## Run the project
 
 Install dependencies once from the project root:
@@ -38,8 +51,13 @@ Blue, Green, Gold, Purple, Orange, Teal and Pink, one for every player a full lo
 joins is put on the smaller of the first two teams, Red when they are level, so a lobby fills up as
 two even teams, and renaming keeps your team. Players on the same team are teammates and everyone
 else is an enemy, so if everyone picks a different team, a full lobby is an eight-way free for all.
-Teams can be changed only in the lobby, not once champion select has opened. The
-lobby leader starts the game for the whole lobby, which first opens champion
+Teams can be changed only in the lobby, not once champion select has opened. A team holds at most
+four players (`GAME_MAX_TEAM_SIZE`): the server turns a fifth away, and the button of a full team is off.
+The leader also picks the game mode from the **Game mode** drop-down (team deathmatch, king of the hill or
+capture the flag, see "Game modes") and sets the **Game rules** under it: how long a champion stays dead, the
+score to win at (the box for the mode that is picked, and only that one), and for king of the hill how long
+the hill takes to capture. Everyone sees what is set, and it is fixed once champion select opens.
+The lobby leader starts the game for the whole lobby, which first opens champion
 select for everyone: pick a champion, then lock in. Picks are visible to the other
 players, and any player can back out for the whole lobby. When every player has
 locked in, the game moves to its loading screen, which stays up until every player
@@ -55,7 +73,8 @@ tick, cached snapshots from that tick onward are invalidated and recomputed.
 Movement stays at its destination implicitly once its calculated travel time
 completes; the simulator does not append a hold order.
 Right-click the map to issue a movement order. Click an enemy to attack, or
-press Space to attack the closest enemy in range. Both are timestamped intents
+press Space to attack the closest enemy, near or far (one out of reach is walked up to, as when it is
+clicked). Both are timestamped intents
 ordered deterministically by `(tick, sequence, player, id)`. The client inserts
 its own order into the simulator immediately. The server acknowledges log
 insertion separately from gameplay validity. Every peer uses the shared
@@ -87,26 +106,184 @@ lock lives in the frame, so it is part of every checkpoint and replay like any o
 
 On the screen, an enemy a click would attack is marked when the mouse is over it (four small ticks
 around it and a crosshair cursor), so you can see that the attack can be queued; the enemy the attack is locked
-on keeps slightly heavier red ticks for as long as it is (`attack-marker.ts`). Neither shows while an ability is
+on keeps slightly heavier red ticks for as long as it is (`render/attack-marker.ts`). Neither shows while an ability is
 being aimed, since the click would cast it, or while dead.
 
 What is affecting a champion is written in small words above its name (`stunned`, `rooted`, `silenced`,
-`blinded`, `burning`, `slowed`, `hasted`, all that apply, the most disabling first; `status-labels.ts`), not
+`blinded`, `burning`, `slowed`, `hasted`, all that apply, the most disabling first; `render/status-labels.ts`), not
 drawn as a coloured ring around it.
 
 ## The map and the camera
 
-The map is 2400 by 1350 (`GAME_ARENA_WIDTH` and `GAME_ARENA_HEIGHT`), three times the width and
-height of the original single-screen arena, and champions walk anywhere on it; its edge stops
-them at their radius. Teams start spread round the middle of the map. The circle is as big as fits
-with `GAME_SPAWN_MARGIN` to spare from the nearest edge (`GAME_SPAWN_RADIUS`, 475), each team gets
-an equal slice of it, in order of team number starting from the west and going round clockwise, and
-a team's players stand side by side at the middle of its slice, `GAME_SPAWN_TEAMMATE_SPACING` apart.
-Two teams therefore face each other across the middle, and eight teams of one are evenly round it.
-The layout is the pure function `teamSpawnPositions` (`teams.ts`): the server works out the starting
-places once, rounds them to whole numbers and sends them in the snapshot, so no peer depends on
-trigonometry giving the same answer.
-The floor has a grid so movement across it is visible.
+The arena is as big as the `arena` rectangle of the map from Tiled, once drawn (at the usual scale of
+three, a rectangle of 803 by 494 pixels is 2409 by 1482), and champions walk anywhere on it that no wall
+holds them out of; its edge stops them at their radius. The world's origin is the top left corner of that
+rectangle. With no map, a game is on the plain arena (`GAME_ARENA_WIDTH` by `GAME_ARENA_HEIGHT`, 2376 by
+1440) with no walls, which is what the tests use. The ground (the arena's size and its walls) is a
+`Terrain`, which the simulator holds and every snapshot carries (a few bytes a wall), so a client plays on
+exactly the ground the server does.
+
+Where teams start comes from the map's spawn points (see below). The biggest team in a game starts at
+the first slot of points, the next biggest at the second, and so on, with a tie going to the team with
+the lower number, and a team's players take the points of its slot in the order they are listed in the
+lobby (`assignSpawns`, `spawns.ts`). So where a team starts depends on how big the teams are, not on
+which colours they picked or who joined first. The server works out the starting places once and sends
+them in the snapshot, so no peer works them out for itself.
+The floor has a grid so movement across it is visible, when there is no map from Tiled to draw instead.
+
+### Maps from Tiled
+
+The ground can be a map made in [Tiled](https://www.mapeditor.org), and there can be as many as you like: every
+`.tmj` in `res/maps` is a map the lobby leader can pick from the **Map** drop-down (see "Choosing a map" below).
+The game draws the map the lobby picked in place of the plain floor, and the server reads the same file, for the
+arena, the walls, the spawn points and the hill and flags of the game modes, every time a game starts (when the
+leader presses Start), so a map exported from Tiled is played on by starting a new game, with no restart of the
+server and no reload of the lobby. It will not start a game on a map it cannot play on: the leader is told
+everything that is wrong with it (`readMapLayout`) and the lobby stays as it was. A browser that cannot use the
+map draws the plain arena floor instead (of the map's size) and says why in the console, and one whose map is not
+the one the server played on says so in the console too. The server finds a new map within a second, but the
+browser's copy of the map files is bundled into the page when it loads, so a map added later needs a reload under
+`npm run dev`, and a rebuild of the client (`npm run build:client`) for a hosted build, before a page can draw it. The shapes of the map's objects are outlined in the debug view (P). `GAME_MAPS_DIR` makes the server
+read its maps from another folder than `res/maps`. Nothing else assumes a map: `DEFAULT_MAP_ID` (`ffa_arena`) is
+only the map a new lobby starts on, if the server has it (or else the first that can be played on).
+
+### Choosing a map
+
+The server lists every map it has (`MapCatalog`, `apps/server/src/maps.ts`): each `.tmj` in the folder, and each
+`.json` that is a map (a tileset saved as `.json` is not listed). A map is only read again when its file changes,
+and the folder is looked at once a second at most, so a map saved in Tiled appears in every lobby's list. What the
+lobby is told of each (`MapSummary`, `packages/shared/src/maps.ts`) is: its name, a line about it, its size, how
+many players each team slot holds, whether it has a hill, and whether it has the flags for the first two teams.
+A map that cannot be played on is listed with what is wrong, but cannot be picked.
+
+- **Name and line:** give the map the properties `title` and `description` (text, on the map itself, in Tiled's
+  *Map → Map Properties*). With no title the map is named after its file (`duel_arena` is "Duel Arena").
+- **The leader picks the map** (`POST /api/lobbies/:code/map`, leader only, while the lobby is idle), and the lobby
+  says what it is: its size, which team setups it takes, and which modes it has what they need for.
+- **Only modes the map supports can be picked.** King of the hill needs a hill and capture the flag needs a flag for
+  each of the first two teams (`modeSupportProblem`). The others are in the mode list but greyed, with "(not on
+  this map)". Picking a map that lacks the selected mode puts the lobby back on team deathmatch and says so; the
+  server turns a request for an unsupported mode away, with the reason.
+- **The teams have to fit the map** (`teamSetupProblem`). The biggest team starts at the map's first slot of spawn
+  points, the next biggest at the second, and so on (a tie to the lower team number), so a map needs a slot for each
+  team, and each slot must hold the team that takes it. A lobby that does not fit shows the reason under the mode
+  list, in words, and Start is off until it is put right: `Duel has starting places for 2 teams, and there are 3.`,
+  or `Blue, the 2nd biggest team, has 3 players, but Tight Quarters only has room for 2 on its 2nd biggest team.`
+  Several problems are said together. The server checks the same thing (`startProblem`, one function for the page
+  and the server, so they agree) when the leader presses Start, and again when the last player locks in a champion,
+  since players leave while champions are picked: a game whose teams no longer fit is called off.
+
+- **Saving:** save the map as JSON (`.tmj`). Tile layers must be stored as CSV or uncompressed
+  Base64 (the map's Tile Layer Format; the default is CSV). Maps must be orthogonal, and can be of
+  a set size or infinite.
+- **Where the files go:** the map, its tilesets (`.tsx` or `.tsj`, or embedded in the map) and their
+  pictures must all be somewhere inside `res/maps`. Tiled writes paths from where it found them, so
+  a tileset or picture the map names at a path that is not there (in Downloads, say) is found by its
+  file name instead, as long as only one file in `res/maps` has it. The game says which file is
+  missing if one is.
+- **What is drawn:** tile layers (with flips and turns), tiles that are objects, picture layers and
+  group layers, with their offsets, opacity and visibility, and the map's background colour. A tile
+  larger than the grid sits on the bottom left of its cell, as in Tiled. Not drawn yet: tile
+  animations, tints, parallax, and isometric or hexagonal maps.
+- **Size:** a pixel of the map's art is drawn `GAME_ART_SCALE` (3) world units across, the same as the
+  champions' sprites, or whatever the map's own custom property `worldScale` (a float) says.
+- **The arena:** one rectangle object of class `arena` covers the ground champions walk on. Its top left
+  corner is the world's origin, so the art around it (a rim, say) is drawn at negative positions and past
+  the far edges, wherever Tiled put it. Its size is the size of the ground, so it can be changed in Tiled
+  and nothing else has to be.
+- **Walls:** rectangle objects of class `wall`, in any layer, as many as there are. Champions cannot walk
+  through them and walk round them (see "Walls and walking"); nothing else is stopped by them. They must be
+  plain rectangles, not turned (other shapes are refused for now), and one the arena does not reach is left
+  out. The walls are not drawn: the art is whatever tiles are drawn under them, and the debug view (P)
+  outlines the walls, so the two can be lined up.
+- **Spawn points:** point objects of class `spawn`, each with a whole-number property `team-name`, the
+  slot it is in (1 to 8), and a `spawn-number`, which of the slot's points it is (1, 2, 3 ... with none
+  missing). **How many slots, and how many points in each, is what the map allows**: a map has a slot for each
+  team it can start, in order from 1 with none skipped, and as many points in each as the team of that rank
+  can have players. A map of two slots of four takes two teams of up to four; one with 3, 3 and 2 takes three
+  teams, two of up to three and one of two. A map with 4, 4, 2, 2, 1, 1, 1, 1 points (`spawnPointsNeeded`) takes
+  every way eight players can split into teams of up to four (the k biggest teams are each at least as big as the
+  kth, so the kth has at most 8 / k players), which is what `ffa_arena` has. A map with no points, or that skips a
+  slot, is refused. Points are measured from the arena's corner and must be inside it. Two slots can share a
+  place when no game can use both points (a game that has a team of two in its fourth slot has no fifth team,
+  so the fourth slot's second point and the fifth slot's only point can be the same), but check that first,
+  because two champions started on one place push each other apart. A point must have room for the widest
+  champion (`GAME_MAX_CHAMPION_RADIUS`, 24) clear of the walls and the arena's edge, and every point must be
+  somewhere a champion can walk to from every other, or the map is refused: a team could start shut in.
+- **Hill (king of the hill):** at most one object of class `hill`, an ellipse (a circle if it is as wide as
+  it is tall) or a plain rectangle, not turned. It is the place that is fought over. A champion is on it
+  when its middle is in the shape. A hill that is not at all in the arena is refused. A map with no hill
+  is fine, but king of the hill cannot be started on it: the leader is told why. The hill is not drawn
+  by the map: the game draws it (and fills it as it is captured), so the art under it is up to you.
+- **Flags (capture the flag):** point objects of class `ctf-flag`, each with a whole-number `team-name`: the
+  slot of spawn points whose base the flag is at (1 to 8, once each). Slot 1 is where the biggest team in
+  a game starts and slot 2 the next biggest (see `assignSpawns`), so the first flag is the biggest team's,
+  and capture the flag, which is for two teams, uses the flags of slots 1 and 2. Like a spawn point, a flag
+  needs room for a champion clear of the walls and the arena's edge, and a way to it from the spawn points.
+  A map with fewer than two flags is fine, but capture the flag cannot be started on it.
+- **Monsters:** point objects of class `monster`, each with a text property `monster` naming one of the game's
+  monsters (`wolf`, see "Monsters"). The monster is in the game from the start, at its point, which is its home.
+  A point needs room for that monster's size clear of the walls and the arena's edge, and an unknown name is
+  refused with the list of the known ones. A map with none has none, and every mode has the map's monsters.
+
+The Tiled file is read by `parseTiledMap` in `packages/shared/src/tiled.ts`, which is only parsing and
+arithmetic, so the server uses it too: `readMapLayout` (`map-layout.ts`) takes the arena, the walls, the
+spawn points, the hill and the flags from it, and `apps/server/src/map.ts` loads the file. What draws it is
+in `apps/client/src/render`: `tiled-assets.ts` finds the files (Vite gives each its address, in
+development and in a build, and `.tsx` tilesets are read as text because Vite takes them for
+TypeScript), `tiled-loader.ts` loads a map and its pictures, and `TiledMapView` draws it as a
+`MapView`. Each tile layer is drawn once onto a canvas just big enough for its tiles and shown as
+one picture, so there are no hairline gaps between tiles at any zoom.
+
+## Walls and walking
+
+Walls hold champions out while they walk, and that is all they do: attacks, abilities, shots, dashes,
+blinks and knockbacks all go over them, and so does attacking a target across one that is in reach.
+They are baked into the map, so they never change in a game and are not in the simulation's frames, so
+rollback has nothing to undo. `Terrain` (`terrain.ts`) is the ground, and the simulator asks it three
+things:
+
+- `clamp(position, radius)` holds a body inside the arena. It is all that holds a dash, a shot or the
+  medic bot, which go over walls.
+- `resolve(position, radius)` is where a body can stand nearest to a point: clamped, and pushed out of any
+  wall. It is how a click, a respawn, a blink and the end of a dash are made to land somewhere a champion
+  can be, and `keepOutOfWalls` is the push alone. A circle is pushed out of a rectangle by the shortest way,
+  along the line from the rectangle's nearest point, so it goes round a corner on a curve, and one whose
+  centre is inside leaves by the nearest side that is still inside the arena. Every tick a walker is pushed
+  out of any wall it stepped into, so the part of its step along the wall is kept and it slides; characters
+  pushed by others are held out of walls too (the wall wins, and the pair overlap a little). A character
+  that is dashing is not, so a dash can be inside a wall on the way, but it lands outside.
+- `path(from, to, radius)` is the way round walls, below.
+
+A walk is a move order, or a chase (an attack order on someone out of reach, which walks toward them each
+tick and swings when they are in reach, wall or no wall). Each tick a walker asks for the path from where
+it is to where it is going and heads for the first point of it, so nothing about the path is kept in the
+frame, a new order or a moved target simply changes the answer, and a late order recomputes the same
+frames. A click inside a wall walks to the nearest place a champion can stand, and a target that no way
+leads to (walled in) leaves the champion where it is.
+
+### Pathfinding
+
+How a body finds its way is a `Pathfinder` (`pathfinding.ts`): given where it is, where it is going and its
+radius, the points to walk through, in order (straight between them never touches a wall), empty when it is
+already there, `undefined` when there is no way. It must be a pure function of its arguments and the
+walls, because it is part of the simulation, and every peer must use the same one. `Terrain` is built with a
+`PathfinderFactory` (`new Terrain(arena, walls, factory)`, the visibility graph by default), so another
+method is a function that takes the walls and gives back a pathfinder, and nothing else changes.
+`tests/pathfinder-contract.ts` is what any pathfinder has to pass (`pathfinderContract(name, factory)`).
+
+The visibility graph (`visibility-graph.ts`) is the string pulled tight round the walls. Each wall is
+grown by the body's radius so the body can be a point, the graph's nodes are the corners of the grown walls
+(a pixel out, so a body at one is clear of the wall), and two nodes are joined when the straight line
+between them does not go through a wall. The start and the target are joined to the nodes they can see
+and the shortest way through the graph is taken (Dijkstra, the lowest node first on a tie, so peers agree).
+A clear line is one straight segment and costs a handful of checks. The graph is built once for each
+radius, the first time one is asked for. It grows with the square of the number of corners, so it suits
+maps of a few dozen walls; a bigger map wants a navigation mesh, which is another factory. A body that is
+touching a wall round a corner is inside the square the grown wall makes, so it first steps out of it,
+and a target in a wall is moved to the nearest place outside it.
+
+In the debug view (P) the path of the champion you control is drawn as a yellow line through its points.
 
 ## Teams
 
@@ -128,6 +305,162 @@ champion you control, since a green fill no longer tells you which it is. Clicki
 Space key, and an ability aimed at a unit never pick a teammate, and the lobby shows
 each player's team by colour and name. Champion select lists who is picking what grouped by team, a heading in
 the team's colour over each group.
+
+## Game modes
+
+The lobby leader picks the mode (`GAME_MODES` in `packages/shared/src/modes.ts`) and the server keeps it on
+the lobby (`POST /api/lobbies/:code/mode`, leader only, while the lobby is idle). Starting a game checks that the
+mode can be played (`modeStartProblem`): the server turns a start away with the reason, and the lobby says
+the same so the leader knows before pressing Start (capture the flag shows what is wrong under the
+drop-down, and Start is off until it is put right). Every mode keeps the kill counts and the leaderboard.
+
+- **Team Deathmatch** (the default): a team's score is the kills its players have made. The kills are kept in
+  the frame (`ObjectiveState`, scored on the tick of the kill, to the killer's team), not added up from the
+  characters, so a team keeps its kills when a player goes back to the lobby.
+- **King of the Hill:** the team with more living players on the hill than any other team fills the hill's bar
+  for itself, one tick's worth a tick, however many more it has. How long that takes from empty to full is the
+  leader's to set (**Seconds to capture the hill**, 1 to 120, ten by default; `captureTicks` in the setup,
+  `GAME_HILL_CAPTURE_TICKS` is the default). The bar goes up for the team that leads (`hillMovement`), whether it
+  is empty, that team's own, or full. It goes **down** when it is another team's and some team has more
+  players on the hill than the bar's team has, *even if the teams outnumbering it are level with each other*, so
+  a team that has left the hill to two rivals, or is outnumbered by a crowd of them, loses its bar to nothing
+  while they fight: it does not freeze, and an empty bar fills only for a team that has the lead. Equal numbers
+  with the bar's team, or nobody on the hill, leave the bar as it is, and the dead do not count. A team
+  *holds* the hill while its bar is full, and scores a point every second (`GAME_HILL_POINT_TICKS`) for as
+  long as it does, so a tie with the holder leaves it held and scoring, and the points stop the moment the
+  bar drops from full.
+- **Capture the Flag:** for exactly two teams. Each team has a flag at its base, on the map's flag of the slot
+  the team starts at. A champion that walks up to the other team's flag (within `GAME_FLAG_RADIUS` and
+  its own radius) picks it up, whether it is at its base or on the ground, and carries it. Carrying it to its
+  own team's base turns it in, for a point for its team, and the flag goes back to its base, **but only
+  while its team's own flag is at its base**: if the own flag is out (carried, or dropped), the carrier
+  keeps carrying and nothing scores until it is back. A carrier that dies (or leaves) drops the flag
+  where it was, and it stays there until a living champion of the flag's own team walks over it, which sends
+  it back to its base, or an enemy picks it up again. A flag does not go home by itself, and only a champion of
+  its own team returns it.
+
+**Winning.** The leader sets the score a team wins at for each mode (`Kills to win`, `Points to win`, `Captures to win`;
+defaults 25, 100 and 3; 0 is no limit, and a game with none goes on until the leader ends it). The server checks
+the score as the commit tick has it, which no late order can still change, so no one is told of a win that is then
+taken back (`winningTeam`, in `ServerGameState.advanceTick`). The team that has reached the limit and is ahead of
+every other wins; two teams that reach it level play on until one is ahead. The score each team is playing to is in
+the title of the mode's panel on screen (`TEAM DEATHMATCH · FIRST TO 25 KILLS`).
+
+**Respawn time** is a rule too (1 to 60 seconds, three by default). It is part of the setup the snapshot carries
+(`respawnTicks`), so every peer brings a champion back on the same tick, and a champion that is dead sees
+`Respawning in 8s` where its health was.
+
+### Playing a game through, and going back to the lobby
+
+A game is `running` until a team wins or the leader ends it, and then `finished`: it stops running, and the server
+sends everyone still in it the result (`game:ended`, a `GameResult`: how it ended, each team's score, each player's
+kills, marking those who had left). Their game stops taking orders and a results screen
+(`ui/results-view.ts`, from `ui/results.ts`) shows **Victory** or **Defeat** (or the winner's name to a player on no
+team, or "Game ended" when the leader ended it) with the scores and a **Return to lobby** button. The result is also
+kept on the lobby (`lastResult`) and shown to everyone in it until the next game starts.
+
+Going back to the lobby does not leave it. **Escape → Leave game** (or **Return to lobby** on the results) takes the
+player back to the lobby page (`POST /api/lobbies/:code/leave-game`) and the game goes on without them: their
+champion is taken out of it (a flag it carried is dropped), their kills stay on the results, and the lobby shows who is
+still `In game` and how many are playing. A game that has begun and has no one left in it **shuts down**, whether it
+was running or over, and the lobby can start another. A player who left cannot rejoin that game.
+
+The leader's **End game** button in the lobby (`POST /api/lobbies/:code/end`) ends a running game for everyone, with the
+score as it stands (the team ahead wins, if one is); on a game that is already over it reads **Close game** and shuts
+it down, sending anyone still looking at the results back to the lobby. Players who close their tab or leave the
+lobby leave the game the same way.
+
+How a game of a mode is played out is `advanceObjective` (`modes.ts`), plain whole-number arithmetic on the
+hill's bar and the flags, run by the simulator at the end of every tick it computes (so after the tick's
+deaths and blinks). Its state is in the frame (`GameFrame.objective`: for the hill the team whose bar it is,
+how full it is and the points, for capture the flag where each flag is, who carries it, and the points),
+so, like everything else in a frame, it is recomputed when a late order changes who was where, it is in
+every snapshot's checkpoint, and every peer agrees on it. What the mode is played on, which cannot change
+during the game (the hill's shape, or each team's flag base), is the snapshot's `mode` (`ModeSetup`), worked out
+by the server when the game starts (`createModeSetup`): the flag of the first team in `rankTeams` order (the
+biggest, a tie to the lower number) is the first flag of the map. A snapshot with no `mode` is team deathmatch.
+If players leave champion select and the mode cannot be played by whoever is left (capture the flag down to
+one team), the start is called off and the lobby is back to being a lobby.
+
+What the players see: the top middle of the screen (`ui/mode-hud.ts`, `mode-hud-view.ts`) names the mode and
+shows each team's score, highest first with the local player's team marked; on the hill, the bar in the colour
+of the team whose it is, with who is capturing, pushing back or holding it (and that it is contested); in
+capture the flag, a card for each flag (at base, dropped, or carried by whom, in the carrier's team colour)
+and a hint to the local player (bring the flag home, your own flag is out, return your dropped flag). On the
+map (`render/objective-layer.ts`) the hill is outlined and filled from its middle by the share captured, with the
+share written over it, flickering while contested and with a heavy outline once it is held; the flags stand on a
+ring at their bases, a dropped flag lies on the ground with a pulsing ring, and a carried flag is held at the
+carrier's side over it, with a ring in the flag's colour round the carrier. `ClientGameState.getModeView`
+makes all of it from the frame being drawn.
+
+## Monsters
+
+Monsters are characters the game plays itself, to be fought: camps to clear, bosses, whatever the game needs. This is
+the scaffolding for them, with one placeholder monster (the `wolf`) to build on; what they are, and how they behave,
+is for the game's content to work out.
+
+**What a monster is** (`monsters.ts`). A `Monster` is a champion (health, an attack, abilities, a size: the simulator
+plays it with the same combat code as a player's champion, so everything abilities can do, they can do to a monster and
+a monster can do) plus an `AiProfile`. Abilities are defined with the rest in `abilities.ts`, listed on the monster's
+`abilities`, and used by its profile. Monsters are in their own registry (`monsters`), not `champions`, so they are not
+on the champion select screen; ids are shared, so a monster cannot have a champion's.
+
+**The AI profile** (`AiProfileDef`):
+
+| Field | Meaning |
+| --- | --- |
+| `aggroRange` | An idle monster goes after the nearest player this near. |
+| `deaggroRange` | A monster after someone gives up on them when they get this far from it (default 1.5 × aggro). Between the two ranges it keeps hold of a target it has, but would not have noticed them. |
+| `leashRange` | How far from home it will go. Past it, it gives up whoever it is after, however close, and walks home. |
+| `abilities` | Rules for what it casts in a fight, best first: an ability, `withinRange` of the target (else the ability's own range, else its attack range) and optionally `belowHealth` (a share, for an ability it keeps for when it is hurt). The first rule that can be cast is, when it is free to act. |
+| `respawnTicks` | How long after dying it comes back at home with full health. Without it, it does not. |
+| `resetOnReturn` | Healed to full (and cleansed) when it gets home after giving up. Default yes. |
+| `aggroOnHit` | An idle monster goes after whoever hurts it, from beyond its aggro range, if they are within its deaggro range. Default yes. |
+| `homeRadius` | How near home counts as home (default 30). |
+
+**How it behaves** (`think`, `ai.ts`). A monster is *idle* (at home), *chasing* or *returning*:
+
+- Idle, it notices the nearest living enemy in its aggro range (or whoever hurt it), and starts a chase.
+  If something pushes it off its post it walks back.
+- Chasing, it gives its attack order, and the simulator's attack lock does the rest: it walks up to its target and
+  strikes it again and again, round walls. It keeps the same target while it can, uses its abilities when its rules say
+  (an ability with a windup stops the attack lock, so it puts it back afterwards), and gives up when the target dies or
+  passes the deaggro range (taking the nearest player in aggro range instead, if there is one) or when it is past
+  its leash.
+- Returning, it walks home paying no attention to anyone, so it cannot be kited back and forth. At home it is healed
+  and idle again.
+
+**It runs inside the simulation**, not beside it. `think` is a pure function of what a monster can see (the frame: where
+everyone is, health, cooldowns, what it was doing), and the simulator calls it for every monster on every tick it
+computes, turning what it decides into the same orders a player gives (move, attack, cast, with ids like
+`ai:10:482:0`). So the server and every client work out the same monsters with nothing sent about them (only the `ai`
+state in a monster's frame: its mode and target, which the frame keeps because it cannot be worked out from the rest),
+a late order that changes who was where plays the monsters out again from that tick, and a snapshot carries them. The rule
+that follows: **a monster's choices may depend only on what is in its arguments**. No random numbers, no clock, no
+iteration order that is not by ID. If a monster needs a variety of choices, derive it from the tick and the IDs.
+
+**What a monster is not.** All monsters are on one team (`GAME_MONSTER_TEAM`, 9): enemies of every player, teammates of
+each other, so a blast from one never hurts another. The team is no team of the game: monsters have no score, are not on
+the leaderboard or the results, stand on the hill and walk over flags without taking either, and a game with only monsters
+left is not a game with players in it. A player's `kills` are kills of players, and so are a team's in team
+deathmatch, so killing a monster, or being killed by one, scores for no one: the death still reaches `onDeathConfirmed`
+(the killfeed shows "Alice defeated Wolf"), with the victim and killer to look up, for whatever the game decides it is
+worth.
+
+**On the page.** Monsters are named and drawn like champions (a circle in the monsters' colour, until they have sprites,
+which go in `champion-sprites.ts` under the monster's id), can be clicked and attacked, and are what Space attacks if
+they are the nearest enemy. The debug view (P) draws each monster's aggro range (yellow) and deaggro range (orange) round
+it and its leash range (cyan) round its home, which is marked.
+
+**To add one:** write its abilities in `abilities.ts` if it has new ones, add a `Monster` to the list in `monsters.ts`, and
+put a `monster` point with its id on a map. `tests/ai.test.ts` is `think` on its own (aggro, targets, leash, deaggro,
+abilities, returning), `tests/monsters.test.ts` is monsters in a simulator (fights, going home, respawning, rolling back,
+snapshots), and `defineMonster` in `tests/fixtures.ts` registers one for a test.
+
+**Not here yet**, where a game would want it: monsters in a camp helping each other (a hit on one aggros the others),
+patrols or wandering, target choices other than the nearest, the AI telling players what it is about to do, loot or
+experience for a kill, and a lobby switch for whether a game has monsters. They would go in `think` (new fields in the
+profile and in `AiState`) and in `thinkMonsters` in `simulator.ts`, which gathers what `think` sees.
 
 ## Collision
 
@@ -161,7 +494,7 @@ shows; a wider or taller screen shows more on its long side instead of leaving b
 enough that an ability aimed at its full range is on screen, since the champion is in the middle and
 the longest reach of any ability is about 650. Past the map's edge you see the dark background.
 
-The bottom of the screen is the HUD (`hud.ts` works out what it shows and `game.ts` fills in the
+The bottom of the screen is the HUD (`ui/hud.ts` works out what it shows and `ui/hud-view.ts` fills in the
 elements): the controlled champion's exact health as `hp / max`, with any shield as `+n` beside it and
 laid after the health on the bar, and a slot for each ability on its key. A slot fills from the
 bottom as the cooldown runs, shows the seconds left, and lights up when the ability is ready; a key
@@ -178,8 +511,8 @@ health from the left, the shield on the end of it in white, and the health still
 that. The bar stands for the maximum health, or for health plus shield when that is more, so a
 big shield shrinks the rest of the bar instead of running off the end. A small tick marks every
 100 health and a taller, thicker one every 1000 (`HEALTH_TICK_EVERY` and
-`HEALTH_MAJOR_TICK_EVERY` in `game.ts`). The layout is the pure function `layoutHealthBar`
-(`health-bar.ts`), which `game.ts` only draws. A champion's maximum health is at most 1000 so far,
+`HEALTH_MAJOR_TICK_EVERY` in `render/character-layer.ts`). The layout is the pure function `layoutHealthBar`
+(`render/health-bar.ts`), which `render/character-layer.ts` only draws. A champion's maximum health is at most 1000 so far,
 so a 1000 tick shows only when a shield stretches the bar past it.
 
 ### The escape menu
@@ -187,8 +520,8 @@ so a 1000 tick shows only when a shield stretches the bar past it.
 Escape opens a menu over the game (and closes it again). The game goes on behind it, and while it is
 open nothing reaches the game: no keys, and no clicks on the map. If an ability is being aimed,
 Escape drops the aim first, as it always has, and opens the menu on the next press. It offers the
-cast mode (quick cast, or quick cast with an indicator) and leaving the lobby, which takes the
-player out of the lobby and the game, as the lobby's own Leave button does.
+cast mode (quick cast, or quick cast with an indicator) and **Leave game**, which takes the player back to the lobby
+and leaves the game to the others (the lobby's own Leave button is what leaves the lobby).
 
 It is built to grow. `menuItems` in `game-menu.ts` is the list of rows, as data: a `choice` (a few
 options with the current one lit) or an `action` (a button), each given what to do by the game, so the
@@ -202,9 +535,10 @@ is what they last chose the next time they play. A setting is a field of `GameSe
 P toggles it on and off (nothing to hold). It outlines every body that can touch something, as the
 simulator sees it and whatever it is drawn as, so it stays right when everything is a sprite: each
 living champion's body circle (yours in green, others in red; the dead have none), and each entity's
-circle or rectangle, turned the way it faces (orange). `hitboxShapes` (`hitboxes.ts`) works the
-shapes out from the same rendered characters and entities the game draws, and `game.ts` outlines
-them on a layer kept above everything else. A new kind of body is drawn by adding it there.
+circle or rectangle, turned the way it faces (orange). `hitboxShapes` (`render/hitboxes.ts`) works the
+shapes out from the same rendered characters and entities the game draws, and `HitboxLayer` outlines
+them on a layer kept above everything else. A new kind of body is drawn by adding it there. It also draws
+the path the champion you control is walking (`ClientGameState.getLocalPath`) round the walls.
 
 ### Sprites and animation
 
@@ -247,7 +581,7 @@ fps: 10, loop: false }`. To draw another champion, add a set under its ID.
 for it in `chooseAnimation`. `tests/animation.test.ts` checks each set against its sheets (every
 clip fills its sheet exactly) and the roster, so a wrong frame count fails the tests.
 
-Stacks are drawn as pips under the body, by the pure function `layoutStackPips` (`stack-pips.ts`).
+Stacks are drawn as pips under the body, by the pure function `layoutStackPips` (`render/stack-pips.ts`).
 There are two kinds, told apart by shape, colour and row, so two with similar colours can never
 share a spot. A champion's own stacks (Swordsman's sword, Capricorn's empowered, Ninja's shadow) are
 round and sit in the row nearest the body. Marks that other champions place on it (Cursebearer's
@@ -327,7 +661,7 @@ Q/W/E/R cast at the cursor in one of two cast modes, as in League of Legends, se
 `castMode` option of `startGame` (`DEFAULT_CAST_MODE` in `cast-control.ts`; there is no menu
 for it yet). Quick cast with indicator, the default, shows the ability's indicator while its key
 is held and casts where the cursor is when the key is let go; Escape, the window losing focus, or
-giving a move or attack command (right-click, clicking an enemy, or Space with an enemy in range)
+giving a move or attack command (right-click, clicking an enemy, or Space with an enemy anywhere)
 drops the aim without casting. Quick cast casts the moment the key goes down. In both, an ability
 with nothing to aim (targeting `none`) casts on the press. Pressing another ability key while
 aiming moves the aim to it. A skillshot's indicator is just its band. An ability aimed at a point
@@ -566,9 +900,9 @@ gives nothing back. `capCooldown(abilityId, ticks)` is the event behind "no more
 second to wait": it sets a ceiling on what is left of a cooldown, where the refunds only take a share
 off. Effects can find their caster's own entities (`SimReader.entitiesOf`, the `ownEntity(defId)`
 anchor that Warp blinks to and the recall launches from) and remove them (`removeEntities`). A
-shot with `stopsAtWalls` never leaves the arena: a straight one ends where its edge meets the wall
+shot with `stopsAtWalls` never leaves the arena: a straight one ends where its edge meets the arena's edge
 instead of flying on past it, running its `onExpire` there, and one that lands at its aim
-(`landAtAim`, which is how the stick is thrown) flies to the aimed point held inside the wall. The
+(`landAtAim`, which is how the stick is thrown) flies to the aimed point held inside the arena. The
 stick's throw uses it so that the stick always lands somewhere the Trinketmaster can walk to. It
 is worked out when the shot is spawned, and only shortens the flight.
 
@@ -582,15 +916,18 @@ to by then, and the first he reaches also gives him a shadow stack (one, however
 hands back 75% of Q's cooldown, and leaves a shadow where he was standing when he cast it. While a
 shadow is out the key becomes Shadow Return (the ability's `recast`, `requires` an entity `shadow`
 out), which dashes back to the shadow from any distance, and does the same for the enemies it
-passes, leaving a new shadow where it was cast from, so a chain of dashes goes back and forth
-through one enemy and a third finds the stacks already full. A shadow has no timer and is lost only
-by a dash back to it that finishes without passing anyone, or when the Ninja dies. Shadow Return has
-a one-second cooldown of its own, started when the dash that left the shadow reached its enemy, so
-the dash back is not ready the moment the dash forward is over and the chain cannot be spammed. A
-miss puts Shadow Step on its whole cooldown from the moment the dash back finishes
-(`startCooldown`), so the time that ran while the shadow was out is no help and Q cannot be cast
-twice in a row. (The Trinketmaster's stick is deliberately the other way: its cooldown keeps
-running while the stick is out, and calling it back leaves it alone.) W, Kunai, is a piercing line shot that hurts and slows every
+passes, leaving a new shadow where it was cast from. A shadow lasts 8 seconds (`lifetimeTicks`, as long
+as Shadow Step's whole cooldown) and then fades, and the key is Shadow Step again from then. Q was
+ready long before, since the first enemy hands three quarters of its cooldown back, so it is only the
+key that waits. A dash back through an enemy hands Q's cooldown back too and leaves a new shadow with
+8 seconds of its own, a chain of dashes going back and forth through one enemy until a third finds
+the stacks already full. A shadow is also lost by a dash back to it that finishes without passing
+anyone, or when the Ninja dies. Shadow Return has a 1.75 second cooldown of its own, started when the
+dash that left the shadow reached its enemy, so the dash back is not ready the moment the dash
+forward is over and the chain cannot be spammed. A miss puts Shadow Step on its whole cooldown from
+the moment the dash back finishes (`startCooldown`), so the time that ran while the shadow was out is
+no help and Q cannot be cast twice in a row. (The Trinketmaster's stick is deliberately the other
+way: its cooldown keeps running while the stick is out, and calling it back leaves it alone.) W, Kunai, is a piercing line shot that hurts and slows every
 enemy in its line; if he has a shadow stack, the cast spends one, and the kunai hurts more and roots
 instead of slowing. E, Dodge, gives 40% move speed for 1.5 s and makes every auto aimed at him miss
 for 1.2 s.
@@ -728,10 +1065,10 @@ as pending, and when the commit tick passes one it adds a kill to the killer's `
 only show confirmed deaths, so a kill that was undone is never shown. Snapshots carry each
 character's confirmed `kills`, which also corrects a client that had drifted.
 
-The top right of the screen holds both. `scoreboard.ts` orders the leaderboard (most kills
+The top right of the screen holds both. `ui/scoreboard.ts` orders the leaderboard (most kills
 first, ties in join order, the local player marked) and keeps the killfeed lines fresh for six
-seconds, five at a time; `ClientGameState` hands them to `game.ts`, which redraws the elements
-only when what they show changes. Names are in their team's colour.
+seconds, five at a time; `ClientGameState` hands them to `game.ts`, which passes them to
+`ui/scoreboard-view.ts`, which redraws the elements only when what they show changes. Names are in their team's colour.
 
 Pending order messages are retried with exponential backoff. Silence does not
 undo a prediction: after the retry timeout the client requests a full state
@@ -841,6 +1178,7 @@ Set these as environment variables on the server, for example
 | `WEBRTC_PORT_MAX` | same as min | Top of the UDP range, if you want to allow a range |
 | `WEBRTC_ICE_SERVERS` | Google STUN | Comma-separated STUN/TURN URLs |
 | `LOBBY_MAX_PLAYERS` | `8` | Players per lobby, from 1 to 8 |
+| `GAME_MAPS_DIR` | `res/maps` | The folder the server reads its maps from (every `.tmj` in it), and reads again each time a game starts |
 
 ### Keeping it running
 

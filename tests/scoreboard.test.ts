@@ -6,7 +6,7 @@ import {
   leaderboardRows,
   visibleKillFeed,
   type KillFeedEntry,
-} from '../apps/client/src/scoreboard.ts'
+} from '../apps/client/src/ui/scoreboard.ts'
 
 test('the leaderboard puts the most kills first, keeps ties in join order, and marks the local player', () => {
   const rows = leaderboardRows([

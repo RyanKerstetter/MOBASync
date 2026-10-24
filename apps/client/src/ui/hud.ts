@@ -1,5 +1,5 @@
-import { GAME_TPS } from '../../../packages/shared/src/index.ts'
-import { layoutHealthBar } from './health-bar.ts'
+import { GAME_TPS } from '../../../../packages/shared/src/index.ts'
+import { layoutHealthBar } from '../render/health-bar.ts'
 
 export type AbilitySlotView = {
   // The key to press, as printed on the slot.
@@ -52,4 +52,10 @@ export function healthReadout(health: { hp: number; maxHp: number; shield: numbe
     health: `${Math.max(0, Math.round(health.hp))} / ${Math.round(health.maxHp)}`,
     shield: health.shield > 0 ? `+${Math.round(health.shield)}` : '',
   }
+}
+
+// What the health bar says while the champion is dead: how long until it is back, counted down in whole seconds
+// (so it reads 1 until it is back, not 0).
+export function respawnText(secondsLeft: number): string {
+  return `Respawning in ${Math.max(1, Math.ceil(secondsLeft))}s`
 }

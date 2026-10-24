@@ -6,6 +6,8 @@ import {
   GAME_TPS,
   getAbilityDef,
   getChampion,
+  Simulator,
+  Terrain,
   type CastTarget,
   type ChampionDef,
   type Vector2,
@@ -129,6 +131,43 @@ test('the client shows a death as soon as it predicts it, but counts the kill on
   assert.equal(gameState.getLeaderboard()[0].kills, 1)
 })
 
+test('a snapshot gives the client the walls of the server, and the walk it predicts goes round them', () => {
+  const pillar = { x: 400, y: 200, width: 200, height: 200 }
+  const server = new Simulator(new Terrain({ width: 1000, height: 600 }, [pillar]))
+  server.addPlayer(1, 'player-1', 'Player 1', { x: 150, y: 300 }, brawler)
+  server.addPlayer(2, 'player-2', 'Player 2', { x: 900, y: 550 }, brawler)
+  server.advanceTo(1)
+
+  const gameState = new ClientGameState()
+  assert.equal(gameState.simulator.terrain.walls.length, 0, 'before it hears from the server, no walls')
+  gameState.setLocalCharacterId(1)
+  gameState.applySnapshot(JSON.parse(JSON.stringify(server.snapshot())))
+  assert.deepEqual(gameState.simulator.terrain.toData(), server.terrain.toData())
+  assert.equal(gameState.getLocalPath(0), undefined, 'there is no way to show while it is not walking')
+
+  gameState.resetServerTickAnchor(1, 0)
+  const order = gameState.createMoveOrder({ x: 850, y: 300 }, 0)
+  assert.ok(order)
+  // The debug view can show the way it is going: from where it is, round the pillar, to the target.
+  const walking = gameState.getLocalPath((order.tick + 5) * 1000 / GAME_TPS)
+  assert.ok(walking && walking.length >= 4, 'the way round has its corners')
+  assert.deepEqual(walking.at(-1), { x: 850, y: 300 })
+  let highest = Infinity
+  let lowest = -Infinity
+  for (let tick = order.tick; tick < order.tick + 260; tick += 1) {
+    const position = gameState.simulator.at(tick).get(1)?.getPosition()
+    assert.ok(position)
+    const nearest = Math.hypot(
+      Math.max(pillar.x - position.x, 0, position.x - (pillar.x + pillar.width)),
+      Math.max(pillar.y - position.y, 0, position.y - (pillar.y + pillar.height)),
+    )
+    assert.ok(nearest >= brawler.radius - 1e-6, `tick ${tick}: in the pillar`)
+    highest = Math.min(highest, position.y)
+    lowest = Math.max(lowest, position.y)
+  }
+  assert.ok(highest < pillar.y || lowest > pillar.y + pillar.height, 'it went over or under the pillar, not through')
+})
+
 function createArcherClient(): ClientGameState {
   const gameState = new ClientGameState()
   gameState.simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, getChampion('t-archer'))
@@ -140,19 +179,37 @@ function createArcherClient(): ClientGameState {
   return gameState
 }
 
-test('the attack range ring and enemy search include the focus range bonus', () => {
+test('the attack range ring includes the focus range bonus, and Space finds the closest enemy in range or not', () => {
   const gameState = createArcherClient()
   const archer = getChampion('t-archer')
+  const attackRange = () => gameState.getCharacters(0).find((character) => character.id === 1)?.attackRange
   gameState.simulator.at(3)
-  assert.equal(gameState.getLocalAttackRange(0), archer.attackRange)
-  assert.equal(gameState.getClosestEnemyInRange(0), undefined, 'the enemy is just out of range')
+  assert.equal(attackRange(), archer.attackRange)
+  assert.equal(gameState.getClosestEnemy(0)?.id, 2, 'the enemy is just out of range, and is still the one Space attacks')
 
   gameState.simulator.addOrder(1, {
     id: 'player-1:1', seq: 1, tick: 4, type: 'cast', abilityId: 't-focus', target: { mode: 'none' }, origin: { x: 100, y: 100 },
   })
   gameState.simulator.at(6)
-  assert.equal(gameState.getLocalAttackRange(0), archer.attackRange + 120)
-  assert.equal(gameState.getClosestEnemyInRange(0)?.id, 2)
+  assert.equal(attackRange(), archer.attackRange + 120)
+  assert.equal(gameState.getClosestEnemy(0)?.id, 2)
+})
+
+test('attacking the closest enemy with Space, out of range, walks up to it and keeps it as the target', () => {
+  const gameState = createArcherClient()
+  const archer = getChampion('t-archer')
+  const target = gameState.getClosestEnemy(0)
+  assert.equal(target?.id, 2)
+  assert.ok(
+    (target?.position.x ?? 0) - 100 > archer.attackRange,
+    'it is out of the archer range',
+  )
+
+  const order = gameState.createAttackOrder(target?.id ?? 0, 0)
+  assert.ok(order, 'the order is accepted though the enemy is out of reach')
+  const later = gameState.simulator.at(order.tick + 12).get(1)
+  assert.ok((later?.getPosition().x ?? 0) > 100, 'the archer has started walking toward it')
+  assert.equal(later?.getAttackTarget(), 2, 'and is still going after it')
 })
 
 test('the local character is drawn between ticks while dashing, and does not overshoot its target', () => {
@@ -393,7 +450,7 @@ test('clicking, auto-targeting and aiming skip teammates, and every character re
   assert.deepEqual(gameState.getCharacters(0).map((character) => [character.id, character.team]), [[1, 1], [2, 1], [3, 2]])
   assert.equal(gameState.getEnemyNear({ x: 150, y: 100 }, 0), undefined, 'a click on a teammate is not a target')
   assert.equal(gameState.getEnemyNear({ x: 200, y: 100 }, 0)?.id, 3, 'a click on an enemy is')
-  assert.equal(gameState.getClosestEnemyInRange(0)?.id, 3, 'and the nearest enemy is the enemy, not the nearer teammate')
+  assert.equal(gameState.getClosestEnemy(0)?.id, 3, 'and the nearest enemy is the enemy, not the nearer teammate')
 
   // A unit ability (the second key, a lash) aimed at the teammate has nothing to target, and aimed at
   // the enemy it is cast.

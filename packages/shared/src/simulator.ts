@@ -1,10 +1,12 @@
 import { abilityDefs, beyondMinCastRange, meetsRequirement, readyKey, withinCastRange, type AbilityDef } from './abilities.js'
-import { boxTouchesCircle, clampPosition, distanceToSegment } from './geometry.js'
+import { boxTouchesCircle, distanceToSegment } from './geometry.js'
+import { think, type AiBody, type AiOrder, type AiOther } from './ai.js'
 import { DEFAULT_CHAMPION_ID, getChampion, type Champion } from './champions.js'
 import {
   GAME_BURN_PULSE_TICKS,
   GAME_CAST_ORIGIN_TOLERANCE,
   GAME_COLLISION_STIFFNESS,
+  GAME_MONSTER_TEAM,
   GAME_RESPAWN_TICKS,
   GAME_SNAPSHOT_HISTORY_TICKS,
   GAME_TPS,
@@ -19,7 +21,11 @@ import {
   type GameEvent,
   type SimContext,
 } from './effects.js'
+import { advanceObjective, initialObjective, type ObjectiveUnit } from './modes.js'
+import { getCharacterChampion, monsters, type Monster } from './monsters.js'
+import { Terrain } from './terrain.js'
 import type {
+  AiState,
   CastOrder,
   CastTarget,
   CharacterOrder,
@@ -31,6 +37,8 @@ import type {
   GameHealthStats,
   GameSnapshot,
   Marker,
+  ModeSetup,
+  ObjectiveState,
   SimEntity,
   Status,
   Vector2,
@@ -82,6 +90,12 @@ export class SimCharacter {
     )
   }
 
+  // What it is, if it is a monster: a character the game plays (see monsters.ts), which a player does not.
+  get monster(): Monster | undefined {
+    const monster = monsters.get(this.champion.id)
+    return monster?.champion === this.champion ? monster : undefined
+  }
+
   get highestOrderSequence(): number {
     return this.lastOrderSequence
   }
@@ -120,10 +134,6 @@ export class CharacterTickSnapshot {
 
   getHealthState(): GameHealthStats | undefined {
     return this.state.health ? { ...this.state.health } : undefined
-  }
-
-  getMaxHealth(): number | undefined {
-    return this.state.health?.maxHp
   }
 
   // Every active shield status; characters have no shield of their own.
@@ -181,12 +191,18 @@ export class CharacterTickSnapshot {
   getMarkers(): Marker[] {
     return this.state.markers.map((marker) => ({ ...marker }))
   }
+
+  // What a monster is up to: idle, after someone, or walking home. Nothing for a character that is not one.
+  getAi(): AiState | undefined {
+    return this.state.ai ? { ...this.state.ai } : undefined
+  }
 }
 
 export class GameTickSnapshot {
   private readonly characters: Map<number, CharacterTickSnapshot>
   private readonly characterStates: Map<number, GameFrameCharacter>
   private readonly entities: SimEntity[]
+  private readonly objective: ObjectiveState | undefined
 
   constructor(
     readonly tick: number,
@@ -205,10 +221,16 @@ export class GameTickSnapshot {
       new CharacterTickSnapshot(character, tick),
     ]))
     this.entities = frame.entities.map(cloneEntity)
+    this.objective = frame.objective ? cloneObjective(frame.objective) : undefined
   }
 
   get(characterId: number): CharacterTickSnapshot | undefined {
     return this.characters.get(characterId)
+  }
+
+  // How the game's hill or flags stand on this tick; nothing in a game of team deathmatch.
+  getObjective(): ObjectiveState | undefined {
+    return this.objective ? cloneObjective(this.objective) : undefined
   }
 
   getCharacterState(characterId: number): GameFrameCharacter | undefined {
@@ -226,6 +248,7 @@ export class GameTickSnapshot {
         .sort((left, right) => left.characterId - right.characterId)
         .map(cloneFrameCharacter),
       entities: this.getEntities(),
+      ...(this.objective ? { objective: cloneObjective(this.objective) } : {}),
     }
   }
 
@@ -275,6 +298,8 @@ class TickContext implements SimContext {
     // The entities as the previous frame left them, which effects read before this tick moves any.
     private readonly entities: readonly SimEntity[],
     private readonly history: (tick: number) => GameTickSnapshot,
+    // The ground the tick is played on, which effects ask about where a body can be.
+    readonly terrain: Terrain,
   ) {}
 
   character(id: number): SimCharacter | undefined {
@@ -397,12 +422,36 @@ export class Simulator {
   // Told of each death as it can no longer be undone: the commit tick has reached it, so no order
   // that could save the character can still arrive.
   onDeathConfirmed: ((death: DeathRecord) => void) | undefined
+  // The ground the game is played on. It is the same for the whole game, so it is not in the frames,
+  // and a restored snapshot brings it with it.
+  private ground: Terrain
+  // What the game is played for: team deathmatch, or a hill or flags to fight over. Like the ground it is
+  // the same for the whole game, so it is not in the frames (what happens to the hill and flags is), and a
+  // restored snapshot brings it with it.
+  private setup: ModeSetup
 
   get latestSnapshotTick(): number {
     return this.latestComputedTick
   }
 
-  constructor() {
+  get terrain(): Terrain {
+    return this.ground
+  }
+
+  get mode(): ModeSetup {
+    return this.setup
+  }
+
+  // How many ticks a dead champion stays dead, which the game's rules can set.
+  get respawnTicks(): number {
+    return this.setup.respawnTicks ?? GAME_RESPAWN_TICKS
+  }
+
+  // With no terrain given, the game is on the plain arena with no walls, and with no mode it is team
+  // deathmatch.
+  constructor(terrain: Terrain = Terrain.plain(), setup: ModeSetup = { kind: 'deathmatch' }) {
+    this.ground = terrain
+    this.setup = setup
     this.storeFrame(this.createInitialFrame())
   }
 
@@ -417,13 +466,31 @@ export class Simulator {
   ): SimCharacter {
     const character = new SimCharacter(
       id,
-      clampPosition(position, champion.radius),
+      this.ground.resolve(position, champion.radius),
       [],
       champion,
       { playerId, name },
       0,
       0,
       team,
+    )
+    this.characters.set(id, character)
+    if (this.tick === 0 && this.commitTick === 0) this.resetFrameHistory()
+    return character
+  }
+
+  // Puts a monster in the game at its home, which is where it starts, goes back to, and comes back to after it dies. It is
+  // on the monsters' team, an enemy of every player.
+  addMonster(id: number, monster: Monster, position: Vector2): SimCharacter {
+    const character = new SimCharacter(
+      id,
+      this.ground.resolve(position, monster.champion.radius),
+      [],
+      monster.champion,
+      undefined,
+      0,
+      0,
+      GAME_MONSTER_TEAM,
     )
     this.characters.set(id, character)
     if (this.tick === 0 && this.commitTick === 0) this.resetFrameHistory()
@@ -501,16 +568,22 @@ export class Simulator {
     for (const [deathTick, deaths] of confirmed) {
       this.pendingDeaths.delete(deathTick)
       for (const death of deaths) {
+        // A kill is one player's of another: monsters do not score, and nor does killing one (what that is worth
+        // is for the game's rules to say, from the death record).
         if (death.killerId !== undefined) {
           const killer = this.characters.get(death.killerId)
-          if (killer) killer.kills += 1
+          if (killer && !killer.monster && !this.characters.get(death.victimId)?.monster) killer.kills += 1
         }
         this.onDeathConfirmed?.({ ...death })
       }
     }
   }
 
-  reset(): void {
+  // Empties the game. With a terrain, the next game is played on that ground instead, and with a mode
+  // it is played for that.
+  reset(terrain?: Terrain, setup?: ModeSetup): void {
+    if (terrain) this.ground = terrain
+    if (setup) this.setup = setup
     this.characters.clear()
     this.tick = 0
     this.commitTick = 0
@@ -535,6 +608,9 @@ export class Simulator {
     return {
       tick: this.tick,
       commitTick: this.commitTick,
+      terrain: this.ground.toData(),
+      // Team deathmatch with the default rules is what a snapshot without a mode is, so it is left out.
+      ...(isPlainDeathmatch(this.setup) ? {} : { mode: this.setup }),
       characters: [...this.characters.values()].map((character) => ({
         ...character.snapshot(),
         orders: character.orders
@@ -552,7 +628,12 @@ export class Simulator {
     ) {
       throw new RangeError('Snapshot checkpoint must match its commit tick and not exceed its current tick.')
     }
-    const champions = snapshot.characters.map((character) => getChampion(character.championId))
+    const champions = snapshot.characters.map((character) => getCharacterChampion(character.championId))
+    // The ground is the snapshot's, and kept as it is when it is the same, which it is every time
+    // after the first, so what was worked out for it (see `Pathfinder`) is not lost.
+    if (!snapshot.terrain) this.ground = Terrain.plain()
+    else if (!this.ground.sameAs(snapshot.terrain)) this.ground = Terrain.fromData(snapshot.terrain)
+    this.setup = snapshot.mode ?? { kind: 'deathmatch' }
     // The deaths up to the checkpoint that this simulator had not yet seen confirmed are confirmed by
     // it now (their kills are already in the snapshot's tallies). Later ones are worked out again.
     const confirmedByCheckpoint = [...this.pendingDeaths]
@@ -593,8 +674,9 @@ export class Simulator {
       if (!character || !prior) continue
       const state = cloneFrameCharacter(prior)
       if (state.dash) {
-        // A dash replaces walking for as long as it lasts, at its own speed.
-        state.position = stepToward(prior.position, state.dash.target, state.dash.speed / GAME_TPS, character.champion.radius)
+        // A dash replaces walking for as long as it lasts, at its own speed. It goes over walls: only
+        // the arena's edge holds it.
+        state.position = stepToward(prior.position, state.dash.target, state.dash.speed / GAME_TPS, character.champion.radius, this.ground)
         const finished = state.position.x === state.dash.target.x && state.position.y === state.dash.target.y
         if (state.dash.contact) {
           dashSteps.push({ characterId, from: { ...prior.position }, contact: state.dash.contact, finished })
@@ -603,15 +685,31 @@ export class Simulator {
       } else if (state.movement && !isImmobilized(prior.statuses)) {
         // Movement over (tick - 1, tick] uses the previous frame's statuses, as they stood then.
         const speed = getMoveSpeed(character, prior.statuses, tick - 1)
-        state.position = stepToward(prior.position, state.movement.target, speed / GAME_TPS, character.champion.radius)
-        if (state.position.x === state.movement.target.x && state.position.y === state.movement.target.y) {
+        const radius = character.champion.radius
+        // The way round any walls in the way, from where it is now, which is worked out again every
+        // tick so it needs nothing kept in the frame: its first point is where to head.
+        const route = this.ground.path(prior.position, state.movement.target, radius)
+        if (!route) {
+          // There is no way to where it was sent.
           state.movement = undefined
+        } else {
+          const heading = route[0] ?? prior.position
+          state.position = this.ground.keepOutOfWalls(
+            stepToward(prior.position, heading, speed / GAME_TPS, radius, this.ground),
+            radius,
+          )
+          // It has arrived when it reaches the last point of the way.
+          const goal = route[route.length - 1] ?? prior.position
+          if (route.length <= 1 && state.position.x === goal.x && state.position.y === goal.y) {
+            state.movement = undefined
+          }
         }
       }
       state.statuses = state.statuses.filter((status) => status.endTick > tick)
       state.markers = state.markers.filter((marker) => marker.endTick > tick)
       // A dead character comes back a fixed time after the tick it died on.
-      if (state.health?.deathTick !== undefined && tick === state.health.deathTick + GAME_RESPAWN_TICKS) {
+      const wait = character.monster ? character.monster.ai.respawnTicks : this.respawnTicks
+      if (wait !== undefined && state.health?.deathTick !== undefined && tick === state.health.deathTick + wait) {
         respawnCharacter(character, state, tick)
       }
       states.set(characterId, state)
@@ -620,7 +718,7 @@ export class Simulator {
       if (states.has(character.id)) continue
       states.set(character.id, this.createInitialCharacterFrame(character))
     }
-    pushCharactersApart(states, this.characters)
+    pushCharactersApart(states, this.characters, this.ground)
     const characters = [...this.characters.values()].sort((left, right) => left.id - right.id)
     const context = new TickContext(
       tick,
@@ -628,6 +726,7 @@ export class Simulator {
       states,
       previous.getEntities(),
       (historyTick) => this.at(historyTick),
+      this.ground,
     )
 
     // Burning characters take their burn on every pulse tick, as damage from whoever lit them.
@@ -674,6 +773,9 @@ export class Simulator {
       }
       state.queuedOrders = state.queuedOrders.filter((order) => order.tick > tick)
     }
+    // The monsters decide what to do from where everyone stands now, and what they decide is orders like any
+    // other, so they are carried out the same way, after the players' of the tick.
+    orders.push(...this.thinkMonsters(characters, states, tick))
     for (const { character, order } of orders) {
       const state = states.get(character.id)
       if (!state || !isAlive(state)) continue
@@ -681,7 +783,7 @@ export class Simulator {
         // Walking somewhere cancels a windup and stops going after anyone.
         state.action = undefined
         state.attackTarget = undefined
-        state.movement = { target: clampPosition(order.target, character.champion.radius) }
+        state.movement = { target: this.ground.resolve(order.target, character.champion.radius) }
       } else if (order.type === 'attack') {
         this.lockOnto(character, state, order, states)
       } else {
@@ -696,12 +798,95 @@ export class Simulator {
       if (state.action && state.action.endTick <= tick) state.action = undefined
     }
     const deaths = this.applyWrites(context, states, entities, tick)
+    const objective = this.advanceObjective(previous, states, tick, deaths)
 
     return new GameTickSnapshot(tick, {
       tick,
       characters: [...states.values()].sort((left, right) => left.characterId - right.characterId),
       entities,
+      ...(objective ? { objective } : {}),
     }, context.events, deaths)
+  }
+
+  // The hill, the flags or the kills after this tick, with everyone where the tick left them: the deaths it
+  // caused and the blinks it made are done. A kill scores for the team of whoever made it.
+  private advanceObjective(
+    previous: GameTickSnapshot,
+    states: ReadonlyMap<number, GameFrameCharacter>,
+    tick: number,
+    deaths: readonly DeathRecord[],
+  ): ObjectiveState | undefined {
+    const units: ObjectiveUnit[] = []
+    if (this.setup.kind !== 'deathmatch') {
+      for (const state of states.values()) {
+        const character = this.characters.get(state.characterId)
+        // Monsters stand on the hill and walk over flags without taking either.
+        if (!character || character.monster) continue
+        units.push({
+          id: character.id,
+          team: character.team,
+          position: state.position,
+          radius: character.champion.radius,
+          alive: isAlive(state),
+        })
+      }
+    }
+    // A team scores for the players its players kill, not for monsters, or for the players monsters kill.
+    const killerTeams = deaths.flatMap((death) => {
+      const killer = death.killerId === undefined ? undefined : this.characters.get(death.killerId)
+      return killer && !killer.monster && !this.characters.get(death.victimId)?.monster ? [killer.team] : []
+    })
+    return advanceObjective(previous.getObjective(), this.setup, units, tick, killerTeams)
+  }
+
+  // Every monster that is alive decides what to do (see `think`): it reads where everyone stands this tick, what it
+  // is up to from the last, and what it can do, and gives the orders it wants carried out and what it is up to
+  // next. A monster that has got home after a fight is healed to full. A dead monster is waiting to come back.
+  private thinkMonsters(
+    characters: readonly SimCharacter[],
+    states: ReadonlyMap<number, GameFrameCharacter>,
+    tick: number,
+  ): Array<{ character: SimCharacter; order: CharacterOrder }> {
+    const issued: Array<{ character: SimCharacter; order: CharacterOrder }> = []
+    if (!characters.some((character) => character.monster)) return issued
+    const sight: AiOther[] = []
+    for (const character of characters) {
+      const state = states.get(character.id)
+      if (state) sight.push({ id: character.id, team: character.team, position: state.position, alive: isAlive(state) })
+    }
+    for (const character of characters) {
+      const monster = character.monster
+      const state = states.get(character.id)
+      if (!monster || !state) continue
+      if (!isAlive(state) || !state.health) {
+        state.ai = { mode: 'idle' }
+        continue
+      }
+      const body: AiBody = {
+        id: character.id,
+        team: character.team,
+        position: state.position,
+        home: character.initialPosition,
+        hp: state.health.hp,
+        maxHp: state.health.maxHp,
+        busy: isWindingUp(state, tick) || state.dash !== undefined || isStunned(state.statuses),
+        silenced: isSilenced(state.statuses),
+        attacking: state.attackTarget?.targetId,
+        moving: state.movement !== undefined,
+        ready: (abilityId) => (state.cooldowns[abilityId] ?? 0) <= tick,
+      }
+      const decision = think(monster, body, state.ai ?? { mode: 'idle' }, sight)
+      state.ai = decision.state
+      if (decision.reset) {
+        state.health = { hp: state.health.maxHp, maxHp: state.health.maxHp, hpSeq: state.health.hpSeq + 1, finalizedTick: tick }
+        state.statuses = []
+        state.markers = []
+      }
+      decision.orders.forEach((order, index) => {
+        issued.push({ character, order: aiOrder(character, order, state.position, tick, index) })
+      })
+    }
+    return issued
   }
 
   // A dash with effects of its own: every enemy its body reached on this tick's step, each once for
@@ -1024,11 +1209,11 @@ export class Simulator {
       const owner = this.characters.get(entity.ownerId)
       if (def.follow) {
         // A damped spring toward a rest point by the owner, stepped one tick at a time (velocity
-        // first, then position from it). The rest point stays inside the arena.
+        // first, then position from it). The rest point stays inside the arena, and over walls.
         const leader = states.get(entity.ownerId)
         if (leader && isAlive(leader)) {
           const { stiffness, damping, offset } = def.follow
-          const rest = clampPosition(
+          const rest = this.ground.clamp(
             { x: leader.position.x + (offset?.x ?? 0), y: leader.position.y + (offset?.y ?? 0) },
             def.radius ?? 0,
           )
@@ -1048,7 +1233,7 @@ export class Simulator {
         const target = entity.targetId === undefined ? undefined : states.get(entity.targetId)
         if (!owner || !target || !isAlive(target)) continue
         const from = entity.position ?? entity.origin
-        const next = stepToward(from, target.position, def.speed / GAME_TPS, 0)
+        const next = stepToward(from, target.position, def.speed / GAME_TPS, 0, this.ground)
         entity.velocity = { x: (next.x - from.x) * GAME_TPS, y: (next.y - from.y) * GAME_TPS }
         entity.position = next
       }
@@ -1205,7 +1390,9 @@ export class Simulator {
       const character = this.characters.get(unitId)
       if (!state || !character || !isAlive(state)) continue
       state.dash = {
-        target: clampPosition(target, character.champion.radius),
+        // A dash goes over walls, so it can end behind one, but not in one: it lands on the nearest
+        // place the character can stand.
+        target: this.ground.resolve(target, character.champion.radius),
         speed,
         ...(through ? { through: true } : {}),
         ...(contact ? { contact: { ...contact, origin: { ...contact.origin }, hitIds: [] } } : {}),
@@ -1220,6 +1407,12 @@ export class Simulator {
           const hadHealth = (state.health?.hp ?? 0) > 0
           applyDamage(state, event.amount, tick)
           if (hadHealth && state.health?.hp === 0) killers.set(event.targetId, event.ownerId)
+          // A monster that is minding its own business and is hurt by an enemy knows who to go after.
+          if (state.ai?.mode === 'idle' && event.amount > 0) {
+            const victim = this.characters.get(event.targetId)
+            const attacker = this.characters.get(event.ownerId)
+            if (victim && attacker && areEnemies(victim, attacker)) state.ai = { mode: 'idle', provokedBy: attacker.id }
+          }
         }
       } else if (event.type === 'lose-health') {
         const health = states.get(event.unitId)?.health
@@ -1281,7 +1474,8 @@ export class Simulator {
       const state = states.get(unitId)
       const character = this.characters.get(unitId)
       if (!state || !character || !isAlive(state)) continue
-      state.position = clampPosition(target, character.champion.radius)
+      // A blink goes over walls, and lands where the character can stand.
+      state.position = this.ground.resolve(target, character.champion.radius)
     }
     for (const { ownerId, defId } of context.entityRemovals) {
       for (let index = entities.length - 1; index >= 0; index -= 1) {
@@ -1302,18 +1496,21 @@ export class Simulator {
   }
 
   private createInitialFrame(): GameTickSnapshot {
+    const objective = initialObjective(this.setup)
     return new GameTickSnapshot(0, {
       tick: 0,
       characters: [...this.characters.values()]
         .sort((left, right) => left.id - right.id)
         .map((character) => this.createInitialCharacterFrame(character)),
       entities: [],
+      ...(objective ? { objective } : {}),
     })
   }
 
   private createInitialCharacterFrame(character: SimCharacter): GameFrameCharacter {
     const champion = character.champion
     return {
+      ...(character.monster ? { ai: { mode: 'idle' as const } } : {}),
       characterId: character.id,
       position: { ...character.initialPosition },
       health: {
@@ -1418,6 +1615,7 @@ function killCharacter(state: GameFrameCharacter, tick: number): void {
   health.deathTick = tick
   health.finalizedTick = tick
   clearActivity(state)
+  if (state.ai) state.ai = { mode: 'idle' }
 }
 
 function respawnCharacter(character: SimCharacter, state: GameFrameCharacter, tick: number): void {
@@ -1433,6 +1631,7 @@ function respawnCharacter(character: SimCharacter, state: GameFrameCharacter, ti
   state.nextAttackTick = tick
   state.cooldowns = {}
   clearActivity(state)
+  if (character.monster) state.ai = { mode: 'idle' }
 }
 
 function clearActivity(state: GameFrameCharacter): void {
@@ -1569,6 +1768,29 @@ function cloneEntity(entity: SimEntity): SimEntity {
   }
 }
 
+// What a monster decided to do, as the order the simulator carries out. Its ID says whose, and when, so what it
+// starts (a stack, a shot) has an ID of its own on every tick.
+function aiOrder(character: SimCharacter, order: AiOrder, position: Vector2, tick: number, index: number): CharacterOrder {
+  const base = { id: `ai:${character.id}:${tick}:${index}`, seq: tick * 8 + index + 1, tick }
+  if (order.type === 'move') return { ...base, type: 'move', target: { ...order.target } }
+  if (order.type === 'attack') return { ...base, type: 'attack', targetId: order.targetId }
+  return { ...base, type: 'cast', abilityId: order.abilityId, target: cloneCastTarget(order.target), origin: { ...position } }
+}
+
+function cloneObjective(objective: ObjectiveState): ObjectiveState {
+  if (objective.kind === 'koth' || objective.kind === 'deathmatch') return { ...objective, scores: { ...objective.scores } }
+  return {
+    ...objective,
+    flags: objective.flags.map((flag) => ({ ...flag, position: { ...flag.position } })),
+    scores: { ...objective.scores },
+  }
+}
+
+// Team deathmatch played with no rules set: what a game is when it is not given a mode.
+function isPlainDeathmatch(setup: ModeSetup): boolean {
+  return setup.kind === 'deathmatch' && setup.respawnTicks === undefined && setup.scoreLimit === undefined
+}
+
 function cloneFrameCharacter(character: GameFrameCharacter): GameFrameCharacter {
   return {
     ...character,
@@ -1596,6 +1818,7 @@ function cloneFrameCharacter(character: GameFrameCharacter): GameFrameCharacter 
       },
     } : {}),
     ...(character.attackTarget ? { attackTarget: { ...character.attackTarget } } : {}),
+    ...(character.ai ? { ai: { ...character.ai } } : {}),
     ...(character.action ? { action: cloneAction(character.action) } : {}),
     cooldowns: { ...character.cooldowns },
     statuses: character.statuses.map((status) => ({ ...status })),
@@ -1612,10 +1835,11 @@ function cloneFrameCharacter(character: GameFrameCharacter): GameFrameCharacter 
 // Every push is worked out from the positions as the tick found them and applied together, and
 // pairs are visited in ID order, so the result does not depend on who is looked at first. Two
 // characters on exactly the same spot have no line between them; the lower ID goes toward -x.
-// The dead are ghosts, and the arena's edge still holds whoever is pushed against it.
+// The dead are ghosts, and the arena's edge and the walls still hold whoever is pushed against them.
 function pushCharactersApart(
   states: ReadonlyMap<number, GameFrameCharacter>,
   characters: ReadonlyMap<number, SimCharacter>,
+  terrain: Terrain,
 ): void {
   const living = [...states.values()]
     .filter((state) => isAlive(state) && characters.has(state.characterId))
@@ -1648,21 +1872,21 @@ function pushCharactersApart(
     const state = states.get(id)
     const character = characters.get(id)
     if (!state || !character) continue
-    state.position = clampPosition(
-      { x: state.position.x + push.x, y: state.position.y + push.y },
-      character.champion.radius,
-    )
+    const radius = character.champion.radius
+    const pushed = terrain.clamp({ x: state.position.x + push.x, y: state.position.y + push.y }, radius)
+    // Walls hold whoever is pushed against them too, but not one dashing over them.
+    state.position = state.dash ? pushed : terrain.keepOutOfWalls(pushed, radius)
   }
 }
 
-function stepToward(position: Vector2, target: Vector2, stepLength: number, radius: number): Vector2 {
+function stepToward(position: Vector2, target: Vector2, stepLength: number, radius: number, terrain: Terrain): Vector2 {
   const dx = target.x - position.x
   const dy = target.y - position.y
   const distance = Math.sqrt(dx * dx + dy * dy)
   if (distance <= stepLength) return { ...target }
 
   const progress = stepLength / distance
-  return clampPosition({
+  return terrain.clamp({
     x: position.x + dx * progress,
     y: position.y + dy * progress,
   }, radius)

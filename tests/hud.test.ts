@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { abilitySlotViews, healthReadout } from '../apps/client/src/hud.ts'
+import { abilitySlotViews, healthReadout, respawnText } from '../apps/client/src/ui/hud.ts'
 
 const label = (slot: number): string => 'QWER'[slot] ?? String(slot + 1)
 
@@ -90,4 +90,11 @@ test('health is never shown below zero or as a fraction', () => {
   assert.equal(healthReadout({ hp: -3, maxHp: 800, shield: 0 }).health, '0 / 800')
   assert.equal(healthReadout({ hp: 0, maxHp: 800, shield: 0 }).healthPercent, 0)
   assert.equal(healthReadout({ hp: 599.6, maxHp: 800, shield: 0 }).health, '600 / 800')
+})
+
+test('a dead champion\'s bar counts down to the respawn in whole seconds, and never says 0', () => {
+  assert.equal(respawnText(12.2), 'Respawning in 13s')
+  assert.equal(respawnText(3), 'Respawning in 3s')
+  assert.equal(respawnText(0.4), 'Respawning in 1s')
+  assert.equal(respawnText(0), 'Respawning in 1s')
 })

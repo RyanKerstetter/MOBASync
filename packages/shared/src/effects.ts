@@ -6,15 +6,19 @@ import type {
   Status,
   Vector2,
 } from './index.js'
-import { GAME_ARENA_HEIGHT, GAME_ARENA_WIDTH, GAME_BURN_PULSE_TICKS, GAME_TPS } from './constants.js'
-import { boxTouchesCircle, clampPosition, type BoxShape } from './geometry.js'
+import { GAME_BURN_PULSE_TICKS, GAME_TPS } from './constants.js'
+import { boxTouchesCircle, type BoxShape } from './geometry.js'
 import type { SimCharacter } from './simulator.js'
+import type { Terrain } from './terrain.js'
 
 // 1. Capabilities: effects read through SimReader and write through SimWriter.
 // Writes are buffered by the simulator and applied at the end of the tick, so
 // every effect in a tick reads the same pre-write state.
 export interface SimReader {
   readonly tick: number
+  // The ground: where a body can stand. Walls hold champions out and nothing else, so effects mostly
+  // ask it about the arena's edge (`clamp`).
+  readonly terrain: Terrain
   character(id: number): SimCharacter | undefined
   posAt(id: number, tick: number): Vector2 | undefined
   // Living units whose bodies overlap the circle, sorted by ID.
@@ -28,7 +32,7 @@ export interface SimReader {
   // The entities of this definition that this unit has out, as they stood before this tick's
   // writes, and where each is. Entities are not targets, but a unit can look for its own.
   entitiesOf(ownerId: number, defId: string): Array<{ id: string; position: Vector2 }>
-  // Whether the unit is in the game and alive. A confirmed death makes it a ghost.
+  // Whether the unit is in the game and alive. A dead unit is a ghost.
   isAlive(unitId: number): boolean
 }
 
@@ -978,7 +982,7 @@ export const spawnEntity = (
       if (def.landAtAim) {
         if (src.aim?.mode !== 'point') return
         // One that stops at walls flies to the aimed point held inside the arena.
-        const aimed = def.stopsAtWalls ? clampPosition(src.aim.point, def.radius ?? 0) : src.aim.point
+        const aimed = def.stopsAtWalls ? sim.terrain.clamp(src.aim.point, def.radius ?? 0) : src.aim.point
         const dx = aimed.x - place.at.x
         const dy = aimed.y - place.at.y
         const distance = Math.sqrt(dx * dx + dy * dy)
@@ -995,7 +999,7 @@ export const spawnEntity = (
         lifetimeTicks = def.lifetimeTicks
         velocity = { x: dir.x * def.speed, y: dir.y * def.speed }
         if (def.stopsAtWalls && lifetimeTicks !== undefined) {
-          lifetimeTicks = Math.min(lifetimeTicks, ticksBeforeWall(place.at, velocity, def.radius ?? 0))
+          lifetimeTicks = Math.min(lifetimeTicks, ticksBeforeWall(sim.terrain, place.at, velocity, def.radius ?? 0))
         }
       }
       sim.addEntity({
@@ -1016,13 +1020,14 @@ export const spawnEntity = (
 }
 
 // How many whole ticks a body of this radius can fly from `from` at `velocity` (per second) before
-// its edge would meet the arena's wall, and never fewer than one so there is always a flight. Only
-// additions, multiplications and a floor, so every peer gets the same answer.
-function ticksBeforeWall(from: Vector2, velocity: Vector2, radius: number): number {
+// its edge would meet the arena's edge, and never fewer than one so there is always a flight. Only
+// additions, multiplications and a floor, so every peer gets the same answer. The walls in the arena
+// are not in its way: shots fly over them.
+function ticksBeforeWall(terrain: Terrain, from: Vector2, velocity: Vector2, radius: number): number {
   let seconds = Infinity
   for (const [position, speed, size] of [
-    [from.x, velocity.x, GAME_ARENA_WIDTH],
-    [from.y, velocity.y, GAME_ARENA_HEIGHT],
+    [from.x, velocity.x, terrain.width],
+    [from.y, velocity.y, terrain.height],
   ] as const) {
     if (speed > 0) seconds = Math.min(seconds, (size - radius - position) / speed)
     else if (speed < 0) seconds = Math.min(seconds, (radius - position) / speed)

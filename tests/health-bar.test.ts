@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { layoutHealthBar } from '../apps/client/src/health-bar.ts'
+import { layoutHealthBar } from '../apps/client/src/render/health-bar.ts'
 
 const ticks = { every: 100, major: 1000 }
 

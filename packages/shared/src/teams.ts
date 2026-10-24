@@ -1,10 +1,4 @@
-import {
-  GAME_ARENA_HEIGHT,
-  GAME_ARENA_WIDTH,
-  GAME_SPAWN_RADIUS,
-  GAME_SPAWN_TEAMMATE_SPACING,
-} from './constants.js'
-import type { Vector2 } from './index.js'
+import { GAME_MAX_TEAM_SIZE, GAME_MONSTER_TEAM } from './constants.js'
 
 export interface TeamDef {
   // Teams are numbered from 1. A character's team is this number.
@@ -32,9 +26,17 @@ export function isTeamId(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= GAME_TEAMS.length
 }
 
+// What the monsters are drawn and named as: a team no player is on.
+export const MONSTER_TEAM: TeamDef = { id: GAME_MONSTER_TEAM, name: 'Monsters', color: '#9aa5b4' }
+
+export function isMonsterTeam(team: number): boolean {
+  return team === GAME_MONSTER_TEAM
+}
+
 // A team's colour and name. A number past the last team wraps round, so a game built outside the
-// lobby, where a character's team can be anything, still draws.
+// lobby, where a character's team can be anything, still draws. The monsters' team is its own.
 export function getTeam(id: number): TeamDef {
+  if (id === GAME_MONSTER_TEAM) return MONSTER_TEAM
   return GAME_TEAMS[(((id - 1) % GAME_TEAMS.length) + GAME_TEAMS.length) % GAME_TEAMS.length]
 }
 
@@ -46,24 +48,8 @@ export function balancedTeam(teams: readonly number[]): number {
   return second < first ? 2 : 1
 }
 
-// Where each player starts, in the order given, for players on these teams. Each team has an equal
-// slice of the circle around the middle of the map, the teams in order of their number starting from
-// the west and going round clockwise, and a team's players stand side by side at the middle of
-// its slice, in the order given. Nothing here depends on the order of the players across teams.
-//
-// The positions are whole numbers, worked out once by the server and sent to every client as the
-// players' starting places, so no peer needs to agree on trigonometry.
-export function teamSpawnPositions(teams: readonly number[]): Vector2[] {
-  const order = [...new Set(teams)].sort((left, right) => left - right)
-  const around = (2 * Math.PI) / order.length
-  const step = GAME_SPAWN_TEAMMATE_SPACING / GAME_SPAWN_RADIUS
-  return teams.map((team, index) => {
-    const mates = teams.flatMap((other, position) => (other === team ? [position] : []))
-    const slot = Math.PI + order.indexOf(team) * around
-    const angle = slot + (mates.indexOf(index) - (mates.length - 1) / 2) * step
-    return {
-      x: Math.round(GAME_ARENA_WIDTH / 2 + Math.cos(angle) * GAME_SPAWN_RADIUS),
-      y: Math.round(GAME_ARENA_HEIGHT / 2 + Math.sin(angle) * GAME_SPAWN_RADIUS),
-    }
-  })
+// Whether a player can join this team, given the teams everyone else is on: a team holds at most
+// GAME_MAX_TEAM_SIZE players.
+export function teamHasRoom(otherPlayersTeams: readonly number[], team: number): boolean {
+  return otherPlayersTeams.filter((other) => other === team).length < GAME_MAX_TEAM_SIZE
 }

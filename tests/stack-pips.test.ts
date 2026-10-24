@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { layoutStackPips, type StackPip } from '../apps/client/src/stack-pips.ts'
+import { layoutStackPips, type StackPip } from '../apps/client/src/render/stack-pips.ts'
 
 const RADIUS = 16
 

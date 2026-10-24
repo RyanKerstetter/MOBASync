@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { GAME_MODE_IDS } from './modes.js'
 
 const TickSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 
@@ -209,6 +210,17 @@ export const GameFrameAttackTargetSchema = z.object({
   orderId: z.string().min(1),
 })
 
+// What a monster is up to (see ai.ts): idle at home, after someone, or walking home. It is in the frame because
+// it is not something that can be worked out from the rest of it: a monster that is after someone stays after
+// them until it gives up, wherever they go. Only monsters have it.
+export const AiStateSchema = z.object({
+  mode: z.enum(['idle', 'chase', 'return']),
+  // Whom it is after, while it is chasing.
+  targetId: z.number().int().positive().optional(),
+  // The last player to hurt it, which an idle monster goes after on its next tick (see `AiProfileDef.aggroOnHit`).
+  provokedBy: z.number().int().positive().optional(),
+})
+
 export const GameFrameCharacterSchema = z.object({
   characterId: z.number().int().positive(),
   position: Vector2Schema,
@@ -224,6 +236,7 @@ export const GameFrameCharacterSchema = z.object({
   markers: z.array(MarkerSchema),
   // Orders written by effects; they resolve after logged orders on their tick.
   queuedOrders: z.array(CharacterOrderSchema),
+  ai: AiStateSchema.optional(),
 })
 
 export const GameFrameEntitySchema = z.object({
@@ -247,15 +260,92 @@ export const GameFrameEntitySchema = z.object({
   targetId: z.number().int().positive().optional(),
 })
 
+export const GameModeSchema = z.enum(GAME_MODE_IDS)
+
+// The area of the map that is the hill, in world units: the box it fits in, and whether it is the
+// ellipse in that box (a circle, if the box is square) or the whole box.
+export const HillAreaSchema = z.object({
+  x: z.number().finite(),
+  y: z.number().finite(),
+  width: z.number().finite().positive(),
+  height: z.number().finite().positive(),
+  ellipse: z.boolean(),
+})
+
+// How the game is played, for every mode, fixed for the whole game: how many ticks a champion stays dead
+// (the default if absent), and the score a team wins at (no limit if absent).
+const RulesFields = {
+  respawnTicks: z.number().int().positive().optional(),
+  scoreLimit: z.number().int().positive().optional(),
+}
+
+// What a game of a mode is played on, fixed for the whole game: the hill, or where each team's flag is
+// at home. A snapshot without one is a game of team deathmatch with the default rules.
+export const ModeSetupSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('deathmatch'), ...RulesFields }),
+  z.object({
+    kind: z.literal('koth'),
+    hill: HillAreaSchema,
+    // How many ticks a team takes to fill the hill's bar (the default if absent).
+    captureTicks: z.number().int().positive().optional(),
+    ...RulesFields,
+  }),
+  z.object({
+    kind: z.literal('ctf'),
+    flags: z.array(z.object({ team: z.number().int().positive(), home: Vector2Schema })),
+    ...RulesFields,
+  }),
+])
+
+// Points by team, keyed by the team's number.
+const ScoresSchema = z.record(z.string(), z.number().int().nonnegative())
+
+// How the game's objective stands on a tick (see `advanceObjective`). In team deathmatch it is the kills each
+// team has made, which are kept here and not worked out from the characters, so they stay when a player leaves.
+export const ObjectiveStateSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('deathmatch'), scores: ScoresSchema }),
+  z.object({
+    kind: z.literal('koth'),
+    // Whose bar the hill's bar is, while it has anything in it, and how full it is in ticks of capturing.
+    capturer: z.number().int().positive().optional(),
+    progress: z.number().int().nonnegative(),
+    scores: ScoresSchema,
+  }),
+  z.object({
+    kind: z.literal('ctf'),
+    flags: z.array(z.object({
+      // The team the flag belongs to.
+      team: z.number().int().positive(),
+      // Where it is: at home, dropped on the ground, or with whoever carries it.
+      position: Vector2Schema,
+      carrierId: z.number().int().positive().optional(),
+    })),
+    scores: ScoresSchema,
+  }),
+])
+
 export const GameFrameSchema = z.object({
   tick: TickSchema,
   characters: z.array(GameFrameCharacterSchema),
   entities: z.array(GameFrameEntitySchema),
+  objective: ObjectiveStateSchema.optional(),
+})
+
+// The ground a game is played on: the arena's size, and each wall as [x, y, width, height], in world
+// units. A snapshot without one is on the plain arena.
+export const TerrainSchema = z.object({
+  width: z.number().positive(),
+  height: z.number().positive(),
+  walls: z.array(z.tuple([z.number(), z.number(), z.number().positive(), z.number().positive()])),
 })
 
 export const GameSnapshotSchema = z.object({
   tick: TickSchema,
   commitTick: TickSchema,
+  terrain: TerrainSchema.optional(),
+  mode: ModeSetupSchema.optional(),
+  // The map the game is played on (see `MapSummary`), so a page can check it drew the same one.
+  map: z.string().min(1).max(100).optional(),
   characters: z.array(GameCharacterSchema),
   checkpoint: GameFrameSchema,
 }).refine(
@@ -264,7 +354,29 @@ export const GameSnapshotSchema = z.object({
   { message: 'Checkpoint must match the commit tick and not exceed the current tick.' },
 )
 
-export const GameStatusSchema = z.enum(['idle', 'selecting', 'starting', 'running'])
+// A game is idle (no game: the lobby), picking champions, loading, running, or finished: over, with its results
+// shown, until every player has gone back to the lobby.
+export const GameStatusSchema = z.enum(['idle', 'selecting', 'starting', 'running', 'finished'])
+
+// How a game ended, as every player is shown it: who won (the team ahead, or none if none was), how each team
+// scored, and what each player did. `reason` is a team reaching the score limit, or the leader ending the game.
+export const GameResultSchema = z.object({
+  mode: GameModeSchema,
+  reason: z.enum(['limit', 'ended']),
+  winner: z.number().int().positive().optional(),
+  scoreLimit: z.number().int().positive().optional(),
+  teams: z.array(z.object({
+    team: z.number().int().positive(),
+    score: z.number().int().nonnegative(),
+  })),
+  players: z.array(z.object({
+    name: z.string(),
+    team: z.number().int().positive(),
+    kills: z.number().int().nonnegative(),
+    // They went back to the lobby before the game ended.
+    left: z.boolean().optional(),
+  })),
+})
 
 export type Vector2 = z.infer<typeof Vector2Schema>
 export type MoveOrder = z.infer<typeof MoveOrderSchema>
@@ -272,29 +384,25 @@ export type GameOrder = z.infer<typeof GameOrderSchema>
 export type GameAttackOrder = z.infer<typeof GameAttackOrderSchema>
 export type CastTarget = z.infer<typeof CastTargetSchema>
 export type CastOrder = z.infer<typeof CastOrderSchema>
-export type GameAttack = z.infer<typeof GameAttackSchema>
-export type GameCast = z.infer<typeof GameCastSchema>
 export type GameBroadcastOrder = z.infer<typeof GameBroadcastOrderSchema>
 export type GameHealthStats = z.infer<typeof GameHealthStatsSchema>
 export type GameFrame = z.infer<typeof GameFrameSchema>
 export type GameFrameCharacter = z.infer<typeof GameFrameCharacterSchema>
-export type GameFrameMovement = z.infer<typeof GameFrameMovementSchema>
-export type GameFrameAttackTarget = z.infer<typeof GameFrameAttackTargetSchema>
-export type GameFrameDash = z.infer<typeof GameFrameDashSchema>
 export type GameFrameAction = z.infer<typeof GameFrameActionSchema>
 export type SimEntity = z.infer<typeof GameFrameEntitySchema>
 export type Status = z.infer<typeof StatusSchema>
 export type Marker = z.infer<typeof MarkerSchema>
 export type CharacterOrder = z.infer<typeof CharacterOrderSchema>
 export type GameOrderAck = z.infer<typeof GameOrderAckSchema>
-export type GameOrderDeliveryAck = z.infer<typeof GameOrderDeliveryAckSchema>
-export type GameMove = z.infer<typeof GameMoveSchema>
-export type GamePong = z.infer<typeof GamePongSchema>
-export type GameJoin = z.infer<typeof GameJoinSchema>
-export type GameJoined = z.infer<typeof GameJoinedSchema>
 export type GameCharacterSnapshot = z.infer<typeof GameCharacterSchema>
 export type GameSnapshot = z.infer<typeof GameSnapshotSchema>
 export type GameStatus = z.infer<typeof GameStatusSchema>
+export type AiState = z.infer<typeof AiStateSchema>
+export type GameMode = z.infer<typeof GameModeSchema>
+export type GameResult = z.infer<typeof GameResultSchema>
+export type HillArea = z.infer<typeof HillAreaSchema>
+export type ModeSetup = z.infer<typeof ModeSetupSchema>
+export type ObjectiveState = z.infer<typeof ObjectiveStateSchema>
 
 export * from './constants.js'
 export { boxTouchesCircle } from './geometry.js'
@@ -311,14 +419,12 @@ export {
   blink,
   burn,
   capCooldown,
-  castOrigin,
   damage,
   dash,
   dodge,
   enemiesInBox,
   enemiesInLine,
   enemiesInRadius,
-  getDashDef,
   getEntityDef,
   haste,
   heal,
@@ -352,11 +458,7 @@ export {
   when,
 } from './effects.js'
 export type {
-  Amount,
-  Anchor,
   DashDef,
-  Effect,
-  EffectSource,
   GameEvent,
   EntityDef,
   Selector,
@@ -367,17 +469,90 @@ export type {
 export {
   abilityDefs,
   abilityOnKey,
-  beyondMinCastRange,
   getAbilityDef,
   meetsRequirement,
   quantizeDirection,
   withinCastRange,
 } from './abilities.js'
 export type { AbilityDef, AbilityIndicator } from './abilities.js'
-export { balancedTeam, GAME_TEAMS, getTeam, isTeamId, teamSpawnPositions } from './teams.js'
-export type { TeamDef } from './teams.js'
+export {
+  dirname,
+  findTileset,
+  flattenLayers,
+  flipMatrix,
+  getProperty,
+  mapContentBounds,
+  mapWorldScale,
+  parseTiledMap,
+  parseTiledTileset,
+  resolveAssetPath,
+  splitGid,
+  tileLayerCells,
+  tileRect,
+} from './tiled.js'
+export type {
+  ImageLayer,
+  ObjectLayer,
+  TileLayer,
+  TiledMap,
+  TiledObject,
+  Tileset,
+} from './tiled.js'
+export { balancedTeam, GAME_TEAMS, getTeam, isMonsterTeam, isTeamId, MONSTER_TEAM, teamHasRoom } from './teams.js'
+export { assignSpawns, rankTeams, spawnPointsNeeded } from './spawns.js'
+export {
+  advanceObjective,
+  applyRulesChange,
+  CAPTURE_SECONDS,
+  createModeSetup,
+  defaultRules,
+  DEFAULT_GAME_MODE,
+  GAME_MODE_IDS,
+  GAME_MODES,
+  getGameMode,
+  hillCaptureTicks,
+  hillContains,
+  hillLeader,
+  hillMovement,
+  hillOwner,
+  hillPresence,
+  initialObjective,
+  isGameMode,
+  leadingTeam,
+  modeRules,
+  modeStartProblem,
+  modeSupportProblem,
+  NO_OBJECTIVES,
+  objectiveScores,
+  readRulesChange,
+  RESPAWN_SECONDS,
+  teamCountProblem,
+  winningTeam,
+} from './modes.js'
+export type { GameModeDef, HillMovement, LobbyRules, MapObjectives, ModeRules, ObjectiveUnit, RulesChange, ScoreName } from './modes.js'
+export { Terrain } from './terrain.js'
+export type { Rect, TerrainData } from './terrain.js'
+export { createVisibilityGraph } from './visibility-graph.js'
+export type { PathfinderFactory, PathWorld, Pathfinder } from './pathfinding.js'
+export type { SpawnSlots } from './spawns.js'
+export { readMapLayout } from './map-layout.js'
+export {
+  mapDisplayName,
+  mapRoomText,
+  startProblem,
+  summarizeMap,
+  supportedModes,
+  teamSetupProblem,
+  unplayableMap,
+} from './maps.js'
+export type { MapCapabilities, MapSummary } from './maps.js'
+export type { MapLayout, MapMonster, MapRect } from './map-layout.js'
 export { Champion, champions, DEFAULT_CHAMPION_ID, getChampion } from './champions.js'
-export type { AttackProjectileDef, ChampionDef } from './champions.js'
+export { aimAt, think } from './ai.js'
+export type { AiBody, AiDecision, AiOrder, AiOther } from './ai.js'
+export { getCharacterChampion, getMonster, Monster, monsters } from './monsters.js'
+export type { AiAbilityRule, AiProfile, AiProfileDef, MonsterDef } from './monsters.js'
+export type { ChampionDef } from './champions.js'
 export {
   CharacterTickSnapshot,
   GameTickSnapshot,
@@ -388,5 +563,6 @@ export {
 export type { DeathRecord } from './simulator.js'
 export { ReliableMessenger, parseIdentifiedMessage } from './reliable-messages.js'
 export type { IdentifiedMessage } from './reliable-messages.js'
-export { lagConfigFromQuery, noLag, withLag } from './lag-simulator.js'
+export type { ChatMessage, PublicLobby, PublicPlayer } from './lobby.js'
+export { lagConfigFromQuery, withLag } from './lag-simulator.js'
 export type { LagConfig } from './lag-simulator.js'
