@@ -11,6 +11,7 @@ input {
 }
 
 #player-list {
+  margin: 0;
   padding: 0;
   list-style: none;
 }
@@ -23,7 +24,12 @@ input {
 }
 
 .player-row {
-  margin: 0.35rem 0;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid #e3e8e3;
+}
+
+.player-row > span:nth-child(3) {
+  font-weight: 600;
 }
 
 .player-icon {
@@ -85,40 +91,169 @@ input {
   font-size: 0.75rem;
 }
 
-.lobby-content {
+/* The lobby is the whole page: a header with the code, three columns (the players, the game's settings, the chat)
+   that share the height, and a footer with what is stopping the game from starting and the buttons that start it. */
+body:has(#lobby-panel:not([hidden])) {
+  box-sizing: border-box;
+  max-width: none;
+  height: 100vh;
+  margin: 0;
+  padding: 1rem 1.5rem;
+}
+
+body:has(#lobby-panel:not([hidden])) > main {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+body:has(#lobby-panel:not([hidden])) > main > h1 {
+  margin: 0 0 0.75rem;
+  font-size: 1.4rem;
+}
+
+#lobby-panel:not([hidden]) {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.9rem;
+  min-height: 0;
+}
+
+.lobby-header,
+.lobby-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+}
+
+.lobby-header button,
+.lobby-actions button {
+  white-space: nowrap;
+}
+
+.lobby-code {
+  margin: 0;
+}
+
+.lobby-code strong {
+  margin: 0 0.25rem;
+  font-size: 1.25rem;
+  letter-spacing: 0.1em;
+}
+
+.lobby-grid {
   display: grid;
-  grid-template-columns: minmax(12rem, 0.8fr) minmax(18rem, 1.4fr);
-  gap: 1.5rem;
-  align-items: start;
+  flex: 1;
+  grid-template-columns: minmax(16rem, 1fr) minmax(18rem, 1.2fr) minmax(16rem, 1.2fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 1rem;
+  min-height: 0;
 }
 
-.lobby-sidebar,
-.chat-panel {
+.lobby-card {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
   min-width: 0;
+  min-height: 0;
+  padding: 1rem;
+  overflow-y: auto;
+  background: #f8faf8;
+  border: 1px solid #cfd6cf;
+  border-radius: 0.5rem;
 }
 
-.chat-panel {
-  padding: 0;
+.lobby-card h2,
+.lobby-group h3 {
+  margin: 0;
+}
+
+.lobby-card h2 {
+  font-size: 1.05rem;
+}
+
+.lobby-group {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.6rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid #e3e8e3;
+}
+
+.lobby-group h3 {
+  font-size: 0.9rem;
+}
+
+/* The first thing in a card has nothing above it to be separated from. */
+.lobby-card > .lobby-group:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.lobby-note {
+  margin: -0.5rem 0 0;
+  color: #666;
+  font-size: 0.8rem;
+}
+
+/* A setting: what it is called, the control, and under it what the choice means. */
+.field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.3rem;
+}
+
+.field label,
+.field-row > span,
+.field-row > label {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.field select {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.3rem;
+}
+
+/* A label, and what it is for on the same line. */
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.field-row input {
+  box-sizing: border-box;
+  min-width: 0;
+  flex: 1;
 }
 
 .chat-panel h2 {
-  margin: 0 0 0.4rem;
+  flex: none;
 }
 
 #chat-messages {
   display: flex;
-  height: 12rem;
+  flex: 1;
   flex-direction: column;
+  min-height: 0;
   overflow-y: auto;
-  margin: 0 0 0.5rem;
-  padding: 0;
+  margin: 0;
+  padding: 0.5rem 0.65rem;
   list-style: none;
+  background: #fff;
+  border: 1px solid #d5dad5;
+  border-radius: 0.35rem;
 }
 
 #chat-messages li {
-  padding: 0.1rem 0;
-  font-size: 0.8rem;
-  line-height: 1.25;
+  padding: 0.15rem 0;
+  font-size: 0.85rem;
+  line-height: 1.3;
   overflow-wrap: anywhere;
 }
 
@@ -128,7 +263,7 @@ input {
 
 .chat-input-row {
   display: flex;
-  gap: 0.25rem;
+  gap: 0.35rem;
 }
 
 .chat-input-row input {
@@ -136,6 +271,47 @@ input {
   max-width: none;
   min-width: 0;
   flex: 1;
+}
+
+.lobby-footer {
+  min-height: 2.4rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid #cfd6cf;
+}
+
+.lobby-status {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.lobby-status p {
+  margin: 0;
+}
+
+.lobby-actions {
+  display: flex;
+  flex: none;
+  gap: 0.5rem;
+}
+
+#start-button {
+  padding: 0.45rem 1.4rem;
+  font-weight: 600;
+}
+
+#lobby-message.is-error,
+#message.is-error {
+  color: #a02828;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* Once champion select or a game is open the page is only that screen: no margins or headings. */
@@ -517,9 +693,32 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   display: none;
 }
 
-@media (max-width: 640px) {
-  .lobby-content {
+@media (max-width: 56rem) {
+  body:has(#lobby-panel:not([hidden])) {
+    height: auto;
+    min-height: 100vh;
+  }
+
+  body:has(#lobby-panel:not([hidden])) > main {
+    height: auto;
+  }
+
+  .lobby-grid {
     grid-template-columns: 1fr;
+    grid-template-rows: none;
+  }
+
+  .lobby-card {
+    overflow-y: visible;
+  }
+
+  #chat-messages {
+    flex: none;
+    height: 14rem;
+  }
+
+  .lobby-footer {
+    flex-wrap: wrap;
   }
 }
 
@@ -690,16 +889,15 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 }
 
 .mode-summary {
-  margin: 0.35rem 0 0;
+  margin: 0;
   color: #666;
   font-size: 0.8rem;
-  line-height: 1.3;
+  line-height: 1.35;
 }
 
 .mode-warning {
-  margin: 0.35rem 0 0;
   color: #a02828;
-  font-size: 0.8rem;
+  font-size: 0.9rem;
   line-height: 1.3;
 }
 
@@ -877,16 +1075,24 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   }
 }
 
-/* The leader's rules in the lobby: number boxes, with the score limit of the selected mode only. */
+/* The leader's rules in the lobby: a list with the number box of each on the right, and the score limit of the
+   selected mode only. */
 .rules {
   display: grid;
-  gap: 0.4rem;
+  gap: 0.6rem;
+}
+
+/* The limits are made by script into this box, but belong in the grid with the rest. */
+#rule-limits {
+  display: contents;
 }
 
 .rule-row {
-  display: grid;
-  gap: 0.15rem;
-  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.9rem;
 }
 
 .rule-row[hidden] {
@@ -895,13 +1101,14 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 
 .rule-row input {
   box-sizing: border-box;
-  width: 6rem;
+  flex: none;
+  width: 5rem;
 }
 
 /* Who is still in the game, and how the last one ended, for players back in the lobby. */
 .game-activity,
 .last-result {
-  margin: 0.4rem 0;
+  margin: 0;
   font-size: 0.85rem;
   line-height: 1.3;
 }

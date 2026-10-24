@@ -15,6 +15,7 @@ import {
   GAME_TPS,
   GameJoinSchema,
   GameOrderSchema,
+  getTeam,
   isGameMode,
   isTeamId,
   modeRules,
@@ -34,6 +35,7 @@ import {
 } from '../../../packages/shared/src/index.js'
 import { BandwidthMeter, formatBandwidthReport, type SendOptions } from './bandwidth.js'
 import { ServerGameState, type GameMap } from './game-state.js'
+import { Logger, type LogFields } from './log.js'
 import { isMapId, loadMapLayout } from './map.js'
 import { MapCatalog } from './maps.js'
 import { encodeSnapshot } from './snapshot-codec.js'
@@ -116,6 +118,15 @@ type GameDeliveryClient = {
 const lobbies = new Map<string, Lobby>()
 const gameServer = geckos({ portRange: { min: webrtcPortMin, max: webrtcPortMax }, iceServers })
 const gameDeliveryClients = new Map<string, GameDeliveryClient>()
+
+// What happens to lobbies and their games, a line each. Not what happens all the time: polling, chat, teams, orders
+// and pings are left out, or the log would be mostly those. Players are named by their username and never by their
+// session ID, which is what their requests are trusted by.
+const log = new Logger()
+// Anyone can ask to join any lobby, so the log keeps one of each kind of refusal in this long, and says how many it left out.
+const REFUSAL_LOG_MS = 10_000
+// How long after a player's game connection closes before it is called lost (see `onDisconnect`).
+const DISCONNECT_GRACE_MS = 3_000
 
 // What the server sends, counted by kind of message and logged every GAME_BANDWIDTH_LOG_MS (5 s by
 // default, 0 to turn it off), so it can be seen where the bandwidth goes. Only while something is sent.
@@ -273,20 +284,41 @@ function readGameMap(id: string): GameMap {
   if (!summary) throw new HttpError(409, `The map "${id}" is not on the server any more. Pick another.`)
   try {
     const layout = loadMapLayout(id, mapsDirectory)
-    console.log(`Map ${id}: ${layout.terrain.width} by ${layout.terrain.height}, ${layout.terrain.walls.length} walls`)
+    log.info('map loaded', { map: id, width: layout.terrain.width, height: layout.terrain.height, walls: layout.terrain.walls.length })
     return { ...layout, id, name: summary.name }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    console.error(message)
+    log.error('map cannot be played on', { map: id, reason: message })
     throw new HttpError(409, `${summary.name} cannot be played on: ${message}`)
   }
 }
 
 // A game that is over: its results are kept on the lobby, for players back in it, and sent to everyone still
 // in the game to be shown.
-function announceResult(lobby: Lobby, result: GameResult): void {
+function announceResult(lobby: Lobby, result: GameResult, endedBy?: string): void {
   lobby.lastResult = result
   emitToRoom(lobby.code, 'game:ended', result, { reliable: true })
+  log.info('game finished', {
+    lobby: lobby.code,
+    mode: result.mode,
+    map: lobby.mapId,
+    // 'limit' is a team reaching the score that wins, 'ended' is the leader ending the game.
+    reason: result.reason,
+    by: endedBy,
+    winner: result.winner === undefined ? 'none' : getTeam(result.winner).name,
+    scores: result.teams.map(({ team, score }) => `${getTeam(team).name} ${score}`).join(', '),
+    players: result.players.length,
+    seconds: Math.round(lobby.game.simulator.tick / GAME_TPS),
+  })
+}
+
+// The players of a lobby, with their teams, as the log says it.
+function describePlayers(lobby: Lobby): string {
+  return [...lobby.players.values()].map((player) => `${player.name} (${getTeam(player.team).name})`).join(', ')
+}
+
+function playerCount(lobby: Lobby): string {
+  return `${lobby.players.size}/${maxPlayers}`
 }
 
 function sendReadyProgress(lobby: Lobby): void {
@@ -302,8 +334,10 @@ function sendReadyProgress(lobby: Lobby): void {
 // and then the game is called off and the lobby is back to being a lobby.
 function beginGameWhenAllLocked(lobby: Lobby): void {
   if (!lobby.game.allChampionsLocked()) return
-  if (lobby.game.modeProblem(lobby.players.values())) {
+  const problem = lobby.game.modeProblem(lobby.players.values())
+  if (problem) {
     lobby.game.cancelStart()
+    log.warn('game start cancelled', { lobby: lobby.code, reason: problem })
     return
   }
   lobby.game.begin(lobby.players.values())
@@ -311,13 +345,25 @@ function beginGameWhenAllLocked(lobby: Lobby): void {
 
 function startGameWhenReady(lobby: Lobby): void {
   const snapshot = lobby.game.startIfReady()
-  if (snapshot) emitToRoom(lobby.code, 'game:started', snapshot, { reliable: true })
+  if (!snapshot) return
+  emitToRoom(lobby.code, 'game:started', snapshot, { reliable: true })
+  log.info('game started', { lobby: lobby.code, mode: lobby.mode, map: lobby.mapId, players: describePlayers(lobby) })
 }
 
+// A game that has begun and has no one left in it is shut down.
+function closeGameIfEmpty(lobby: Lobby): void {
+  if (lobby.game.closeIfEmpty()) log.info('game closed', { lobby: lobby.code, reason: 'no players left' })
+}
+
+// How a player came to be out of a lobby, as the log says it.
+type Departure = 'left lobby' | 'kicked from lobby' | 'timed out of lobby'
+
 // Takes a player out of a lobby and its game.
-function dropPlayer(lobby: Lobby, sessionId: string): boolean {
+function dropPlayer(lobby: Lobby, sessionId: string, departure: Departure, by?: string): boolean {
+  const name = lobby.players.get(sessionId)?.name
   const removed = lobby.players.delete(sessionId)
   lobby.game.removePlayer(sessionId)
+  if (removed) log.info(`player ${departure}`, { lobby: lobby.code, name, by, players: playerCount(lobby) })
   return removed
 }
 
@@ -328,7 +374,7 @@ function advanceGameStart(lobby: Lobby): void {
   sendReadyProgress(lobby)
   startGameWhenReady(lobby)
   // A game no one is in any more (all went back to the lobby, or left it) is shut down.
-  lobby.game.closeIfEmpty()
+  closeGameIfEmpty(lobby)
 }
 
 function sendReliableOrder(lobbyCode: string, order: GameBroadcastOrder): void {
@@ -343,15 +389,20 @@ function promoteOldestPlayer(lobby: Lobby): void {
   const oldestPlayer = lobby.players.keys().next()
   if (oldestPlayer.done) {
     lobbies.delete(lobby.code)
+    log.info('lobby closed', { lobby: lobby.code, reason: 'no players left', lobbies: lobbies.size })
   } else {
     lobby.leaderId = oldestPlayer.value
+    log.info('leader changed', { lobby: lobby.code, leader: lobby.players.get(oldestPlayer.value)?.name, reason: 'the leader left' })
   }
 }
 
-function requireLobby(code: string): Lobby {
-  const lobby = lobbies.get(code.toUpperCase())
-  if (!lobby) throw new HttpError(404, 'Lobby not found. Check the code and try again.')
-  return lobby
+const LOBBY_NOT_FOUND = 'Lobby not found. Check the code and try again.'
+
+// A join the lobby turned down, which is logged (once in a while, see `REFUSAL_LOG_MS`) and told to the player.
+// `kind` is how such refusals are counted together, so it is a word from the code and not from the request.
+function refuseJoin(code: string, name: string | undefined, status: number, message: string, kind: string): never {
+  log.warn('join rejected', { lobby: code, name, reason: message }, { key: `join-rejected:${kind}`, everyMs: REFUSAL_LOG_MS })
+  throw new HttpError(status, message)
 }
 
 function upsertPlayer(lobby: Lobby, sessionId: string, name: string): PublicPlayer {
@@ -405,6 +456,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     }
     const player = upsertPlayer(lobby, playerRequest.sessionId, playerRequest.name)
     lobbies.set(lobby.code, lobby)
+    log.info('lobby created', { lobby: lobby.code, leader: player.name, map: lobby.mapId, mode: lobby.mode, lobbies: lobbies.size })
     sendJson(response, 201, { lobby: toPublicLobby(lobby), player })
     return
   }
@@ -413,17 +465,26 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     throw new HttpError(404, 'Route not found.')
   }
 
-  const lobby = requireLobby(pathParts[2])
   const isAction = (name: string): boolean => request.method === 'POST' && pathParts.length === 4 && pathParts[3] === name
+  const lobby = lobbies.get(pathParts[2].toUpperCase())
+  if (!lobby) {
+    // A code with nothing behind it: a typo, or someone trying codes. Only a join is worth a line.
+    if (isAction('join')) refuseJoin(pathParts[2].slice(0, lobbyCodeLength * 2), undefined, 404, LOBBY_NOT_FOUND, 'not-found')
+    throw new HttpError(404, LOBBY_NOT_FOUND)
+  }
+  // Who a request is from, for what the log says about it.
+  const nameOf = (sessionId: string): string | undefined => lobby.players.get(sessionId)?.name
   if (isAction('join')) {
     const playerRequest = getPlayerRequest(await readJson(request))
     if (lobby.game.status !== 'idle') {
-      throw new HttpError(409, 'This lobby has already started a game.')
+      refuseJoin(lobby.code, playerRequest.name, 409, 'This lobby has already started a game.', 'game-started')
     }
-    if (!lobby.players.has(playerRequest.sessionId) && lobby.players.size >= maxPlayers) {
-      throw new HttpError(409, `Lobby is full. The maximum is ${maxPlayers} players.`)
+    const rejoining = lobby.players.has(playerRequest.sessionId)
+    if (!rejoining && lobby.players.size >= maxPlayers) {
+      refuseJoin(lobby.code, playerRequest.name, 409, `Lobby is full. The maximum is ${maxPlayers} players.`, 'full')
     }
     const player = upsertPlayer(lobby, playerRequest.sessionId, playerRequest.name)
+    log.info(rejoining ? 'player rejoined' : 'player joined', { lobby: lobby.code, name: player.name, players: playerCount(lobby) })
     sendJson(response, 200, { lobby: toPublicLobby(lobby), player })
     return
   }
@@ -449,15 +510,26 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
   // is dropped for the default one, since it could not be played.
   if (isAction('map')) {
     const body = await readJson(request)
-    requireLeader(lobby, requireBodySessionId(body))
+    const sessionId = requireBodySessionId(body)
+    requireLeader(lobby, sessionId)
     if (lobby.game.status !== 'idle') {
       throw new HttpError(409, 'The map cannot be changed once the game is starting.')
     }
     const map = isMapId(body.map) ? maps.get(body.map, { fresh: true }) : undefined
     if (!map) throw new HttpError(400, 'Pick a map from the list.')
     if (map.problem) throw new HttpError(409, `${map.name} cannot be played on: ${map.problem}`)
+    const before = { map: lobby.mapId, mode: lobby.mode }
     lobby.mapId = map.id
     if (modeSupportProblem(lobby.mode, map)) lobby.mode = DEFAULT_GAME_MODE
+    if (lobby.mapId !== before.map) {
+      log.info('map changed', {
+        lobby: lobby.code,
+        by: nameOf(sessionId),
+        map: lobby.mapId,
+        // The mode is put back to the default when the new map cannot be played in it.
+        ...(lobby.mode !== before.mode ? { mode: lobby.mode, modeWas: before.mode } : {}),
+      })
+    }
     sendJson(response, 200, { lobby: toPublicLobby(lobby) })
     return
   }
@@ -466,7 +538,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
   // played in.
   if (isAction('mode')) {
     const body = await readJson(request)
-    requireLeader(lobby, requireBodySessionId(body))
+    const sessionId = requireBodySessionId(body)
+    requireLeader(lobby, sessionId)
     if (lobby.game.status !== 'idle') {
       throw new HttpError(409, 'The game mode cannot be changed once the game is starting.')
     }
@@ -474,6 +547,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     const map = maps.get(lobby.mapId)
     const problem = map ? modeSupportProblem(body.mode, map) : undefined
     if (problem) throw new HttpError(409, problem)
+    if (lobby.mode !== body.mode) log.info('mode changed', { lobby: lobby.code, by: nameOf(sessionId), mode: body.mode, modeWas: lobby.mode })
     lobby.mode = body.mode
     sendJson(response, 200, { lobby: toPublicLobby(lobby) })
     return
@@ -483,13 +557,23 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
   // the score a team wins at in each mode.
   if (isAction('rules')) {
     const body = await readJson(request)
-    requireLeader(lobby, requireBodySessionId(body))
+    const sessionId = requireBodySessionId(body)
+    requireLeader(lobby, sessionId)
     if (lobby.game.status !== 'idle') {
       throw new HttpError(409, 'The rules cannot be changed once the game is starting.')
     }
     const read = readRulesChange(body)
     if ('problem' in read) throw new HttpError(400, read.problem)
+    const before = lobby.rules
     lobby.rules = applyRulesChange(lobby.rules, read.change)
+    // What changed, as it is now: a box that was typed in and left as it was is not a change.
+    const changed: LogFields = {}
+    if (lobby.rules.respawnSeconds !== before.respawnSeconds) changed.respawnSeconds = lobby.rules.respawnSeconds
+    if (lobby.rules.captureSeconds !== before.captureSeconds) changed.captureSeconds = lobby.rules.captureSeconds
+    for (const mode of Object.keys(lobby.rules.scoreLimits) as GameMode[]) {
+      if (lobby.rules.scoreLimits[mode] !== before.scoreLimits[mode]) changed[`${mode}Limit`] = lobby.rules.scoreLimits[mode]
+    }
+    if (Object.keys(changed).length > 0) log.info('rules changed', { lobby: lobby.code, by: nameOf(sessionId), ...changed })
     sendJson(response, 200, { lobby: toPublicLobby(lobby) })
     return
   }
@@ -498,8 +582,10 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
   // is not in a game, so a page that has not caught up with the lobby can ask again.
   if (isAction('leave-game')) {
     const player = requireMember(lobby, requireBodySessionId(await readJson(request)))
-    lobby.game.leaveGame(player.id)
-    lobby.game.closeIfEmpty()
+    if (lobby.game.leaveGame(player.id)) {
+      log.info('player left game', { lobby: lobby.code, name: player.name, playersLeft: lobby.game.playingPlayerIds.length })
+    }
+    closeGameIfEmpty(lobby)
     sendJson(response, 200, { lobby: toPublicLobby(lobby) })
     return
   }
@@ -507,11 +593,13 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
   // The leader ends the game for everyone, with the score as it stands (the team ahead wins), or, if it is
   // already over, shuts it down so players still looking at its results are sent back to the lobby.
   if (isAction('end')) {
-    requireLeader(lobby, requireBodySessionId(await readJson(request)))
+    const sessionId = requireBodySessionId(await readJson(request))
+    requireLeader(lobby, sessionId)
     const { status } = lobby.game
     if (status !== 'running' && status !== 'finished') throw new HttpError(409, 'There is no game running to end.')
     const result = lobby.game.end()
-    if (result) announceResult(lobby, result)
+    if (result) announceResult(lobby, result, nameOf(sessionId))
+    else log.info('game closed', { lobby: lobby.code, reason: 'the leader closed it', by: nameOf(sessionId) })
     sendJson(response, 200, { lobby: toPublicLobby(lobby) })
     return
   }
@@ -524,11 +612,21 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     // The map is read again for every game, so what it has, and where teams start, is asked of the map as it is now.
     const map = readGameMap(lobby.mapId)
     const problem = lobby.game.modeProblem(lobby.players.values(), lobby.mode, map)
-    if (problem) throw new HttpError(409, problem)
+    if (problem) {
+      log.warn('game start rejected', { lobby: lobby.code, by: nameOf(sessionId), reason: problem })
+      throw new HttpError(409, problem)
+    }
     if (!lobby.game.beginSelection(lobby.players.values(), map, lobby.mode, modeRules(lobby.rules, lobby.mode))) {
       throw new HttpError(409, 'A game is already starting or running.')
     }
     lobby.lastResult = undefined
+    log.info('champion select opened', {
+      lobby: lobby.code,
+      by: nameOf(sessionId),
+      mode: lobby.mode,
+      map: lobby.mapId,
+      players: describePlayers(lobby),
+    })
     sendJson(response, 200, { lobby: toPublicLobby(lobby) })
     return
   }
@@ -558,9 +656,16 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
   }
 
   if (isAction('cancel-start')) {
-    requireMember(lobby, requireBodySessionId(await readJson(request)))
+    const cancelledBy = requireMember(lobby, requireBodySessionId(await readJson(request)))
     const wasStarting = lobby.game.status === 'starting'
-    if (wasStarting || lobby.game.status === 'selecting') lobby.game.cancelStart()
+    if (wasStarting || lobby.game.status === 'selecting') {
+      log.info('game start cancelled', {
+        lobby: lobby.code,
+        by: cancelledBy.name,
+        stage: wasStarting ? 'loading' : 'champion select',
+      })
+      lobby.game.cancelStart()
+    }
     // Players already loading into the game are told it is off.
     if (wasStarting) {
       emitToRoom(lobby.code, 'game:cancelled', { message: 'A player cancelled game start.' }, { reliable: true })
@@ -600,6 +705,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     requireLeader(lobby, sessionId)
     if (!lobby.players.has(targetSessionId)) throw new HttpError(404, 'Player is no longer in this lobby.')
     lobby.leaderId = targetSessionId
+    log.info('leader changed', { lobby: lobby.code, leader: nameOf(targetSessionId), by: nameOf(sessionId) })
     sendJson(response, 200, { lobby: toPublicLobby(lobby) })
     return
   }
@@ -610,7 +716,9 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     const targetSessionId = requireTargetSessionId(body)
     requireLeader(lobby, sessionId)
     if (targetSessionId === lobby.leaderId) throw new HttpError(400, 'The lobby leader cannot be kicked.')
-    if (!dropPlayer(lobby, targetSessionId)) throw new HttpError(404, 'Player is no longer in this lobby.')
+    if (!dropPlayer(lobby, targetSessionId, 'kicked from lobby', nameOf(sessionId))) {
+      throw new HttpError(404, 'Player is no longer in this lobby.')
+    }
     advanceGameStart(lobby)
     sendJson(response, 200, { lobby: toPublicLobby(lobby) })
     return
@@ -633,7 +741,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
 
     if (request.method === 'DELETE') {
       const playerRequest = getPlayerRequest(await readJson(request))
-      dropPlayer(lobby, playerRequest.sessionId)
+      dropPlayer(lobby, playerRequest.sessionId, 'left lobby')
       promoteOldestPlayer(lobby)
       advanceGameStart(lobby)
       sendJson(response, 200, { success: true })
@@ -654,7 +762,7 @@ const server = createServer((request, response) => {
       sendJson(response, error.status, { error: error.message })
       return
     }
-    console.error('Lobby request failed:', error)
+    log.error('lobby request failed', { method: request.method, path: request.url?.split('?')[0].slice(0, 100) }, error)
     sendJson(response, 500, { error: 'The lobby server encountered an unexpected error.' })
   })
 })
@@ -685,7 +793,7 @@ const cleanupTimer = setInterval(() => {
   const expiredBefore = Date.now() - playerTimeoutMs
   for (const lobby of lobbies.values()) {
     for (const [sessionId, player] of lobby.players) {
-      if (player.lastSeen < expiredBefore) dropPlayer(lobby, sessionId)
+      if (player.lastSeen < expiredBefore) dropPlayer(lobby, sessionId, 'timed out of lobby')
     }
     promoteOldestPlayer(lobby)
     advanceGameStart(lobby)
@@ -723,7 +831,7 @@ function runGameTick(): void {
 runGameTick()
 
 server.listen(port, () => {
-  console.log(`Lobby server listening on port ${port}`)
+  log.info('lobby server listening', { port })
 })
 
 gameServer.onConnection((channel) => {
@@ -737,32 +845,41 @@ gameServer.onConnection((channel) => {
   let playerId: string | undefined
   let deliveryClient: GameDeliveryClient | undefined
   let deliveryChannelId: string | undefined
+  let playerName: string | undefined
+
+  // A player's game connection that the server turned away, which the player is told and the log is told of (once in
+  // a while, see `REFUSAL_LOG_MS`). The lobby is only named when there is one, since the rest is what the player sent.
+  const refuse = (message: string, lobbyCode?: string): void => {
+    channel.emit('game:error', { message }, { reliable: true })
+    log.warn('game connection refused', { lobby: lobbyCode, reason: message }, { key: 'game-connection-refused', everyMs: REFUSAL_LOG_MS })
+  }
 
   channel.on('game:join', (data) => {
     const parsed = GameJoinSchema.safeParse(data)
     if (!parsed.success) {
-      channel.emit('game:error', { message: 'A valid lobby code and session ID are required.' }, { reliable: true })
+      refuse('A valid lobby code and session ID are required.')
       return
     }
 
     const joinedLobby = lobbies.get(parsed.data.lobbyCode.toUpperCase())
     const player = joinedLobby?.players.get(parsed.data.sessionId)
     if (!joinedLobby || !player) {
-      channel.emit('game:error', { message: 'You are no longer in this lobby.' }, { reliable: true })
+      refuse('You are no longer in this lobby.', joinedLobby?.code)
       return
     }
     if (joinedLobby.game.status === 'idle') {
-      channel.emit('game:error', { message: 'The lobby leader has not started a game yet.' }, { reliable: true })
+      refuse('The lobby leader has not started a game yet.', joinedLobby.code)
       return
     }
 
     lobby = joinedLobby
     playerId = player.id
+    playerName = player.name
     player.lastSeen = Date.now()
     channel.join(joinedLobby.code)
     deliveryChannelId = channel.id
     if (!deliveryChannelId) {
-      channel.emit('game:error', { message: 'The game connection is not available.' }, { reliable: true })
+      refuse('The game connection is not available.', joinedLobby.code)
       return
     }
     deliveryClient = {
@@ -785,7 +902,7 @@ gameServer.onConnection((channel) => {
     gameDeliveryClients.set(deliveryChannelId, deliveryClient)
     const characterId = joinedLobby.game.getCharacterId(player.id)
     if (characterId === undefined) {
-      channel.emit('game:error', { message: 'Your game character is not available.' }, { reliable: true })
+      refuse('Your game character is not available.', joinedLobby.code)
       return
     }
     channel.emit('game:joined', {
@@ -794,6 +911,7 @@ gameServer.onConnection((channel) => {
       nextOrderSeq: joinedLobby.game.getNextOrderSequence(player.id),
       serverTick: joinedLobby.game.simulator.tick,
     }, { reliable: true })
+    log.info('player connected to game', { lobby: joinedLobby.code, name: player.name, game: joinedLobby.game.status })
     if (joinedLobby.game.status === 'running') {
       channel.emit('game:started', joinedLobby.game.snapshot(), { reliable: true })
     } else if (joinedLobby.game.status === 'finished' && joinedLobby.lastResult) {
@@ -859,6 +977,18 @@ gameServer.onConnection((channel) => {
   })
 
   channel.onDisconnect(() => {
+    // A player's page closes this connection when it goes back to the lobby, and says so a moment later (see
+    // `leave-game`). One still in the game after that moment did not say so: their connection was lost.
+    const droppedFrom = lobby
+    const droppedId = playerId
+    const droppedName = playerName
+    if (droppedFrom && droppedId && droppedName) {
+      const timer = setTimeout(() => {
+        if (lobbies.get(droppedFrom.code) !== droppedFrom || droppedFrom.game.getCharacterId(droppedId) === undefined) return
+        log.warn('player lost connection to game', { lobby: droppedFrom.code, name: droppedName, game: droppedFrom.game.status })
+      }, DISCONNECT_GRACE_MS)
+      timer.unref()
+    }
     deliveryClient?.reliableMessenger.close()
     if (
       deliveryChannelId
@@ -874,4 +1004,4 @@ gameServer.onConnection((channel) => {
   })
 })
 gameServer.listen(gamePort)
-console.log(`Game server listening on port ${gamePort} (WebRTC UDP ${webrtcPortMin}-${webrtcPortMax})`)
+log.info('game server listening', { port: gamePort, webrtcUdp: `${webrtcPortMin}-${webrtcPortMax}` })

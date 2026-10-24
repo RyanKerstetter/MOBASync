@@ -24,52 +24,81 @@
       </section>
 
       <section id="lobby-panel" aria-label="Lobby" hidden>
-        <p>Code: <strong id="active-code"></strong> <button id="copy-button" type="button">Copy</button></p>
-        <div class="lobby-content">
-          <aside class="lobby-sidebar">
-            <form id="rename-form">
-              <label for="lobby-username">Username</label>
-              <input id="lobby-username" type="text" maxlength="24" autocomplete="nickname" />
-              <button type="submit">Save</button>
-            </form>
+        <header class="lobby-header">
+          <p class="lobby-code">Lobby code <strong id="active-code"></strong> <button id="copy-button" type="button">Copy</button></p>
+          <button id="leave-button" type="button">Leave lobby</button>
+        </header>
+
+        <div class="lobby-grid">
+          <section class="lobby-card" aria-label="Players">
             <h2>Players (<span id="player-count">0</span>)</h2>
             <ul id="player-list"></ul>
             <p id="game-activity" class="game-activity" role="status" aria-live="polite" hidden></p>
-            <h2>Your team</h2>
-            <div id="team-picker" class="team-picker" role="group" aria-label="Choose your team"></div>
-            <h2><label for="map-select">Map</label></h2>
-            <select id="map-select"></select>
-            <p id="map-summary" class="mode-summary"></p>
-            <h2><label for="mode-select">Game mode</label></h2>
-            <select id="mode-select"></select>
-            <p id="mode-summary" class="mode-summary"></p>
-            <p id="mode-warning" class="mode-warning" role="status" aria-live="polite" hidden></p>
-            <h2>Game rules</h2>
-            <div id="rules" class="rules">
-              <label class="rule-row"><span>Respawn time (seconds)</span><input id="rule-respawn" type="number" /></label>
-              <label id="rule-capture-row" class="rule-row" hidden><span>Seconds to capture the hill</span><input id="rule-capture" type="number" /></label>
-              <div id="rule-limits"></div>
+
+            <div class="lobby-group">
+              <h3>You</h3>
+              <form id="rename-form" class="field-row">
+                <label for="lobby-username">Name</label>
+                <input id="lobby-username" type="text" maxlength="24" autocomplete="nickname" />
+                <button type="submit">Save</button>
+              </form>
+              <div class="field-row">
+                <span id="team-label">Team</span>
+                <div id="team-picker" class="team-picker" role="group" aria-labelledby="team-label"></div>
+              </div>
             </div>
-          </aside>
-          <section class="chat-panel" aria-label="Lobby chat">
+          </section>
+
+          <section class="lobby-card" aria-label="Game settings">
+            <h2>Game settings</h2>
+            <p class="lobby-note">Set by the lobby leader.</p>
+
+            <div class="field">
+              <label for="map-select">Map</label>
+              <select id="map-select"></select>
+              <p id="map-summary" class="mode-summary"></p>
+            </div>
+
+            <div class="field">
+              <label for="mode-select">Game mode</label>
+              <select id="mode-select"></select>
+              <p id="mode-summary" class="mode-summary"></p>
+            </div>
+
+            <div class="lobby-group">
+              <h3>Rules</h3>
+              <div id="rules" class="rules">
+                <label class="rule-row"><span>Respawn time (seconds)</span><input id="rule-respawn" type="number" /></label>
+                <label id="rule-capture-row" class="rule-row" hidden><span>Seconds to capture the hill</span><input id="rule-capture" type="number" /></label>
+                <div id="rule-limits"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="lobby-card chat-panel" aria-label="Lobby chat">
             <h2>Chat</h2>
             <ul id="chat-messages" aria-live="polite"></ul>
             <form id="chat-form">
-              <label for="chat-input">Message</label>
+              <label for="chat-input" class="visually-hidden">Message</label>
               <div class="chat-input-row">
-                <input id="chat-input" type="text" maxlength="500" autocomplete="off" />
+                <input id="chat-input" type="text" maxlength="500" autocomplete="off" placeholder="Message the lobby" />
                 <button type="submit">Send</button>
               </div>
             </form>
           </section>
         </div>
-        <p id="last-result" class="last-result" hidden></p>
-        <p>
-          <button id="leave-button" type="button">Leave lobby</button>
-          <button id="start-button" type="button">Start game</button>
-          <button id="end-button" type="button" hidden>End game</button>
-        </p>
-        <p id="lobby-message" role="status" aria-live="polite"></p>
+
+        <footer class="lobby-footer">
+          <div class="lobby-status">
+            <p id="mode-warning" class="mode-warning" role="status" aria-live="polite" hidden></p>
+            <p id="last-result" class="last-result" hidden></p>
+            <p id="lobby-message" role="status" aria-live="polite"></p>
+          </div>
+          <div class="lobby-actions">
+            <button id="end-button" type="button" hidden>End game</button>
+            <button id="start-button" type="button">Start game</button>
+          </div>
+        </footer>
       </section>
 
       <section id="select-panel" aria-label="Champion select" hidden>

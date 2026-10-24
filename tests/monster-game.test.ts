@@ -194,7 +194,8 @@ test('a monster can be clicked on and attacked, and is the nearest enemy when it
   const state = clientWithMonster()
   assert.equal(state.getEnemyNear({ x: 600, y: 600 }, 0)?.id, 10, 'it is under the pointer')
   assert.equal(state.getEnemyNear({ x: 100, y: 100 }, 0), undefined, 'the local champion is not its own enemy')
-  assert.equal(state.getClosestEnemy(0)?.id, 10, 'it is the nearest to Ann, at 700, to Bob at 1100')
+  assert.equal(state.getClosestEnemy({ x: 100, y: 100 }, 0)?.id, 10, 'with the mouse on Ann it is the nearest to her, at 700, to Bob at 1100')
+  assert.equal(state.getClosestEnemy({ x: 880, y: 900 }, 0)?.id, 2, 'and with the mouse over Bob it is Bob')
   assert.ok(state.createAttackOrder(10, 0), 'and an attack order can be given on it')
 })
 

@@ -28,6 +28,7 @@ import { loadSpriteSets, type LoadedSpriteSet } from './character-sprite.ts'
 import { championSprites } from './champion-sprites.ts'
 import { createDebugOverlay } from './ui/debug-overlay.ts'
 import { createGameMenu, menuItems } from './game-menu.ts'
+import { HoldCommand, type HeldCommand } from './hold-command.ts'
 import { loadSettings, saveSettings } from './game-settings.ts'
 import { ClientGameState } from './game-state.ts'
 import { abilitySlotViews } from './ui/hud.ts'
@@ -240,25 +241,47 @@ export async function startGame({
   app.stage.on('pointermove', (event) => {
     pointerOnScreen = { x: event.global.x, y: event.global.y }
   })
+  // Gives an attack or a walk as the champion's next order.
+  const sendCommand = (command: HeldCommand, now = performance.now()): void => {
+    const order = command.type === 'attack'
+      ? gameState.createAttackOrder(command.targetId, now)
+      : gameState.createMoveOrder(command.target, now)
+    if (order) reliableMessenger.send(order)
+  }
+  // Holding the right button goes on giving the command, a few times a second (see `HoldCommand`).
+  const holdCommand = new HoldCommand()
+  // Right click is the command button: on an enemy it attacks them, anywhere else it walks there.
   app.stage.on('pointerdown', (event) => {
     if (menu.isOpen) return
     const target = screenToWorld(camera, event.global)
     if (gameState.isLocalDead()) return
-    if (event.button === 0 && inPlay()) {
-      const clickedEnemy = gameState.getEnemyNear(target)
-      if (clickedEnemy) {
-        // Giving an attack or move command drops any ability being aimed.
-        castControl.cancel()
-        const order = gameState.createAttackOrder(clickedEnemy.id)
-        if (order) reliableMessenger.send(order)
-        return
-      }
-    }
     if (event.button !== 2 || !inPlay()) return
+    // Giving an attack or move command drops any ability being aimed.
     castControl.cancel()
-    const order = gameState.createMoveOrder(target)
-    if (order) reliableMessenger.send(order)
+    const clickedEnemy = gameState.getEnemyNear(target)
+    const given: HeldCommand = clickedEnemy ? { type: 'attack', targetId: clickedEnemy.id } : { type: 'move', target }
+    const now = performance.now()
+    sendCommand(given, now)
+    holdCommand.press(now, given)
   })
+  // The command is given again while the button is down, wherever the mouse and the champion have got to, unless the game
+  // has something else to do with them: a menu, an ability being aimed, a champion that is dead.
+  const giveHeldCommand = (now: number): void => {
+    if (!holdCommand.held || !inPlay() || menu.isOpen || castControl.aiming !== undefined || gameState.isLocalDead()) return
+    const command = holdCommand.next(now, () => {
+      const cursor = pointerInWorld()
+      const enemy = gameState.getEnemyNear(cursor, now)
+      const motion = gameState.getLocalMotion(now)
+      return {
+        cursor,
+        ...(enemy ? { enemyId: enemy.id } : {}),
+        attackingId: gameState.getLocalAttackTarget(now),
+        position: motion?.position ?? cursor,
+        moving: motion?.moving ?? false,
+      }
+    })
+    if (command) sendCommand(command, now)
+  }
   const onContextMenu = (event: MouseEvent): void => event.preventDefault()
   app.canvas.addEventListener('contextmenu', onContextMenu)
   const castAtCursor = (slot: number): void => {
@@ -303,7 +326,8 @@ export async function startGame({
       }
       return
     }
-    const target = gameState.getClosestEnemy()
+    // The enemy nearest the mouse, not the one nearest the champion.
+    const target = gameState.getClosestEnemy(pointerInWorld())
     if (!target) return
     castControl.cancel()
     const order = gameState.createAttackOrder(target.id)
@@ -317,7 +341,17 @@ export async function startGame({
     castAtCursor(abilitySlot)
   }
   // A key let go while the window is not focused never reports its release.
-  const onBlur = (): void => castControl.cancel()
+  const onBlur = (): void => {
+    castControl.cancel()
+    holdCommand.release()
+  }
+  // The button can be let go anywhere, so this listens on the window and not the map.
+  const onPointerUp = (event: PointerEvent): void => {
+    if (event.button === 2) holdCommand.release()
+  }
+  const onPointerCancel = (): void => holdCommand.release()
+  window.addEventListener('pointerup', onPointerUp)
+  window.addEventListener('pointercancel', onPointerCancel)
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)
   window.addEventListener('blur', onBlur)
@@ -446,8 +480,8 @@ export async function startGame({
       started = true
       onStarted(snapshot)
       onStatus(castControl.mode === 'quick'
-        ? 'Game started. Right-click to move; click an enemy or press Space to attack; Q/W/E/R cast at the cursor.'
-        : 'Game started. Right-click to move; click an enemy or press Space to attack; hold Q/W/E/R to aim and let go to cast.')
+        ? 'Game started. Right-click to move, or right-click an enemy to attack; Space attacks the enemy nearest the cursor; Q/W/E/R cast at the cursor.'
+        : 'Game started. Right-click to move, or right-click an enemy to attack; Space attacks the enemy nearest the cursor; hold Q/W/E/R to aim and let go to cast.')
     }
   })
 
@@ -500,8 +534,8 @@ export async function startGame({
     const dead = local?.dead ?? false
     if (dead) castControl.cancel()
     const aimed = castControl.aiming
-    // Only an enemy a plain click would attack is marked as hovered: not while an ability is being
-    // aimed (the click casts it), nor when dead.
+    // Only an enemy a right click would attack is marked as hovered: not while an ability is being
+    // aimed (a right click then drops the aim), nor when dead.
     const hovered = aimed === undefined && !dead
       ? gameState.getEnemyNear(pointerInWorld(), now, characters)
       : undefined
@@ -543,6 +577,7 @@ export async function startGame({
     if (!started || disconnected) return
     const now = performance.now()
     debugOverlay.frame(now, () => gameState.getDebugInfo())
+    giveHeldCommand(now)
     drawFrame(now)
   })
 
@@ -551,6 +586,8 @@ export async function startGame({
     window.clearInterval(pingTimer)
     window.clearInterval(startPingTimer)
     app.canvas.removeEventListener('contextmenu', onContextMenu)
+    window.removeEventListener('pointerup', onPointerUp)
+    window.removeEventListener('pointercancel', onPointerCancel)
     window.removeEventListener('keydown', onKeyDown)
     window.removeEventListener('keyup', onKeyUp)
     window.removeEventListener('blur', onBlur)

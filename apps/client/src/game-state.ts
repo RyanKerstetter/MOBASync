@@ -521,9 +521,11 @@ export class ClientGameState {
       .sort((left, right) => left.distance - right.distance)[0]?.character
   }
 
-  // The living enemy nearest the local champion, however far away: the one Space attacks. One out of
-  // reach is walked up to and attacked, as when it is clicked.
-  getClosestEnemy(now = performance.now()): RenderedCharacter | undefined {
+  // The living enemy nearest a point, which is where the mouse is: the one Space attacks. It is the enemy nearest
+  // the point, not the one nearest the local champion, and however far from either. One out of reach is walked up
+  // to and attacked, as when it is right-clicked. Two as near as each other: the first, which is the same for
+  // everyone.
+  getClosestEnemy(point: Vector2, now = performance.now()): RenderedCharacter | undefined {
     if (this.localCharacterId === undefined) return undefined
     const characters = this.getCharacters(now)
     const local = characters.find((character) => character.id === this.localCharacterId)
@@ -532,11 +534,8 @@ export class ClientGameState {
     let closestDistance = Infinity
     for (const character of characters) {
       if (character.dead || character.team === local.team) continue
-      const distance = Math.hypot(
-        character.position.x - local.position.x,
-        character.position.y - local.position.y,
-      )
-      if (distance <= closestDistance) {
+      const distance = Math.hypot(character.position.x - point.x, character.position.y - point.y)
+      if (distance < closestDistance) {
         closest = character
         closestDistance = distance
       }
@@ -567,6 +566,13 @@ export class ClientGameState {
     const from = state.getPosition()
     const route = this.simulator.terrain.path(from, target, champion.radius)
     return route && [from, ...route]
+  }
+
+  // Where the controlled champion is in the frame being drawn, and whether it is walking (or dashing) somewhere.
+  getLocalMotion(now = performance.now()): { position: Vector2; moving: boolean } | undefined {
+    if (this.localCharacterId === undefined) return undefined
+    const state = this.getSnapshotAtEstimatedTick(now).get(this.localCharacterId)
+    return state ? { position: state.getPosition(), moving: state.getMoveTarget() !== undefined } : undefined
   }
 
   getLocalAttackTarget(now = performance.now()): number | undefined {

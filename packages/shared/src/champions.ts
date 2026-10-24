@@ -40,7 +40,6 @@ import {
   spawnEntity,
   stacks,
   subject,
-  subjectWithin,
   when,
   type Effect,
   type EffectSource,
@@ -227,10 +226,6 @@ export class Champion {
   }
 }
 
-// Soldier's passive: a target this close (centre to centre) is hit with a melee strike that does more.
-const SOLDIER_MELEE_RANGE = 60
-const SOLDIER_MELEE_BONUS = 0.6
-
 // Grenadier's passive, read when an auto lands: how many autos the target has taken so far.
 const sightedOnTarget = stacks(SIGHTED_KEY, subject())
 
@@ -251,9 +246,9 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     moveSpeed: 140,
     radius: 20,
     attackDamage: 40,
-    attackSpeed: 1.0,
-    attackRange: 210,
-    attackWindupTicks: 18,
+    attackSpeed: 1.3,
+    attackRange: 190,
+    attackWindupTicks: 12,
     attackProjectile: { speed: 550, radius: 6, color: '#b07cf2' },
     abilities: ['feast', 'miasma', 'hex'],
     onAttackHit: [
@@ -269,7 +264,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     maxHp: 700,
     moveSpeed: 150,
     radius: 19,
-    attackDamage: 65,
+    attackDamage: 70,
     attackSpeed: 1.3,
     attackRange: 240,
     attackWindupTicks: 14,
@@ -320,9 +315,8 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
   new Champion({
     id: 'soldier',
     name: 'Soldier',
-    description: 'Shoots from range, but is deadliest up close. Trades health for speed and brings a medic.',
-    passive: `Against a target within ${SOLDIER_MELEE_RANGE} of you, your attack becomes a melee strike that deals ${SOLDIER_MELEE_BONUS * 100}% more damage.`,
-    maxHp: 900,
+    description: 'Shoots from range. Trades health for speed and brings a medic.',
+    maxHp: 750,
     moveSpeed: 150,
     radius: 21,
     attackDamage: 50,
@@ -331,26 +325,19 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     attackWindupTicks: 12,
     attackProjectile: { speed: 800, radius: 5, color: '#ffb347' },
     abilities: ['stim', 'bolt', 'medic'],
-    onAttackHit: [
-      when<SimContext>(
-        subjectWithin(SOLDIER_MELEE_RANGE),
-        [damage(linear(attackDamage(), SOLDIER_MELEE_BONUS, attackDamage()))],
-        [damage(attackDamage())],
-      ),
-    ],
   }),
   new Champion({
     id: 'grenadier',
     name: 'Grenadier',
     description: 'A ranged bomber that bounces off its own grenades, burns the ground, and stuns or blinds with flashbangs.',
     passive: `After ${SIGHTED_AUTOS} auto attacks on the same enemy within ${SIGHTED_WINDOW_TICKS / GAME_TPS} seconds, gain ${SIGHTED_HASTE * 100}% move speed that fades away over ${SIGHTED_HASTE_TICKS / GAME_TPS} seconds.`,
-    maxHp: 750,
+    maxHp: 800,
     moveSpeed: 145,
     radius: 20,
     attackDamage: 55,
     attackSpeed: 1.1,
-    attackRange: 230,
-    attackWindupTicks: 16,
+    attackRange: 220,
+    attackWindupTicks: 15,
     attackProjectile: { speed: 650, radius: 6, color: '#d4b13a' },
     abilities: ['grenade', 'molotov', 'flashbang'],
     // Each auto marks its target; the third pops the marks for the speed instead of adding one.
@@ -372,7 +359,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A melee trickster that throws a stick, calls it back through enemies, and warps to it.',
     passive: `After ${TRICK_HITS - 1} ability hits on the same enemy within ${TRICK_WINDOW_TICKS / GAME_TPS} seconds of each other, the next one deals ${TRICK_BONUS_DAMAGE} bonus damage and gives you ${TRICK_HASTE * 100}% move speed for ${TRICK_HASTE_TICKS / GAME_TPS} seconds. Your stick, going out and coming back, and the auto that Hush readies are ability hits; your plain autos are not.`,
     maxHp: 900,
-    moveSpeed: 155,
+    moveSpeed: 150,
     radius: 21,
     attackDamage: 80,
     attackSpeed: 1.1,
@@ -387,7 +374,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A melee skirmisher that dashes through enemies, leaves shadows to dash back to, and dodges autos.',
     passive: `Dashing through an enemy with Shadow Step gives you a shadow stack, up to ${SHADOW_MAX_STACKS} for ${SHADOW_STACK_TICKS / GAME_TPS} seconds. Each auto attack spends one for ${SHADOW_AUTO_BONUS_DAMAGE} bonus damage, and so does Kunai, which then roots.`,
     maxHp: 800,
-    moveSpeed: 160,
+    moveSpeed: 155,
     radius: 20,
     attackDamage: 70,
     attackSpeed: 1.2,

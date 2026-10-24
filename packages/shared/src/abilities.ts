@@ -253,7 +253,7 @@ const medicBot: EntityDef = {
     (status) => status.id === `${src.ownerId}:shield:medic` && status.amount > 0,
   ),
   pulseEveryTicks: 30,
-  onPulse: [heal(12, self())],
+  onPulse: [heal(8, self())],
 }
 
 // Archer's Snare: a lob that flies to the aimed point, then leaves this trap where it lands. It
@@ -322,14 +322,14 @@ const grenadeBurst: EntityDef = {
 }
 const grenade = {
   id: 'grenade-shot',
-  speed: 550,
+  speed: 750,
   radius: 8,
   landAtAim: true,
   color: '#9fb85a',
   onExpire: [
-    damage(70, enemiesInRadius(GRENADE_RADIUS)),
-    knockback(90, 300, enemiesInRadius(GRENADE_RADIUS)),
-    knockback(70, 300, selfInRadius(GRENADE_RADIUS)),
+    damage(50, enemiesInRadius(GRENADE_RADIUS)),
+    knockback(150, 400, enemiesInRadius(GRENADE_RADIUS)),
+    knockback(110, 400, selfInRadius(GRENADE_RADIUS)),
     when<SimContext>(
       (sim, src) => enemiesInRadius(GRENADE_RADIUS)(sim, src).length > 0,
       [refundCooldown('grenade', GRENADE_REFUND)],
@@ -531,8 +531,8 @@ const curseStacksOnHit = stacks(CURSE_KEY, subject())
 // Cursebearer's Hex: a line shot that slows and adds two stacks, or pops a full stack.
 const hexShot = {
   id: 'hex',
-  speed: 700,
-  radius: 10,
+  speed: 900,
+  radius: 12,
   lifetimeTicks: seconds(0.75),
   onHit: [
     slow(0.3, seconds(1)),
@@ -546,6 +546,7 @@ const hexShot = {
       ],
       [mark(CURSE_KEY, CURSE_DURATION_TICKS, subject(), { count: 2, cap: CURSE_MAX_STACKS })],
     ),
+    refundCooldown('hex',.5,self()),
   ],
 } satisfies EntityDef
 
@@ -621,9 +622,9 @@ const abilityList: AbilityDef[] = [
     description: 'A line shot that slows and adds two curse stacks. Against a target already at five stacks it pops them for damage and haste.',
     targeting: 'direction',
     range: 520,
-    windUpTicks: 12,
+    windUpTicks: 8,
     backswingTicks: 4,
-    cooldownTicks: seconds(8),
+    cooldownTicks: seconds(5),
     indicator: { width: hexShot.radius * 2 },
     apply: [spawnEntity(hexShot)],
   },
@@ -701,7 +702,7 @@ const abilityList: AbilityDef[] = [
     id: 'spout',
     description: 'Marks a small circle at the target point. After a brief warning it erupts, damaging and slowing enemies still standing in it.',
     targeting: 'point',
-    range: 290,
+    range: 350,
     windUpTicks: 4,
     backswingTicks: 4,
     cooldownTicks: seconds(9),
@@ -718,9 +719,9 @@ const abilityList: AbilityDef[] = [
     cooldownTicks: seconds(18),
     apply: [
       loseHealth(100),
-      attackSpeedBonus(0.5, seconds(5)),
-      haste(0.3, seconds(5)),
-      resist(0.3, seconds(5)),
+      attackSpeedBonus(0.5, seconds(4)),
+      haste(0.3, seconds(4)),
+      resist(0.3, seconds(4)),
     ],
   },
   {
@@ -743,7 +744,7 @@ const abilityList: AbilityDef[] = [
     backswingTicks: 3,
     cooldownTicks: seconds(24),
     apply: [
-      shield(200, Infinity, self(), { shared: 'medic' }),
+      shield(150, Infinity, self(), { shared: 'medic' }),
       spawnEntity(medicBot, { onePerOwner: true }),
     ],
   },
@@ -805,10 +806,10 @@ const abilityList: AbilityDef[] = [
     id: 'grenade',
     description: 'Lobs a grenade to the target point. It takes longer the farther it goes, then explodes, hurting enemies and bouncing them away from the middle of the blast. It bounces you away too if you are in it, and catching an enemy hands back half of this cooldown.',
     targeting: 'point',
-    range: 300,
-    windUpTicks: 4,
-    backswingTicks: 4,
-    cooldownTicks: seconds(9),
+    range: 350,
+    windUpTicks: 2,
+    backswingTicks: 1,
+    cooldownTicks: seconds(6),
     indicator: { radius: GRENADE_RADIUS },
     apply: [spawnEntity(grenade)],
   },
@@ -816,15 +817,15 @@ const abilityList: AbilityDef[] = [
     id: 'molotov',
     description: 'Throws a molotov to the target point. It coats the ground in fire for a few seconds, slowing enemies in it and setting them alight.',
     targeting: 'point',
-    range: 320,
+    range: 350,
     windUpTicks: 4,
     backswingTicks: 4,
-    cooldownTicks: seconds(12),
+    cooldownTicks: seconds(10),
     indicator: { radius: molotovFire.radius },
     apply: [
       spawnEntity({
         id: 'molotov-shot',
-        speed: 500,
+        speed: 600,
         radius: 7,
         landAtAim: true,
         color: '#ff7a2f',
@@ -836,10 +837,10 @@ const abilityList: AbilityDef[] = [
     id: 'flashbang',
     description: 'Lobs a flashbang to the target point. It takes longer the farther it goes, then goes off: an enemy right under it is stunned, and one caught by the edge of the flash is briefly blinded, so their auto attacks miss.',
     targeting: 'point',
-    range: 300,
+    range: 320,
     windUpTicks: 4,
     backswingTicks: 3,
-    cooldownTicks: seconds(14),
+    cooldownTicks: seconds(12),
     // Two circles: the whole flash, and the core inside it that stuns.
     indicator: { radius: FLASH_RADIUS, innerRadius: FLASH_CORE_RADIUS },
     apply: [spawnEntity(flashbang)],

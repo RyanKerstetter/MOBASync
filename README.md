@@ -72,9 +72,14 @@ preceding cached tick. If a late order or health result changes an earlier
 tick, cached snapshots from that tick onward are invalidated and recomputed.
 Movement stays at its destination implicitly once its calculated travel time
 completes; the simulator does not append a hold order.
-Right-click the map to issue a movement order. Click an enemy to attack, or
-press Space to attack the closest enemy, near or far (one out of reach is walked up to, as when it is
-clicked). Both are timestamped intents
+Right-click the map to issue a movement order, or right-click an enemy to attack it (the left button does nothing).
+Holding the right button keeps giving the command, so the champion follows the mouse (or keeps on the enemy under it),
+but only every 150 ms (`HOLD_COMMAND_INTERVAL_MS` in `apps/client/src/hold-command.ts`) and only when it would change
+something: a walk to within a few units of the last one given is not sent again, and neither is an attack on the enemy
+the champion is already after. A walk that was cut short, such as by a cast with a windup, is given again. Opening the
+menu, aiming an ability, dying, or letting go of the button (anywhere) stops it.
+Space attacks the enemy closest to the mouse cursor, near or far, and not the one closest to your champion (one out of
+reach is walked up to, as when it is right-clicked). All are timestamped intents
 ordered deterministically by `(tick, sequence, player, id)`. The client inserts
 its own order into the simulator immediately. The server acknowledges log
 insertion separately from gameplay validity. Every peer uses the shared
@@ -301,7 +306,7 @@ refund for a teammate, and its flashbang does not stun or blind one. The effects
 speed-up in the fire Slash leaves. Teammates are still solid, and push each other apart like anyone.
 
 The client draws each body in its team's colour (`getTeam`), with a thick white outline on the
-champion you control, since a green fill no longer tells you which it is. Clicking a teammate, the
+champion you control, since a green fill no longer tells you which it is. Right-clicking a teammate (which just walks there), the
 Space key, and an ability aimed at a unit never pick a teammate, and the lobby shows
 each player's team by colour and name. Champion select lists who is picking what grouped by team, a heading in
 the team's colour over each group.
@@ -448,8 +453,8 @@ deathmatch, so killing a monster, or being killed by one, scores for no one: the
 worth.
 
 **On the page.** Monsters are named and drawn like champions (a circle in the monsters' colour, until they have sprites,
-which go in `champion-sprites.ts` under the monster's id), can be clicked and attacked, and are what Space attacks if
-they are the nearest enemy. The debug view (P) draws each monster's aggro range (yellow) and deaggro range (orange) round
+which go in `champion-sprites.ts` under the monster's id), can be right-clicked and attacked, and are what Space attacks if
+they are the enemy nearest the cursor. The debug view (P) draws each monster's aggro range (yellow) and deaggro range (orange) round
 it and its leash range (cyan) round its home, which is marked.
 
 **To add one:** write its abilities in `abilities.ts` if it has new ones, add a `Monster` to the list in `monsters.ts`, and
@@ -661,7 +666,7 @@ Q/W/E/R cast at the cursor in one of two cast modes, as in League of Legends, se
 `castMode` option of `startGame` (`DEFAULT_CAST_MODE` in `cast-control.ts`; there is no menu
 for it yet). Quick cast with indicator, the default, shows the ability's indicator while its key
 is held and casts where the cursor is when the key is let go; Escape, the window losing focus, or
-giving a move or attack command (right-click, clicking an enemy, or Space with an enemy anywhere)
+giving a move or attack command (right-click, on the ground or on an enemy, or Space with an enemy anywhere)
 drops the aim without casting. Quick cast casts the moment the key goes down. In both, an ability
 with nothing to aim (targeting `none`) casts on the press. Pressing another ability key while
 aiming moves the aim to it. A skillshot's indicator is just its band. An ability aimed at a point
@@ -785,10 +790,7 @@ elapsed share of its lifetime, plus the tick its expiry effects fire on). Its `o
 are the eruption itself: damage and slow on whoever is inside on that tick, then a short flash
 entity. Everything about the hit happens at expiry, which is why dodging works.
 
-**Soldier** is a ranged fighter that is deadliest up close. Its passive is its `onAttackHit`:
-`when(subjectWithin(120), [melee strike], [plain attack])`, where the melee strike is
-`damage(linear(attackDamage(), 0.6, attackDamage()))`, so a target within 120 px (centre to
-centre, checked when the hit lands) takes 60% more. Q, Stim, costs 150 health and for five seconds
+**Soldier** is a ranged fighter with no passive: its auto is a plain attack. Q, Stim, costs 150 health and for five seconds
 adds 50% attack speed, 30% move speed, and 30% damage resistance. W, Bolt, is a piercing shot
 that slows and deals 80 plus a fifth of the target's missing health (`missingHealth()`, which
 reads `SimReader.healthOf` as the tick began). E, Medic, gives a 250 shield and summons a bot
@@ -1188,6 +1190,38 @@ or a process manager such as `npx pm2 start "npm run dev" --name moba`.
 `npm run dev` is the development setup: it restarts the server whenever a file
 changes, which drops the in-memory lobbies. For a steadier setup run `npm start`.
 It builds the client once and serves it with the same ports and the same proxy.
+
+### The server log
+
+The server writes one line to its output (stdout, stderr for errors) for each thing that happens to a
+lobby or its game, to its output (stdout, and stderr for warnings and errors), which a process manager
+such as `pm2` keeps for you (`pm2 logs moba`). The time is UTC, and what follows is a message and
+`name=value` fields:
+
+```
+2026-10-24T09:41:22.752Z INFO  lobby created lobby=6LWDQ6 leader=Alice map=ffa_arena mode=deathmatch lobbies=1
+2026-10-24T09:41:22.757Z INFO  player joined lobby=6LWDQ6 name="Bob Smith" players=2/8
+2026-10-24T09:41:22.765Z WARN  join rejected lobby=6LWDQ6 name=Dave reason="This lobby has already started a game."
+2026-10-24T09:41:33.582Z INFO  game started lobby=UATV6Q mode=deathmatch map=ffa_arena players="Alice (Red), Bob (Blue)"
+2026-10-24T09:42:01.220Z INFO  game finished lobby=L2VMZT mode=deathmatch map=ffa_arena reason=limit winner=Blue scores="Blue 25, Red 17" players=2 seconds=412
+```
+
+What is logged: a lobby made and closed, players joining, rejoining, leaving, being kicked or timing out,
+a join turned away (and why), the leader changing, the map, mode and rules being changed, a game being
+opened for champion select, cancelled, started, finished (how, who won, the scores, how long it took) and
+closed, a player leaving a game, a game that was refused its start (and why), a player's game connection
+being made or lost, and the server's own errors. Players are named by their username, never by their session
+ID, which is what their requests are trusted by.
+
+What is left out, so the log stays readable on a busy server: lobby polling, chat, team picks, username
+changes, a setting set to what it already was, and everything inside a game (orders, pings, snapshots). A
+player's username (or anything else a player typed) is quoted and escaped when it has more than plain
+characters in it, so a name cannot end a line or pose as another field. Because anyone can ask to join any
+lobby, a refused join (and a refused game connection) is logged once every 10 seconds for each kind, with
+`leftOut=N` saying how many were not. The bandwidth report above is separate, and is the one thing that
+is logged on a timer.
+
+`apps/server/src/log.ts` is the logger, and `tests/server-log.test.ts` its tests.
 
 ### HTTPS and a domain
 

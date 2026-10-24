@@ -185,20 +185,20 @@ test('the attack range ring includes the focus range bonus, and Space finds the 
   const attackRange = () => gameState.getCharacters(0).find((character) => character.id === 1)?.attackRange
   gameState.simulator.at(3)
   assert.equal(attackRange(), archer.attackRange)
-  assert.equal(gameState.getClosestEnemy(0)?.id, 2, 'the enemy is just out of range, and is still the one Space attacks')
+  assert.equal(gameState.getClosestEnemy({ x: 100, y: 100 }, 0)?.id, 2, 'the enemy is just out of range, and is still the one Space attacks')
 
   gameState.simulator.addOrder(1, {
     id: 'player-1:1', seq: 1, tick: 4, type: 'cast', abilityId: 't-focus', target: { mode: 'none' }, origin: { x: 100, y: 100 },
   })
   gameState.simulator.at(6)
   assert.equal(attackRange(), archer.attackRange + 120)
-  assert.equal(gameState.getClosestEnemy(0)?.id, 2)
+  assert.equal(gameState.getClosestEnemy({ x: 100, y: 100 }, 0)?.id, 2)
 })
 
 test('attacking the closest enemy with Space, out of range, walks up to it and keeps it as the target', () => {
   const gameState = createArcherClient()
   const archer = getChampion('t-archer')
-  const target = gameState.getClosestEnemy(0)
+  const target = gameState.getClosestEnemy({ x: 100, y: 100 }, 0)
   assert.equal(target?.id, 2)
   assert.ok(
     (target?.position.x ?? 0) - 100 > archer.attackRange,
@@ -450,7 +450,7 @@ test('clicking, auto-targeting and aiming skip teammates, and every character re
   assert.deepEqual(gameState.getCharacters(0).map((character) => [character.id, character.team]), [[1, 1], [2, 1], [3, 2]])
   assert.equal(gameState.getEnemyNear({ x: 150, y: 100 }, 0), undefined, 'a click on a teammate is not a target')
   assert.equal(gameState.getEnemyNear({ x: 200, y: 100 }, 0)?.id, 3, 'a click on an enemy is')
-  assert.equal(gameState.getClosestEnemy(0)?.id, 3, 'and the nearest enemy is the enemy, not the nearer teammate')
+  assert.equal(gameState.getClosestEnemy({ x: 150, y: 100 }, 0)?.id, 3, 'and the enemy nearest the cursor is the enemy, though the teammate is under it')
 
   // A unit ability (the second key, a lash) aimed at the teammate has nothing to target, and aimed at
   // the enemy it is cast.
@@ -577,4 +577,42 @@ test('a stunned champion is told so', () => {
   })
 
   assert.equal(gameState.getCastBlocker(1, atTick(20)), 'You cannot cast while stunned.')
+})
+
+test('Space attacks the enemy nearest the mouse, not the one nearest the champion, however far either is', () => {
+  const gameState = new ClientGameState()
+  gameState.simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, brawler, 1)
+  gameState.simulator.addPlayer(2, 'player-2', 'Player 2', { x: 300, y: 100 }, brawler, 2)
+  gameState.simulator.addPlayer(3, 'player-3', 'Player 3', { x: 1500, y: 100 }, brawler, 2)
+  gameState.simulator.addPlayer(4, 'player-4', 'Player 4', { x: 1500, y: 160 }, brawler, 1)
+  gameState.setLocalCharacterId(1)
+  gameState.resetServerTickAnchor(0, 0)
+  gameState.simulator.at(3)
+
+  assert.equal(gameState.getClosestEnemy({ x: 100, y: 100 }, 0)?.id, 2, 'with the mouse on the champion it is the nearest to the champion')
+  assert.equal(gameState.getClosestEnemy({ x: 1480, y: 130 }, 0)?.id, 3, 'with the mouse over the far enemy it is that one, though another is nearer the champion')
+  assert.equal(gameState.getClosestEnemy({ x: 5000, y: 5000 }, 0)?.id, 3, 'there is no range: the nearest to a point far from everyone')
+  assert.equal(gameState.getClosestEnemy({ x: 950, y: 100 }, 0)?.id, 3, 'and between them it is the nearer of the two to the mouse')
+  assert.equal(gameState.getClosestEnemy({ x: 700, y: 100 }, 0)?.id, 2)
+  assert.equal(gameState.getClosestEnemy({ x: 1500, y: 160 }, 0)?.id, 3, 'a teammate under the mouse is not a target, so it is the enemy nearest it')
+})
+
+test('Space skips the dead and has no one to attack when there is no enemy, and a tie goes to the first', () => {
+  const gameState = new ClientGameState()
+  gameState.simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, brawler, 1)
+  gameState.simulator.addPlayer(2, 'player-2', 'Player 2', { x: 500, y: 100 }, brawler, 2)
+  gameState.simulator.addPlayer(3, 'player-3', 'Player 3', { x: 500, y: 300 }, brawler, 2)
+  gameState.setLocalCharacterId(1)
+  gameState.resetServerTickAnchor(0, 0)
+  gameState.simulator.at(3)
+  assert.equal(gameState.getClosestEnemy({ x: 500, y: 200 }, 0)?.id, 2, 'level between two: the first')
+  assert.equal(gameState.getClosestEnemy({ x: 500, y: 210 }, 0)?.id, 3, 'but not when one is nearer')
+
+  const alone = new ClientGameState()
+  alone.simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, brawler, 1)
+  alone.setLocalCharacterId(1)
+  alone.resetServerTickAnchor(0, 0)
+  alone.simulator.at(3)
+  assert.equal(alone.getClosestEnemy({ x: 100, y: 100 }, 0), undefined)
+  assert.equal(new ClientGameState().getClosestEnemy({ x: 0, y: 0 }, 0), undefined, 'and nothing without a champion')
 })
