@@ -586,6 +586,13 @@ fps: 10, loop: false }`. To draw another champion, add a set under its ID.
 for it in `chooseAnimation`. `tests/animation.test.ts` checks each set against its sheets (every
 clip fills its sheet exactly) and the roster, so a wrong frame count fails the tests.
 
+**Ability icons.** An ability's icon is `res/icons/<ability id>.png` (16 x 16, so `hex.png` is Hex's), drawn on its
+slot in the HUD and beside its name on the champion select screen. The ids are the ones in `abilities.ts`, so a key
+that changes ability (Q turning into `recall` or `shadowreturn`) changes its icon with it, and giving an ability an
+icon is dropping a file of that name in the folder. `ui/ability-icon-urls.ts` finds the files (Vite's
+`import.meta.glob`, so a new file is picked up by the dev server), and `ui/ability-icon.ts` makes the element. An
+ability with no file, or whose file will not load, shows a dim "N/A" tile with the tooltip "Icon not available" in its place.
+
 Stacks are drawn as pips under the body, by the pure function `layoutStackPips` (`render/stack-pips.ts`).
 There are two kinds, told apart by shape, colour and row, so two with similar colours can never
 share a spot. A champion's own stacks (Swordsman's sword, Capricorn's empowered, Ninja's shadow) are
@@ -918,11 +925,11 @@ to by then, and the first he reaches also gives him a shadow stack (one, however
 hands back 75% of Q's cooldown, and leaves a shadow where he was standing when he cast it. While a
 shadow is out the key becomes Shadow Return (the ability's `recast`, `requires` an entity `shadow`
 out), which dashes back to the shadow from any distance, and does the same for the enemies it
-passes, leaving a new shadow where it was cast from. A shadow lasts 8 seconds (`lifetimeTicks`, as long
-as Shadow Step's whole cooldown) and then fades, and the key is Shadow Step again from then. Q was
-ready long before, since the first enemy hands three quarters of its cooldown back, so it is only the
-key that waits. A dash back through an enemy hands Q's cooldown back too and leaves a new shadow with
-8 seconds of its own, a chain of dashes going back and forth through one enemy until a third finds
+passes, leaving a new shadow where it was cast from. A shadow lasts 4 seconds (`SHADOW_LIFETIME_TICKS` in
+`abilities.ts`, the one number to change to retune it, for Shadow Step and Shadow Return alike) and then
+fades, and the key is Shadow Step again from then. Q was ready before, since the first enemy hands
+three quarters of its 8 second cooldown back, so it is only the key that waits. A dash back through an
+enemy hands Q's cooldown back too and leaves a new shadow with 4 seconds of its own, a chain of dashes going back and forth through one enemy until a third finds
 the stacks already full. A shadow is also lost by a dash back to it that finishes without passing
 anyone, or when the Ninja dies. Shadow Return has a 1.75 second cooldown of its own, started when the
 dash that left the shadow reached its enemy, so the dash back is not ready the moment the dash

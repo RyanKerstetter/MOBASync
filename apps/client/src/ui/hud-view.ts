@@ -1,3 +1,5 @@
+import { createAbilityIcon } from './ability-icon.ts'
+import { abilityIconUrl } from './ability-icon-urls.ts'
 import { healthReadout, respawnText, type AbilitySlotView } from './hud.ts'
 
 export type HudInput = {
@@ -9,10 +11,21 @@ export type HudInput = {
   abilities: readonly AbilitySlotView[]
 }
 
-type HudSlot = { root: HTMLElement; fill: HTMLElement; key: HTMLElement; name: HTMLElement; time: HTMLElement }
+type HudSlot = {
+  root: HTMLElement
+  // The picture of the ability on the key, swapped when the key's ability changes (a recast). It is
+  // drawn twice: grey and dim underneath, and in full colour over it, cropped to how far the
+  // cooldown has run, so the colour rises from the bottom as the ability comes back.
+  icons: HTMLElement
+  iconAbilityId?: string
+  key: HTMLElement
+  name: HTMLElement
+  time: HTMLElement
+}
 
-// The bottom of the screen: the exact health with its shield, and a slot for each ability that
-// fills up as its cooldown runs. Plain elements over the canvas, hidden until the first update.
+// The bottom of the screen: the exact health with its shield, and a slot for each ability whose icon
+// is grey when it is cast and fills up with colour from the bottom as the cooldown runs. Plain
+// elements over the canvas, hidden until the first update.
 export function createHudView(container: HTMLElement) {
   const root = document.createElement('div')
   root.className = 'game-hud'
@@ -48,17 +61,17 @@ export function createHudView(container: HTMLElement) {
       while (slots.length < input.abilities.length) {
         const slot: HudSlot = {
           root: document.createElement('div'),
-          fill: document.createElement('div'),
+          icons: document.createElement('span'),
           key: document.createElement('span'),
           name: document.createElement('span'),
           time: document.createElement('span'),
         }
         slot.root.className = 'hud-slot'
-        slot.fill.className = 'hud-slot-fill'
         slot.key.className = 'hud-slot-key'
         slot.name.className = 'hud-slot-name'
         slot.time.className = 'hud-slot-time'
-        slot.root.append(slot.fill, slot.key, slot.name, slot.time)
+        slot.icons.className = 'hud-slot-icons'
+        slot.root.append(slot.icons, slot.key, slot.name, slot.time)
         abilities.append(slot.root)
         slots.push(slot)
       }
@@ -66,8 +79,17 @@ export function createHudView(container: HTMLElement) {
         const view = input.abilities[index]
         slot.root.hidden = view === undefined
         if (!view) return
+        if (slot.iconAbilityId !== view.abilityId) {
+          const grey = createAbilityIcon(view.abilityId, abilityIconUrl)
+          grey.classList.add('is-grey')
+          const colour = createAbilityIcon(view.abilityId, abilityIconUrl)
+          colour.classList.add('is-colour')
+          slot.icons.replaceChildren(grey, colour)
+          slot.iconAbilityId = view.abilityId
+        }
         slot.root.classList.toggle('is-ready', view.ready)
-        slot.fill.style.height = `${view.filled * 100}%`
+        // 0 just cast to 1 ready; the stylesheet turns it into how much of the icon is in colour.
+        slot.root.style.setProperty('--filled', String(view.filled))
         slot.key.textContent = view.key
         slot.name.textContent = view.abilityId
         slot.time.textContent = view.secondsLeft

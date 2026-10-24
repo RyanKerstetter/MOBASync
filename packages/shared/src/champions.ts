@@ -372,7 +372,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     id: 'ninja',
     name: 'Ninja',
     description: 'A melee skirmisher that dashes through enemies, leaves shadows to dash back to, and dodges autos.',
-    passive: `Dashing through an enemy with Shadow Step gives you a shadow stack, up to ${SHADOW_MAX_STACKS} for ${SHADOW_STACK_TICKS / GAME_TPS} seconds. Each auto attack spends one for ${SHADOW_AUTO_BONUS_DAMAGE} bonus damage, and so does Kunai, which then roots.`,
+    passive: `Dashing through an enemy with Shadow Step gives you a shadow stack, up to ${SHADOW_MAX_STACKS} for ${SHADOW_STACK_TICKS / GAME_TPS} seconds. Each auto attack spends one for ${SHADOW_AUTO_BONUS_DAMAGE} bonus damage, and so does Shuriken, which then roots.`,
     maxHp: 800,
     moveSpeed: 155,
     radius: 20,
@@ -381,7 +381,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     attackRange: 85,
     attackWindupTicks: 10,
     // Q dashes, then dashes back to the shadow it left; W is the kunai; E dodges.
-    abilities: ['shadowstep', 'kunai', 'dodge'],
+    abilities: ['shadowstep', 'shuriken', 'dodge'],
     // The auto reads the stacks before it spends one.
     onAttackHit: [
       damage(linear(attackDamage(), SHADOW_AUTO_BONUS_DAMAGE, hasShadowStack)),

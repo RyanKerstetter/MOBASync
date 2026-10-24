@@ -449,10 +449,13 @@ const warpFlashIn: EntityDef = { ...warpFlashOut, id: 'warp-in' }
 
 // Ninja's shadow stacks sit on the Ninja, and each is an enhanced auto ready. Only Shadow Step (and
 // Shadow Return) adds one, when its dash passes through an enemy, up to two; they last six seconds,
-// refreshed together. An auto or a Kunai spends one.
+// refreshed together. An auto or a Shuriken spends one.
 export const SHADOW_KEY = 'shadow'
 export const SHADOW_MAX_STACKS = 2
 export const SHADOW_STACK_TICKS = seconds(6)
+// How long a shadow stays out if the Ninja does not dash back to it, for Shadow Step and Shadow Return
+// alike (both leave the same shadow). Change this one number to retune it.
+export const SHADOW_LIFETIME_TICKS = seconds(4)
 export const SHADOW_AUTO_BONUS_DAMAGE = 60
 const shadowStacks = stacks(SHADOW_KEY, self())
 const spendShadowStack = popMarkers(SHADOW_KEY, self(), { count: 1 })
@@ -461,12 +464,12 @@ const spendShadowStack = popMarkers(SHADOW_KEY, self(), { count: 1 })
 // one it passes also gives the Ninja a shadow stack (an enhanced auto), hands back most of the
 // cooldown, and leaves a shadow behind at the spot it was cast from. With a shadow out, the key dashes
 // back to it instead, from any distance, and does the same.
-// A shadow lasts 8 seconds, as long as Shadow Step's whole cooldown. The first enemy hands most of that
-// cooldown back, so Shadow Step is ready long before the shadow goes, and the key (Shadow Return while
-// the shadow is out) turns back into it the moment the shadow fades. One that is dashed back to
-// without passing through an enemy ends when the dash finishes, and Shadow Step starts its whole
-// cooldown over, so the time that ran while the shadow was out is no help to a miss. It also goes when
-// its owner dies.
+// A shadow lasts SHADOW_LIFETIME_TICKS (4 seconds), well short of Shadow Step's 8 second cooldown. The
+// first enemy hands most of that cooldown back, so Shadow Step is ready before the shadow goes, and the
+// key (Shadow Return while the shadow is out) turns back into it the moment the shadow fades. One that
+// is dashed back to without passing through an enemy ends when the dash finishes, and Shadow Step
+// starts its whole cooldown over, so the time that ran while the shadow was out is no help to a miss.
+// It also goes when its owner dies.
 const SHADOW_STEP_COOLDOWN_TICKS = seconds(8)
 const SHADOW_STEP_RANGE = 300
 const SHADOW_STEP_SPEED = 1200
@@ -478,7 +481,7 @@ const shadow = {
   radius: 14,
   visual: 'field',
   color: '#7a5cff',
-  lifetimeTicks: SHADOW_STEP_COOLDOWN_TICKS,
+  lifetimeTicks: SHADOW_LIFETIME_TICKS,
   stayWhile: (sim, src) => sim.isAlive(src.ownerId),
 } satisfies EntityDef
 
@@ -506,8 +509,8 @@ const shadowReturnDash: DashDef = {
 
 // Ninja's Kunai: a line shot. It hurts and slows what it passes through, or, if the Ninja has a
 // shadow stack, which it spends, it hurts more and roots instead.
-const kunai = {
-  id: 'kunai',
+const shuriken = {
+  id: 'shuriken',
   speed: 750,
   radius: 10,
   lifetimeTicks: seconds(0.2),
@@ -515,8 +518,8 @@ const kunai = {
   color: '#c9c9ff',
   onHit: [damage(60), slow(0.4, seconds(1.5))],
 } satisfies EntityDef
-const kunaiEnhanced = {
-  id: 'kunai-enhanced',
+const shurikenEnhanced = {
+  id: 'shuriken-enhanced',
   speed: 640,
   radius: 10,
   lifetimeTicks: seconds(0.2),
@@ -632,7 +635,7 @@ const abilityList: AbilityDef[] = [
     id: 'leap',
     description: 'Dashes to the target point. While dashing you cannot attack or cast.',
     targeting: 'point',
-    range: 120,
+    range: 150,
     windUpTicks: 0,
     backswingTicks: 0,
     cooldownTicks: seconds(8),
@@ -913,7 +916,7 @@ const abilityList: AbilityDef[] = [
   },
   {
     id: 'shadowstep',
-    description: 'Dashes to the target point. Each enemy you pass through is hurt and slowed as you pass, and the first also gives you a shadow stack (up to two) for an enhanced auto, gets most of this cooldown back and leaves a shadow where you cast it, which fades after 8 seconds. With a shadow out, this key dashes back to it instead.',
+    description: `Dashes to the target point. Each enemy you pass through is hurt and slowed as you pass, and the first also gives you a shadow stack (up to two) for an enhanced auto, gets most of this cooldown back and leaves a shadow where you cast it, which fades after ${SHADOW_LIFETIME_TICKS / GAME_TPS} seconds. With a shadow out, this key dashes back to it instead.`,
     targeting: 'point',
     range: SHADOW_STEP_RANGE,
     windUpTicks: 0,
@@ -928,7 +931,7 @@ const abilityList: AbilityDef[] = [
   },
   {
     id: 'shadowreturn',
-    description: 'Dashes back to your shadow from any distance. Passing through an enemy does the same as Shadow Step and leaves a new shadow where you cast this; passing through none loses the shadow and puts Shadow Step on its whole cooldown. The shadow fades after 8 seconds, and then the key is Shadow Step again.',
+    description: `Dashes back to your shadow from any distance. Passing through an enemy does the same as Shadow Step and leaves a new shadow where you cast this; passing through none loses the shadow and puts Shadow Step on its whole cooldown. The shadow fades after ${SHADOW_LIFETIME_TICKS / GAME_TPS} seconds, and then the key is Shadow Step again.`,
     targeting: 'none',
     range: 0,
     windUpTicks: 0,
@@ -942,19 +945,19 @@ const abilityList: AbilityDef[] = [
     ],
   },
   {
-    id: 'kunai',
-    description: 'Throws a kunai in a line. It hurts and slows every enemy it passes through. With a shadow stack it spends one to hurt more and root instead.',
+    id: 'shuriken',
+    description: 'Throws a shuriken in a line. It hurts and slows every enemy it passes through. With a shadow stack it spends one to hurt more and root instead.',
     targeting: 'direction',
     range: 150,
     windUpTicks: 4,
     backswingTicks: 3,
     cooldownTicks: seconds(7),
-    indicator: { width: kunai.radius * 2 },
+    indicator: { width: shuriken.radius * 2 },
     apply: [
       when<SimContext>(
         (sim, src) => shadowStacks(sim, src) > 0,
-        [spendShadowStack, spawnEntity(kunaiEnhanced)],
-        [spawnEntity(kunai)],
+        [spendShadowStack, spawnEntity(shurikenEnhanced)],
+        [spawnEntity(shuriken)],
       ),
     ],
   },

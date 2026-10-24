@@ -5,6 +5,7 @@ import {
   getTeam,
   type Champion,
 } from '../../../packages/shared/src/index.ts'
+import { createAbilityIcon, type AbilityIconUrl } from './ui/ability-icon.ts'
 
 export type SelectPlayer = { id: string; name: string; team?: number }
 export type SelectionEntry = { playerId: string; championId: string; locked: boolean }
@@ -32,6 +33,8 @@ export function groupPlayersByTeam(players: readonly SelectPlayer[]): TeamGroup[
 
 type ChampionSelectOptions = {
   root: HTMLElement
+  // Where an ability's icon is served from. Passed in because finding the files needs Vite.
+  abilityIconUrl: AbilityIconUrl
   onPick: (championId: string) => void
   onLock: () => void
   onBack: () => void
@@ -69,7 +72,7 @@ function abilityDescription(abilityId: string): string {
   return def.description ? `${def.description} (${summary})` : summary
 }
 
-export function createChampionSelect({ root, onPick, onLock, onBack }: ChampionSelectOptions) {
+export function createChampionSelect({ root, abilityIconUrl, onPick, onLock, onBack }: ChampionSelectOptions) {
   const grid = requiredElement<HTMLUListElement>(root, '#champion-grid')
   const details = requiredElement<HTMLElement>(root, '#champion-details')
   const playerList = requiredElement<HTMLUListElement>(root, '#select-players')
@@ -143,7 +146,11 @@ export function createChampionSelect({ root, onPick, onLock, onBack }: ChampionS
     champion.abilities.forEach((abilityId, slot) => {
       const item = document.createElement('li')
       const name = document.createElement('strong')
-      name.textContent = `${abilityKeys[slot] ?? slot + 1} · ${titleCase(abilityId)}`
+      name.className = 'ability-title'
+      name.append(
+        createAbilityIcon(abilityId, abilityIconUrl),
+        document.createTextNode(`${abilityKeys[slot] ?? slot + 1} · ${titleCase(abilityId)}`),
+      )
       const detail = document.createElement('span')
       detail.textContent = abilityDescription(abilityId)
       item.append(name, detail)

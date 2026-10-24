@@ -5,7 +5,7 @@ export type AbilitySlotView = {
   // The key to press, as printed on the slot.
   key: string
   abilityId: string
-  // How far the cooldown has run, 0 just cast to 1 ready. The slot fills up as it goes.
+  // How far the cooldown has run, 0 just cast to 1 ready. The icon fills up with colour from the bottom as it goes.
   filled: number
   ready: boolean
   // The time left, such as "3.4" or "12", and nothing when it is ready.

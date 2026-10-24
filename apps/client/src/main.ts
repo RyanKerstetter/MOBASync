@@ -1,6 +1,7 @@
 import './style.css'
 import { createChampionSelect } from './champion-select.ts'
 import { startGame } from './game.ts'
+import { abilityIconUrl } from './ui/ability-icon-urls.ts'
 import { lobbySummary } from './ui/results.ts'
 import {
   GAME_MODES,
@@ -474,6 +475,7 @@ async function chooseTeam(team: number): Promise<void> {
 
 const championSelect = createChampionSelect({
   root: selectPanel,
+  abilityIconUrl,
   onPick: (championId) => void sendSelectionRequest('pick', { championId }),
   onLock: () => void sendSelectionRequest('lock', {}),
   onBack: () => void sendSelectionRequest('cancel-start', {}),

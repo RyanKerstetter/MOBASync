@@ -555,7 +555,7 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   pointer-events: none;
 }
 
-/* The bottom of the screen: exact health, and a slot for each ability that fills as it cools down. */
+/* The bottom of the screen: exact health, and a slot for each ability that is grey when cast and fills up with colour as it cools down. */
 .game-hud {
   position: absolute;
   z-index: 2;
@@ -622,7 +622,7 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   gap: 0.55rem;
 }
 
-/* The fill rises from the bottom as the cooldown runs, and the slot lights up when it is ready. */
+/* --filled is how far the cooldown has run, 0 just cast to 1 ready. The slot's border lights up when it is ready. */
 .hud-slot {
   position: relative;
   box-sizing: border-box;
@@ -638,20 +638,8 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   display: none;
 }
 
-.hud-slot-fill {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  background: rgb(86 150 220 / 55%);
-}
-
 .hud-slot.is-ready {
   border-color: #79dfb1;
-}
-
-.hud-slot.is-ready .hud-slot-fill {
-  background: rgb(121 223 177 / 38%);
 }
 
 .hud-slot-key,
@@ -687,6 +675,60 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   text-overflow: ellipsis;
   text-transform: capitalize;
   white-space: nowrap;
+}
+
+/* An ability's picture, which fills the box it is in. The art is 16 px, so it is scaled up with hard
+   edges. An ability with no icon shows a dim "N/A" tile instead. */
+.ability-icon {
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  flex: none;
+  overflow: hidden;
+}
+
+.ability-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+.ability-icon.is-missing {
+  background: #121c2c;
+  color: #8493a8;
+  font-size: 0.65rem;
+  font-weight: 700;
+  border: 1px dashed rgb(190 215 240 / 30%);
+  border-radius: 0.25rem;
+}
+
+/* In a slot the icon is drawn twice, under the key, the name and the time: grey and dimmed, and over
+   that in full colour, cropped from the top down to --filled of its height. So just cast it is all
+   grey, and the colour rises from the bottom as the cooldown runs, until it is all colour. */
+.hud-slot-icons,
+.hud-slot-icons > .ability-icon {
+  position: absolute;
+  inset: 0;
+}
+
+.hud-slot-icons > .is-grey {
+  filter: grayscale(1) brightness(0.55);
+}
+
+.hud-slot-icons > .is-colour {
+  clip-path: inset(calc(100% * (1 - var(--filled, 1))) 0 0 0);
+}
+
+.ability-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.ability-title .ability-icon {
+  width: 1.6rem;
+  height: 1.6rem;
 }
 
 [hidden] {
