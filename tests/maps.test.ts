@@ -38,6 +38,7 @@ test('a map is summed up for the lobby: its size, what it holds, and what it has
     spawns: [[{ x: 1, y: 1 }, { x: 2, y: 2 }, { x: 3, y: 3 }], [{ x: 4, y: 4 }, { x: 5, y: 5 }], [{ x: 6, y: 6 }]],
     hill: { x: 0, y: 0, width: 10, height: 10, ellipse: true },
     flags: [{ x: 1, y: 1 }, { x: 2, y: 2 }],
+    cores: [{ x: 3, y: 3 }, { x: 4, y: 4 }],
     monsters: [{ monster: 'wolf', at: { x: 5, y: 5 } }, { monster: 'wolf', at: { x: 9, y: 9 } }],
   } as unknown as MapLayout
   assert.deepEqual(summarizeMap('pit', layout), {
@@ -49,13 +50,16 @@ test('a map is summed up for the lobby: its size, what it holds, and what it has
     spawns: [3, 2, 1],
     hill: true,
     flags: true,
+    cores: true,
     monsters: 2,
   })
   // Without a title it is named for its file, and a map with one flag has no flags for capture the flag.
-  const bare = summarizeMap('duel_arena', { ...layout, title: undefined, description: undefined, hill: undefined, flags: [{ x: 1, y: 1 }] } as unknown as MapLayout)
-  assert.deepEqual([bare.name, bare.description, bare.hill, bare.flags], ['Duel Arena', undefined, false, false])
+  const bare = summarizeMap('duel_arena', {
+    ...layout, title: undefined, description: undefined, hill: undefined, flags: [{ x: 1, y: 1 }], cores: [undefined, { x: 4, y: 4 }],
+  } as unknown as MapLayout)
+  assert.deepEqual([bare.name, bare.description, bare.hill, bare.flags, bare.cores], ['Duel Arena', undefined, false, false, false])
   assert.deepEqual(unplayableMap('broken', 'It has no arena.'), {
-    id: 'broken', name: 'Broken', width: 0, height: 0, spawns: [], hill: false, flags: false, monsters: 0, problem: 'It has no arena.',
+    id: 'broken', name: 'Broken', width: 0, height: 0, spawns: [], hill: false, flags: false, cores: false, monsters: 0, problem: 'It has no arena.',
   })
 })
 

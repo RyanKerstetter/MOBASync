@@ -31,14 +31,17 @@ import { createGameMenu, menuItems } from './game-menu.ts'
 import { HoldCommand, type HeldCommand } from './hold-command.ts'
 import { loadSettings, saveSettings } from './game-settings.ts'
 import { ClientGameState } from './game-state.ts'
+import { createTeamVision, type TeamVision } from './team-vision.ts'
 import { abilitySlotViews } from './ui/hud.ts'
 import { createHudView } from './ui/hud-view.ts'
+import { createItemTooltip } from './ui/item-tooltip.ts'
 import { createModeHudView } from './ui/mode-hud-view.ts'
 import { createResultsView } from './ui/results-view.ts'
 import { createGameMap } from './render/game-map.ts'
 import { createPixiApp } from './render/pixi-app.ts'
 import { WorldRenderer } from './render/world-renderer.ts'
 import { createScoreboardView } from './ui/scoreboard-view.ts'
+import { createShopView } from './ui/shop-view.ts'
 import { decodeSnapshot } from './snapshot-codec.ts'
 import { spriteFileKey, spriteOverridesFrom } from './sprite-overrides.ts'
 
@@ -54,9 +57,10 @@ type GameOptions = {
   onStarted: (snapshot: GameSnapshot) => void
   onCancelled: (message: string) => void
   onDisconnected: () => void
-  // The player chose to go back to the lobby, from the escape menu or the results. The game goes on without
-  // them if it is not over.
-  onLeave: () => void
+  // The player is going back to the lobby: they chose to, from the escape menu or the results (and the game
+  // goes on without them if it is not over), or the leader ended the game. The message, if any, is what the
+  // lobby says about why.
+  onLeave: (message?: string) => void
   orderTimeoutMs?: number
   // Quick cast, or quick cast with an indicator while the key is held. By default, what the player
   // last chose in the escape menu, which is kept in the browser.
@@ -72,6 +76,7 @@ const ORDER_REJECTION_MESSAGES: Readonly<Record<string, string>> = {
   dead: 'Attacker or target is dead.',
   stale: 'Order was too old or out of sequence.',
   unknown_ability: 'Your champion does not have that ability.',
+  unknown_item: 'That item is not in the game.',
 }
 
 // Whether a key was pressed in a field the player is typing in (or on a button, if that counts too),
@@ -109,7 +114,30 @@ export async function startGame({
   })
 
   const debugOverlay = createDebugOverlay(container)
-  const hud = createHudView(container)
+  // The shop and the item slots, which share one box that says what an item is. A purchase is an order like any other: it is checked against what
+  // the champion has now (so the shop can say why not), sent to the server, and done on its tick by every peer alike.
+  const itemTooltip = createItemTooltip(container)
+  const shop = createShopView(container, itemTooltip, {
+    onBuy: (itemId) => {
+      if (!inPlay()) return 'The game is not running.'
+      const attempt = gameState.createBuyOrder(itemId)
+      if (!attempt.ok) return attempt.reason
+      reliableMessenger.send(attempt.order)
+      return undefined
+    },
+  })
+  const hud = createHudView(container, {
+    tooltip: itemTooltip,
+    onShop: (filter) => {
+      if (gameState.hasEconomy) shop.toggle(filter)
+    },
+    onSell: (slot) => {
+      if (!inPlay()) return
+      const attempt = gameState.createSellOrder(slot)
+      if (attempt.ok) reliableMessenger.send(attempt.order)
+      else onStatus(attempt.reason, true)
+    },
+  })
   const modeHud = createModeHudView(container)
   const scoreboard = createScoreboardView(container)
   // Shown when the server says the game is over, with the way back to the lobby.
@@ -136,6 +164,18 @@ export async function startGame({
   updateCamera(cameraCenter)
 
   const gameState = new ClientGameState()
+  // What the team sees: the vision system is made on the first frame, when the game's ground has come, and the address
+  // can ask for another (`?vision=range`, or `?vision=off`). Until then, and for what is picked, everything is seen.
+  let teamVision: TeamVision | undefined
+  const visionOf = (): TeamVision => {
+    if (!teamVision) {
+      teamVision = createTeamVision(gameState.getTerrain(), window.location.search)
+      const vision = teamVision
+      gameState.setSight((character) => vision.isVisible(character))
+      console.info(`Vision: ${vision.name}.`)
+    }
+    return teamVision
+  }
   // The mouse is remembered on screen and turned into a world point when it is used, because the
   // camera moves under a still mouse as the champion walks.
   let pointerOnScreen = { x: app.screen.width / 2, y: app.screen.height / 2 }
@@ -291,8 +331,12 @@ export async function startGame({
   }
   const onKeyDown = (event: KeyboardEvent): void => {
     if (event.code === 'Escape') {
-      // Escape drops an aim first, as it always has, and opens the menu when there is none (and
-      // closes it when it is open).
+      // Escape puts the shop away first if it is open, then drops an aim, as it always has, and opens the menu when there is
+      // none (and closes it when it is open).
+      if (shop.isOpen) {
+        shop.close()
+        return
+      }
       if (castControl.aiming !== undefined) {
         castControl.cancel()
         return
@@ -492,7 +536,8 @@ export async function startGame({
   })
 
   // The game is over, because a team reached the score limit or the leader ended it: stop playing, and show how it
-  // went. The server sends this more than once to be sure it arrives, so only the first shows.
+  // went (or, if the leader ended it, leave). The server sends this more than once to be sure it arrives, so only
+  // the first counts.
   channel.on('game:ended', (data) => {
     const parsed = GameResultSchema.safeParse(data)
     if (!parsed.success) {
@@ -503,6 +548,13 @@ export async function startGame({
     ended = true
     castControl.cancel()
     menu.close()
+    shop.close()
+    // The leader ended it to get everyone back in the lobby, so there are no results to look at: go straight
+    // there. (The server has already shut the game down, and what it was is on the lobby.)
+    if (parsed.data.reason === 'ended') {
+      onLeave('The leader ended the game.')
+      return
+    }
     results.show(parsed.data, gameState.getLocalTeam())
   })
 
@@ -532,6 +584,9 @@ export async function startGame({
     const localCharacterId = gameState.getLocalCharacterId()
     const local = characters.find((character) => character.id === localCharacterId)
     const dead = local?.dead ?? false
+    // What the team sees, before anything is picked or drawn: the debug view (P) shows everything.
+    const sight = visionOf()
+    sight.update(characters, gameState.getLocalTeam(), { reveal: world.debug })
     if (dead) castControl.cancel()
     const aimed = castControl.aiming
     // Only an enemy a right click would attack is marked as hovered: not while an ability is being
@@ -543,8 +598,11 @@ export async function startGame({
     const mode = gameState.getModeView(now)
     world.update({
       now,
-      characters,
-      entities: gameState.getEntities(now),
+      // What is not seen is not drawn, nor are its names and bars: the darkness is over everything else.
+      characters: sight.visibleCharacters(characters),
+      unseen: sight.hiddenCharacters(characters),
+      entities: sight.visibleEntities(gameState.getEntities(now)),
+      ...(sight.mask ? { fog: sight.mask } : {}),
       mode,
       localCharacterId,
       ...(local ? { localAttackCooldown: gameState.getAttackCooldownProgress(now) } : {}),
@@ -558,12 +616,23 @@ export async function startGame({
     app.canvas.style.cursor = hovered ? 'crosshair' : ''
     updateCamera(local?.position ?? cameraCenter)
     // The cooldowns refresh every frame so they fill smoothly.
+    const progress = gameState.getLocalProgress(now)
+    const stats = gameState.getLocalStats(now)
+    const loadout = gameState.getLocalLoadout(now)
+    if (loadout) shop.update(loadout, now)
+    // Without an economy there is no level, no stats panel and no items or shop: the HUD is the abilities and the health.
+    if (!gameState.hasEconomy) shop.close()
     hud.update({
+      economy: gameState.hasEconomy,
+      ...(loadout ? { inventory: loadout.items, inShop: loadout.inShop } : {}),
       dead,
       ...(local
         ? { health: { hp: local.health?.hp ?? 0, maxHp: local.health?.maxHp ?? 0, shield: local.totalShield } }
         : {}),
-      ...(dead ? { respawnSeconds: gameState.getRespawnSecondsLeft(now) } : {}),
+      ...(progress ? { progress } : {}),
+      // The champion's stats at its level; what items add to them will go here.
+      ...(stats ? { stats } : {}),
+      ...(dead ? { respawnSeconds: gameState.getRespawnSecondsLeft(now), out: gameState.isLocalOutOfTheGame(now) } : {}),
       abilities: abilitySlotViews(
         gameState.getAbilityCooldowns(now),
         (slot) => abilityKeys[slot]?.slice(3) ?? String(slot + 1),
@@ -592,6 +661,8 @@ export async function startGame({
     window.removeEventListener('keyup', onKeyUp)
     window.removeEventListener('blur', onBlur)
     debugOverlay.destroy()
+    shop.destroy()
+    itemTooltip.destroy()
     hud.destroy()
     modeHud.destroy()
     scoreboard.destroy()

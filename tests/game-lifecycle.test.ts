@@ -11,11 +11,9 @@ import { testSpawns } from './test-spawns.ts'
 const oneShot = defineChampion({
   id: 't-one-shot',
   name: 'Test One Shot',
-  maxHp: 1000,
+  base: { maxHp: 1000, attackDamage: 5000, attackSpeed: 1 },
   moveSpeed: 220,
   radius: 18,
-  attackDamage: 5000,
-  attackSpeed: 1,
   attackRange: 150,
   attackWindupTicks: 0,
   abilities: [...brawler.abilities],
@@ -180,6 +178,22 @@ test('the leader ending a game that is already over shuts it down for whoever is
   assert.equal(game.end(), undefined)
   assert.equal(game.status, 'idle')
   assert.deepEqual(game.playingPlayerIds, [])
+})
+
+test('a game the leader ended is shut down at once, keeping how it ended, so another can be started', () => {
+  const { game, ids } = runningGame({ scoreLimit: 10 })
+  annKills(game, ids, ['bob'])
+  for (let tick = 0; tick < 80; tick += 1) game.advanceTick()
+
+  const result = game.end()
+  assert.ok(result)
+  game.close()
+  assert.equal(game.status, 'idle', 'no one is left looking at results, so the lobby is free at once')
+  assert.deepEqual(game.playingPlayerIds, [])
+  assert.deepEqual(game.result, result, 'and how it ended is still there for the lobby to show')
+
+  assert.equal(game.beginSelection(players, undefined, 'deathmatch', { scoreLimit: 4 }), true, 'another can start')
+  assert.equal(game.result, undefined)
 })
 
 test('only a game that has begun can be left, ended or shut down, and ending one that is not running does nothing', () => {

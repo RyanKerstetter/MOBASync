@@ -1,19 +1,29 @@
-import { Container, Graphics, Text } from 'pixi.js'
+import { Container, Graphics, Text, type RenderLayer } from 'pixi.js'
 import { getTeam } from '../../../../packages/shared/src/index.ts'
 import { CharacterSprite, type LoadedSpriteSet } from '../character-sprite.ts'
 import type { RenderedCharacter } from '../game-state.ts'
+import { layoutCorpse } from './corpse.ts'
+import { characterDepth } from './depth.ts'
+import { layoutDeaggroBar } from './deaggro-bar.ts'
 import { layoutHealthBar } from './health-bar.ts'
 import { layoutStackPips } from './stack-pips.ts'
 import { statusLabels } from './status-labels.ts'
 
 type Actor = {
+  // Its body: the figure or circle, and its stacks.
   node: Container
+  // Its name and bars, which are drawn over every body (see `CharacterLayer.overlay`).
+  overlay: Container
   // Drawn from sprite sheets, for a champion that has a sprite set; otherwise its body is a circle.
   sprite?: CharacterSprite
   statusText: Text
   stackPips: Graphics
+  // A structure's barrier, drawn round it while it is protected and nothing can hurt it yet.
+  barrier?: Graphics
   label: Text
   healthBar: Graphics
+  // A monster's deaggro bar, under its health bar, while it has something in it.
+  deaggroBar: Graphics
   cooldownBar: Graphics
 }
 
@@ -24,56 +34,88 @@ const HEALTH_BAR_HEIGHT = 9
 const HEALTH_TICK_EVERY = 100
 const HEALTH_MAJOR_TICK_EVERY = 1000
 
-// Every champion: its body (a sprite, or a circle in its team's colour), its name, its health bar,
-// what is affecting it, and its stacks. One is added when a champion first appears and taken away
-// when it leaves the game.
+// Every champion: its body (a sprite, or a circle in its team's colour) and its stacks, and its name, its
+// health bar and what is affecting it. One is added when a champion first appears and taken away when
+// it leaves the game.
+//
+// The bodies are `view`'s children, and are attached to `depth` (see depth.ts), which draws them in
+// order of how far down the map they stand, with anything else attached to it: the faces of walls, so a
+// champion walks behind one and in front of another. The names and bars are in `overlay` instead, which
+// goes over all of that, so one cannot be lost behind a wall. Without a `depth` the bodies are drawn in
+// the order they came.
 export class CharacterLayer {
   readonly view = new Container()
+  readonly overlay = new Container()
   private readonly actors = new Map<number, Actor>()
 
-  constructor(private spriteSets: ReadonlyMap<string, LoadedSpriteSet>) {}
+  constructor(private spriteSets: ReadonlyMap<string, LoadedSpriteSet>, private readonly depth?: RenderLayer) {}
 
   // Draws every champion from these sets from now on. The champions already drawn are dropped, so
   // the next update draws them again from the new ones.
   setSpriteSets(sets: ReadonlyMap<string, LoadedSpriteSet>): void {
     this.spriteSets = sets
-    for (const actor of this.actors.values()) actor.node.destroy({ children: true })
+    for (const actor of this.actors.values()) destroyActor(actor)
     this.actors.clear()
   }
 
   // `localAttackCooldown` is how far the controlled champion's attack cooldown has run, from 0 to
-  // 1, shown as a bar under its health.
+  // 1, shown as a bar under its health. `unseen` are characters in the game that are not drawn, because the
+  // team cannot see them (see `TeamVision`): their bodies are kept and go on being updated, hidden, so they are
+  // as they would have been if they had been seen all along: one that died out of sight is lying down when it
+  // is seen, and does not die again. (A body that was taken away when it went out of sight would be made again,
+  // from its first frame, when it came back.)
   update(
     characters: readonly RenderedCharacter[],
     localCharacterId: number | undefined,
     localAttackCooldown: number | undefined,
     now: number,
+    unseen: readonly RenderedCharacter[] = [],
   ): void {
-    const activeIds = new Set(characters.map((character) => character.id))
+    const everyone = unseen.length > 0 ? [...characters, ...unseen] : characters
+    const hidden = new Set(unseen.map((character) => character.id))
+    const activeIds = new Set(everyone.map((character) => character.id))
     for (const [id, actor] of this.actors) {
       if (!activeIds.has(id)) {
-        actor.node.destroy({ children: true })
+        destroyActor(actor)
         this.actors.delete(id)
       }
     }
-    for (const character of characters) {
+    for (const character of everyone) {
       const isLocal = character.id === localCharacterId
       const actor = this.actors.get(character.id) ?? this.addActor(character, isLocal)
+      // A structure that is destroyed is gone for good, and leaves nothing lying there. A monster that dies loses its nameplate at once, and its
+      // body a couple of seconds later (`layoutCorpse`), and is drawn again when it respawns.
+      const structure = character.turret !== undefined || character.core !== undefined
+      const corpse = layoutCorpse(character)
+      const drawn = !hidden.has(character.id) && !(structure && character.dead)
+      actor.node.visible = drawn && corpse.body
+      actor.overlay.visible = drawn && corpse.nameplate
+      // A structure has no name over it: it is told by its body, its team's colour and (for a turret) its ring.
+      actor.label.visible = !structure
+      if (actor.barrier) actor.barrier.visible = character.invulnerable === true
       actor.label.text = character.name ?? character.player?.name ?? ''
       const radius = character.champion.radius
+      // The name and bars go over the body, or over the figure where it stands higher than that.
+      const above = Math.max(radius, actor.sprite?.reach ?? 0)
       actor.node.position.set(character.position.x, character.position.y)
+      actor.node.zIndex = characterDepth(character.position)
+      actor.overlay.position.set(character.position.x, character.position.y)
       // A death leaves no bars until the respawn: a faint ghost for a circle, and for a sprite its
       // death animation at full strength, ending lying down.
-      actor.node.alpha = character.dead && !actor.sprite ? 0.25 : 1
+      actor.node.alpha = actor.overlay.alpha = character.dead && !actor.sprite ? 0.25 : 1
       actor.healthBar.visible = !character.dead
-      actor.label.position.set(0, -radius - 25)
-      drawHealthBar(actor.healthBar, -radius - 20, {
+      actor.label.position.set(0, -above - 25)
+      drawHealthBar(actor.healthBar, -above - 20, {
         hp: character.health?.hp ?? 0,
         maxHp: character.health?.maxHp ?? 0,
         shield: character.totalShield,
       })
+      // A monster that is losing interest has a bar under its health that fills, and is full when it gives up and goes home.
+      const losing = character.monster && !character.dead ? layoutDeaggroBar(character.monster.deaggro) : undefined
+      actor.deaggroBar.visible = losing !== undefined
+      if (losing) drawBar(actor.deaggroBar, -above - 9, losing.fraction, losing.color, 4)
       actor.statusText.text = statusLabels(character).join(' · ')
-      actor.statusText.position.set(0, -radius - 43)
+      actor.statusText.position.set(0, -above - 43)
       drawStackPips(actor.stackPips, radius, character.dead ? {} : character.stacks)
       actor.sprite?.update({
         position: character.position,
@@ -88,12 +130,17 @@ export class CharacterLayer {
 
   private addActor(character: RenderedCharacter, isLocal: boolean): Actor {
     const node = new Container()
+    const overlay = new Container()
     // Filled with the colour of its team. The champion you control has a thick white outline,
     // since its colour is no longer different from every other player's. A champion drawn from
     // sprites has no circle: it is the figure alone, and its team shows in the colour of its name.
     const loaded = this.spriteSets.get(character.champion.id)
     const shape = new Graphics()
-    if (!loaded) {
+    if (!loaded && character.turret) {
+      drawTurretBody(shape, character.champion.radius, getTeam(character.team).color)
+    } else if (!loaded && character.core) {
+      drawCoreBody(shape, character.champion.radius, getTeam(character.team).color)
+    } else if (!loaded) {
       shape
         .circle(0, 0, character.champion.radius)
         .fill({ color: getTeam(character.team).color })
@@ -112,6 +159,8 @@ export class CharacterLayer {
     })
     label.anchor.set(0.5, 1)
     const healthBar = new Graphics()
+    const deaggroBar = new Graphics()
+    deaggroBar.visible = false
     const cooldownBar = new Graphics()
     // What is affecting the champion, as small words above its name.
     const statusText = new Text({
@@ -125,12 +174,64 @@ export class CharacterLayer {
     })
     statusText.anchor.set(0.5, 1)
     const stackPips = new Graphics()
-    node.addChild(shape, ...(sprite ? [sprite.view] : []), stackPips, label, statusText, healthBar, cooldownBar)
+    // A structure that cannot be hurt yet has a barrier round it, shown only while that is so.
+    const barrier = character.turret || character.core ? drawBarrier(character.champion.radius) : undefined
+    node.addChild(shape, ...(barrier ? [barrier] : []), ...(sprite ? [sprite.view] : []), stackPips)
+    overlay.addChild(label, statusText, healthBar, deaggroBar, cooldownBar)
     this.view.addChild(node)
-    const actor = { node, ...(sprite ? { sprite } : {}), statusText, stackPips, label, healthBar, cooldownBar }
+    this.overlay.addChild(overlay)
+    // After it is in the scene, which the layer needs for where it is.
+    this.depth?.attach(node)
+    const actor = { node, overlay, ...(sprite ? { sprite } : {}), ...(barrier ? { barrier } : {}), statusText, stackPips, label, healthBar, deaggroBar, cooldownBar }
     this.actors.set(character.id, actor)
     return actor
   }
+}
+
+// A turret: a ring of dark stone with its team's colour round the edge, and a core of that colour on top of it, so which side it is on
+// reads from a distance. It is flat, as everything is.
+function drawTurretBody(shape: Graphics, radius: number, color: string): void {
+  shape
+    .circle(0, 0, radius)
+    .fill({ color: '#2d3340' })
+    .stroke({ color, width: 4 })
+    .circle(0, 0, radius * 0.55)
+    .fill({ color })
+    .stroke({ color: '#0b1220', width: 2, alpha: 0.7 })
+    .circle(0, 0, radius * 0.2)
+    .fill({ color: '#ffffff', alpha: 0.85 })
+}
+
+// A core: a diamond of dark stone edged in its team's colour, with a smaller one of that colour inside it, so it reads as the heart of the
+// base and not as a turret. Flat, like the rest.
+function drawCoreBody(shape: Graphics, radius: number, color: string): void {
+  const diamond = (size: number): number[] => [0, -size, size, 0, 0, size, -size, 0]
+  shape
+    .poly(diamond(radius))
+    .fill({ color: '#2d3340' })
+    .stroke({ color, width: 5 })
+    .poly(diamond(radius * 0.58))
+    .fill({ color })
+    .stroke({ color: '#0b1220', width: 2, alpha: 0.7 })
+    .circle(0, 0, radius * 0.16)
+    .fill({ color: '#ffffff', alpha: 0.85 })
+}
+
+// The barrier of a structure that is protected: a pale ring a little out from its body, with a fainter one outside it.
+function drawBarrier(radius: number): Graphics {
+  const barrier = new Graphics()
+    .circle(0, 0, radius + 7)
+    .stroke({ color: '#e8f4ff', width: 3, alpha: 0.85 })
+    .circle(0, 0, radius + 13)
+    .stroke({ color: '#e8f4ff', width: 2, alpha: 0.35 })
+  barrier.visible = false
+  return barrier
+}
+
+// Destroying a body takes it out of the depth layer with it.
+function destroyActor(actor: Actor): void {
+  actor.node.destroy({ children: true })
+  actor.overlay.destroy({ children: true })
 }
 
 // One pip per stack under the body. `layoutStackPips` decides where each goes and what it looks
@@ -147,9 +248,9 @@ function drawStackPips(graphics: Graphics, radius: number, stacks: Record<string
 function drawBar(graphics: Graphics, y: number, fraction: number, fillColor: string, height = 4): void {
   const width = HEALTH_BAR_WIDTH
   graphics.clear()
-    .roundRect(-width / 2, y, width, height, 2)
+    .rect(-width / 2, y, width, height)
     .fill({ color: '#101827' })
-    .roundRect(-width / 2, y, width * Math.max(0, Math.min(1, fraction)), height, 2)
+    .rect(-width / 2, y, width * Math.max(0, Math.min(1, fraction)), height)
     .fill({ color: fillColor })
 }
 

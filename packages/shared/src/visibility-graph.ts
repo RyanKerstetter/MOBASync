@@ -1,3 +1,4 @@
+import { nearestFree, type Box } from './exits.js'
 import type { Vector2 } from './index.js'
 import type { PathfinderFactory } from './pathfinding.js'
 
@@ -30,7 +31,6 @@ const GRAZE = 1e-9
 // The most times a point is moved out of the walls that hold it before it is given up on.
 const MAX_ESCAPES = 8
 
-type Box = { left: number; top: number; right: number; bottom: number }
 type Edge = { to: number; length: number }
 type Graph = {
   // What blocks, and the part of the arena a body's centre can be in.
@@ -136,8 +136,8 @@ function findPath(graph: Graph, from: Vector2, to: Vector2): Vector2[] | undefin
 }
 
 // Where a body can stand, nearest to a point: that point held inside the arena, and moved out of the
-// clearance of any wall it is in, by the nearest side that is still inside the arena. Nothing if it is
-// boxed in. A body that is pushing along a wall, or going round a corner, is inside the clearance (the
+// clearance of any wall it is in, by the nearest side that is still inside the arena and not into another wall's
+// clearance (or by the nearest way clear of all of them, where walls meet). Nothing if it is boxed in. A body that is pushing along a wall, or going round a corner, is inside the clearance (the
 // clearance is a square round the wall, which a body going round a corner is inside of) and needs to
 // step out to see anything.
 function standable(graph: Graph, point: Vector2): Vector2 | undefined {
@@ -157,8 +157,16 @@ function standable(graph: Graph, point: Vector2): Vector2 | undefined {
     const choices = open.length > 0 ? open : exits
     let best = choices[0]
     for (const exit of choices) if (exit.cost < best.cost) best = exit
-    x = Math.max(inner.left, Math.min(inner.right, best.to.x))
-    y = Math.max(inner.top, Math.min(inner.bottom, best.to.y))
+    const side = {
+      x: Math.max(inner.left, Math.min(inner.right, best.to.x)),
+      y: Math.max(inner.top, Math.min(inner.bottom, best.to.y)),
+    }
+    // That side can be into the next wall, where two meet: leaving one is going into the other, and so on until it gives up, which
+    // is a body that cannot be routed anywhere and an order that does nothing. Then it leaves by the nearest way clear of all of them.
+    const free = (spot: Vector2): boolean => within(inner, spot) && !graph.blockers.some((box) => inside(box, spot))
+    const out = free(side) ? side : nearestFree({ x, y }, graph.blockers, graph.blockers.indexOf(blocker), inner, free) ?? side
+    x = out.x
+    y = out.y
   }
   return undefined
 }

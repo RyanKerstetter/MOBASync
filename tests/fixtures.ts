@@ -1,3 +1,4 @@
+import { ClientGameState } from '../apps/client/src/game-state.ts'
 import {
   abilityDefs,
   aimPoint,
@@ -13,6 +14,8 @@ import {
   capCooldown,
   Champion,
   champions,
+  Core,
+  cores,
   damage,
   dash,
   dodge,
@@ -22,11 +25,14 @@ import {
   haste,
   heal,
   interrupt,
+  Item,
+  items,
   knockback,
   linear,
   loseHealth,
   mark,
   Monster,
+  Simulator,
   monsters,
   missingHealth,
   ownEntity,
@@ -49,16 +55,21 @@ import {
   subject,
   subjectWithin,
   targetUnit,
+  Turret,
+  turrets,
   when,
   type AbilityDef,
   type ChampionDef,
   type CharacterOrder,
+  type CoreDef,
   type DashDef,
   type EntityDef,
+  type ItemDef,
+  type ModeSetup,
   type MonsterDef,
   type Selector,
   type SimContext,
-  type Simulator,
+  type TurretTierDef,
   type Vector2,
 } from '../packages/shared/src/index.js'
 
@@ -80,6 +91,28 @@ export function defineMonster(def: MonsterDef): Monster {
   const monster = new Monster(def)
   ;(monsters as unknown as Map<string, Monster>).set(monster.id, monster)
   return monster
+}
+
+// A tier of turret for a test, which the simulator finds by the id of its body (`turret-<tier>`). Like the rest it stays registered, so
+// a test uses a tier of its own, a high number the game does not use.
+export function defineTurret(tier: number, def: TurretTierDef): Turret {
+  const turret = new Turret(tier, def)
+  ;(turrets as unknown as Map<string, Turret>).set(turret.id, turret)
+  return turret
+}
+
+// An item for a test, which the simulator finds by its id. Like the rest it stays registered, so a test uses ids of its own ("t-...").
+export function defineItem(def: ItemDef): Item {
+  const item = new Item(def)
+  ;(items as unknown as Map<string, Item>).set(item.id, item)
+  return item
+}
+
+// A core for a test, which the simulator finds by its id. Like the rest it stays registered, so a test uses an id of its own.
+export function defineCore(id: string, def: CoreDef): Core {
+  const core = new Core(id, def)
+  ;(cores as unknown as Map<string, Core>).set(core.id, core)
+  return core
 }
 
 export function defineChampion(def: ChampionDef): Champion {
@@ -162,11 +195,9 @@ defineAbility({
 export const brawler = defineChampion({
   id: 't-brawler',
   name: 'Test Brawler',
-  maxHp: 1000,
+  base: { maxHp: 1000, attackDamage: 100, attackSpeed: 1 },
   moveSpeed: 220,
   radius: 18,
-  attackDamage: 100,
-  attackSpeed: 1,
   attackRange: 150,
   attackWindupTicks: 0,
   abilities: ['t-shockwave', 't-lash', 't-bolt', 't-meteor'],
@@ -238,11 +269,9 @@ defineAbility({
 export const cursebearer = defineChampion({
   id: 't-cursebearer',
   name: 'Test Cursebearer',
-  maxHp: 800,
+  base: { maxHp: 800, attackDamage: 80, attackSpeed: 1.2 },
   moveSpeed: 140,
   radius: 16,
-  attackDamage: 80,
-  attackSpeed: 1.2,
   attackRange: 190,
   attackWindupTicks: 4,
   abilities: ['t-feast', 't-miasma', 't-hex'],
@@ -304,11 +333,9 @@ defineAbility({
 export const archer = defineChampion({
   id: 't-archer',
   name: 'Test Archer',
-  maxHp: 700,
+  base: { maxHp: 700, attackDamage: 65, attackSpeed: 1 },
   moveSpeed: 150,
   radius: 15,
-  attackDamage: 65,
-  attackSpeed: 1,
   attackRange: 220,
   attackWindupTicks: 3,
   abilities: ['t-leap', 't-focus', 't-snare'],
@@ -392,11 +419,9 @@ defineAbility({
 export const swordsman = defineChampion({
   id: 't-swordsman',
   name: 'Test Swordsman',
-  maxHp: 1000,
+  base: { maxHp: 1000, attackDamage: 90, attackSpeed: 1.1 },
   moveSpeed: 145,
   radius: 18,
-  attackDamage: 90,
-  attackSpeed: 1.1,
   attackRange: 90,
   attackWindupTicks: 3,
   abilities: ['t-slash', 't-radiance', 't-shackle'],
@@ -479,11 +504,9 @@ defineAbility({
 export const capricorn = defineChampion({
   id: 't-capricorn',
   name: 'Test Capricorn',
-  maxHp: 850,
+  base: { maxHp: 850, attackDamage: 70, attackSpeed: 1 },
   moveSpeed: 145,
   radius: 17,
-  attackDamage: 70,
-  attackSpeed: 1,
   attackRange: 200,
   attackWindupTicks: 4,
   abilities: ['t-tsunami', 't-bubbles', 't-gale'],
@@ -521,11 +544,9 @@ defineAbility({
 export const cutter = defineChampion({
   id: 't-cutter',
   name: 'Test Cutter',
-  maxHp: 1000,
+  base: { maxHp: 1000, attackDamage: 90, attackSpeed: 1.1 },
   moveSpeed: 145,
   radius: 18,
-  attackDamage: 90,
-  attackSpeed: 1.1,
   attackRange: 90,
   attackWindupTicks: 3,
   abilities: ['t-cut'],
@@ -567,11 +588,9 @@ defineAbility({
 export const spouter = defineChampion({
   id: 't-spouter',
   name: 'Test Spouter',
-  maxHp: 1000,
+  base: { maxHp: 1000, attackDamage: 70, attackSpeed: 1 },
   moveSpeed: 145,
   radius: 18,
-  attackDamage: 70,
-  attackSpeed: 1,
   attackRange: 200,
   attackWindupTicks: 4,
   abilities: ['t-spout'],
@@ -641,11 +660,9 @@ defineAbility({
 export const soldier = defineChampion({
   id: 't-soldier',
   name: 'Test Soldier',
-  maxHp: 900,
+  base: { maxHp: 900, attackDamage: 60, attackSpeed: 1.3 },
   moveSpeed: 140,
   radius: 17,
-  attackDamage: 60,
-  attackSpeed: 1.3,
   attackRange: 260,
   attackWindupTicks: 3,
   abilities: ['t-stim', 't-rail', 't-medic'],
@@ -781,11 +798,9 @@ defineAbility({
 export const grenadier = defineChampion({
   id: 't-grenadier',
   name: 'Test Grenadier',
-  maxHp: 800,
+  base: { maxHp: 800, attackDamage: 60, attackSpeed: 1 },
   moveSpeed: 150,
   radius: 16,
-  attackDamage: 60,
-  attackSpeed: 1,
   attackRange: 250,
   attackWindupTicks: 3,
   abilities: ['t-grenade', 't-molotov', 't-flashbang', 't-ignite'],
@@ -908,11 +923,9 @@ defineAbility({
 export const trinketmaster = defineChampion({
   id: 't-trinketmaster',
   name: 'Test Trinketmaster',
-  maxHp: 900,
+  base: { maxHp: 900, attackDamage: 60, attackSpeed: 1 },
   moveSpeed: 150,
   radius: 17,
-  attackDamage: 60,
-  attackSpeed: 1,
   attackRange: 90,
   attackWindupTicks: 3,
   abilities: ['t-stick', 't-hush', 't-warp'],
@@ -1018,11 +1031,9 @@ defineAbility({
 export const ninja = defineChampion({
   id: 't-ninja',
   name: 'Test Ninja',
-  maxHp: 800,
+  base: { maxHp: 800, attackDamage: 50, attackSpeed: 1 },
   moveSpeed: 160,
   radius: 16,
-  attackDamage: 50,
-  attackSpeed: 1,
   attackRange: 90,
   attackWindupTicks: 4,
   abilities: ['t-shadowstep', 't-kunai', 't-dodge'],
@@ -1041,11 +1052,9 @@ export const ninja = defineChampion({
 export const gunner = defineChampion({
   id: 't-gunner',
   name: 'Test Gunner',
-  maxHp: 1000,
+  base: { maxHp: 1000, attackDamage: 100, attackSpeed: 1 },
   moveSpeed: 200,
   radius: 18,
-  attackDamage: 100,
-  attackSpeed: 1,
   attackRange: 300,
   attackWindupTicks: 3,
   attackProjectile: { speed: 600, radius: 8, color: '#ffffff' },
@@ -1075,11 +1084,9 @@ defineAbility({
 export const bigHitter = defineChampion({
   id: 't-big-hitter',
   name: 'Test Big Hitter',
-  maxHp: 1000,
+  base: { maxHp: 1000, attackDamage: 400, attackSpeed: 1 },
   moveSpeed: 220,
   radius: 18,
-  attackDamage: 400,
-  attackSpeed: 1,
   attackRange: 150,
   attackWindupTicks: 0,
   abilities: [],
@@ -1103,11 +1110,9 @@ defineAbility({
 export const executioner = defineChampion({
   id: 't-executioner',
   name: 'Test Executioner',
-  maxHp: 1_000_000,
+  base: { maxHp: 1_000_000, attackDamage: 1, attackSpeed: 1 },
   moveSpeed: 100,
   radius: 10,
-  attackDamage: 1,
-  attackSpeed: 1,
   attackRange: 10,
   attackWindupTicks: 1,
   abilities: ['t-execute'],
@@ -1130,4 +1135,19 @@ export function killAt(simulator: Simulator, victimId: number, tick: number): vo
     target: { mode: 'unit', unitId: victimId },
     origin: { ...origin },
   })
+}
+
+// A game with an economy (levels, gold, the shop): that is a game of core destruction, the one mode that has one (`modeHasEconomy`). It has no cores,
+// so nothing in it ends the game.
+export const ECONOMY_MODE: ModeSetup = { kind: 'core', teams: [1, 2] }
+
+export function economySimulator(): Simulator {
+  return new Simulator(undefined, ECONOMY_MODE)
+}
+
+// A page's game state that is playing a game with an economy (see `economySimulator`).
+export function economyClient(): ClientGameState {
+  const state = new ClientGameState()
+  state.simulator.reset(undefined, ECONOMY_MODE)
+  return state
 }

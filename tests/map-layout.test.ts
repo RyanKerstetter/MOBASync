@@ -6,7 +6,6 @@ import {
   GAME_ARENA_HEIGHT,
   GAME_ARENA_WIDTH,
   GAME_ART_SCALE,
-  DEFAULT_MAP_ID,
   GAME_MAX_CHAMPION_RADIUS,
   GAME_MAX_PLAYERS,
   modeStartProblem,
@@ -340,15 +339,18 @@ test('a flag that walls shut in is refused, since no one could walk up to it', (
   assert.match(problemsOf(mapWith([arena(), ...allSpawns(), ...box, flag(2, 360, 20)])), /ctf-flag-2 cannot be reached from spawn-1-1: walls shut it off/)
 })
 
+// The free-for-all map is a map for every mode but core destruction, which the tests of a map with a hill and flags read.
+const ARENA_MAP_ID = 'ffa_arena'
+
 test('the game\'s own map has a hill and a flag for each of two teams, so every mode can be played on it', () => {
-  const file = new URL(`../res/maps/${DEFAULT_MAP_ID}.tmj`, import.meta.url)
+  const file = new URL(`../res/maps/${ARENA_MAP_ID}.tmj`, import.meta.url)
   const layout = readMapLayout(parseTiledMap(JSON.parse(readFileSync(file, 'utf-8'))))
   assert.ok(layout.hill, 'a hill')
   assert.ok(layout.flags[0] && layout.flags[1], 'a flag for each of the first two slots')
   for (const mode of ['deathmatch', 'koth', 'ctf'] as const) {
     assert.equal(modeStartProblem(mode, [1, 2], layout), undefined, mode)
   }
-  assert.deepEqual(summarizeMap(DEFAULT_MAP_ID, layout).spawns.slice(0, 2), [4, 4], 'room for two teams of four')
+  assert.deepEqual(summarizeMap(ARENA_MAP_ID, layout).spawns.slice(0, 2), [4, 4], 'room for two teams of four')
   // Each flag is at the base of the slot of spawn points it belongs to: nearer to it than to the other's.
   const near = (point: { x: number; y: number }, slot: number) => Math.hypot(point.x - layout.spawns[slot][0].x, point.y - layout.spawns[slot][0].y)
   assert.ok(near(layout.flags[0] as { x: number; y: number }, 0) < near(layout.flags[0] as { x: number; y: number }, 1))
@@ -356,7 +358,7 @@ test('the game\'s own map has a hill and a flag for each of two teams, so every 
 })
 
 test('the game\'s own map can be played on, for every way the players can split into teams', () => {
-  const file = new URL(`../res/maps/${DEFAULT_MAP_ID}.tmj`, import.meta.url)
+  const file = new URL(`../res/maps/${ARENA_MAP_ID}.tmj`, import.meta.url)
   const layout = readMapLayout(parseTiledMap(JSON.parse(readFileSync(file, 'utf-8'))))
   assert.equal(layout.spawns.length, GAME_MAX_PLAYERS)
   assert.ok(layout.terrain.walls.length > 0, 'it has walls')

@@ -9,6 +9,7 @@ import type {
 import { GAME_BURN_PULSE_TICKS, GAME_TPS } from './constants.js'
 import { boxTouchesCircle, type BoxShape } from './geometry.js'
 import type { SimCharacter } from './simulator.js'
+import type { ChampionStats } from './stats.js'
 import type { Terrain } from './terrain.js'
 
 // 1. Capabilities: effects read through SimReader and write through SimWriter.
@@ -26,6 +27,10 @@ export interface SimReader {
   // A unit's markers with this key (optionally from one owner), as they stand before this
   // tick's writes. Stacks are one marker each.
   markersOn(unitId: number, key: string, ownerId?: number): Marker[]
+  // A unit's stats at its level, as they stand before this tick's writes (see `Champion.statsAt`).
+  statsOf(unitId: number): ChampionStats | undefined
+  // A unit's level, as it stands before this tick's writes (what its experience comes to).
+  levelOf(unitId: number): number | undefined
   // A unit's health and its statuses, as they stand before this tick's writes.
   healthOf(unitId: number): { hp: number; maxHp: number } | undefined
   statusesOn(unitId: number): Status[]
@@ -83,9 +88,14 @@ export type GameEvent =
   // Puts the ability on its full cooldown from now, whatever was left of it, or none.
   | { type: 'start-cooldown'; id: string; rootId: string; ownerId: number; unitId: number; abilityId: string }
 
+// The IDs of what an auto attack runs start with this, and so do those of what the attack leaves behind (a shot in the air), which are
+// made from them; an ability's start with 'c:'. It is how an effect knows whether its damage is an auto's, which is physical, or an
+// ability's, which is magic (see `damage`).
+export const ATTACK_SOURCE_PREFIX = 'a:'
+
 // 2. Provenance: plain data, built by whoever runs the effects.
 export interface EffectSource {
-  // Scopes record IDs: 'c:p1:4', 'c:p1:4:bolt:u2:t120'.
+  // Scopes record IDs: 'c:p1:4', 'c:p1:4:bolt:u2:t120', and for an auto attack 'a:p1:4:t120' (`ATTACK_SOURCE_PREFIX`).
   id: string
   // The order that ultimately caused this (cancel by source, kill credit).
   rootId: string
@@ -303,6 +313,12 @@ export const alliesInBox = (halfLength: number, halfWidth: number): Selector => 
 
 // Effects
 
+// Whether an effect is running for an auto attack (see `ATTACK_SOURCE_PREFIX`), and so deals physical damage.
+export const fromAttack = (src: EffectSource): boolean => src.id.startsWith(ATTACK_SOURCE_PREFIX)
+
+// Deals damage: an ability's is magic, an auto attack's is physical. The amount is as written: nothing multiplies it, so an ability that is
+// to grow with arcane (or attack damage, or health, or level) says so in its amount (see `scaled`). What it does to the one hit is the
+// victim's to say (its resistance, its shields), when the damage lands.
 export const damage = (
   amount: Amount,
   to: Selector = subject(),
@@ -402,9 +418,52 @@ export const resetAutoTimer = (
   }
 }
 
-// The owner's attack damage stat, so an auto's damage is written once on the champion.
+// The owner's attack damage stat at its level, so an auto's damage is written once on the champion.
 export const attackDamage = (): ((sim: SimReader, src: EffectSource) => number) => (sim, src) =>
-  sim.character(src.ownerId)?.champion.attackDamage ?? 0
+  sim.statsOf(src.ownerId)?.attackDamage ?? 0
+
+// The owner's arcane at its level: the ability power it has, which is nothing until a champion or an item gives it some. It does nothing by
+// itself: an ability that is to grow with it says so, as `linear(60, 0.5, arcane())` (60 and half of it) or with `scaled`.
+export const arcane = (): ((sim: SimReader, src: EffectSource) => number) => (sim, src) =>
+  sim.statsOf(src.ownerId)?.arcane ?? 0
+
+// The owner's most health, with what its level and its items add.
+export const maxHealth = (): ((sim: SimReader, src: EffectSource) => number) => (sim, src) =>
+  sim.statsOf(src.ownerId)?.maxHp ?? 0
+
+// The health the owner has now (before this tick's writes).
+export const health = (): ((sim: SimReader, src: EffectSource) => number) => (sim, src) =>
+  sim.healthOf(src.ownerId)?.hp ?? 0
+
+// The owner's level.
+export const level = (): ((sim: SimReader, src: EffectSource) => number) => (sim, src) =>
+  sim.levelOf(src.ownerId) ?? 1
+
+// What an amount grows with, and by how much of each: `{ arcane: 0.6 }` adds 0.6 for each point of the owner's arcane. Whatever is left out adds nothing.
+export type Scaling = {
+  arcane?: number
+  attackDamage?: number
+  maxHealth?: number
+  health?: number
+  level?: number
+}
+
+// base plus the owner's arcane, attack damage, most health, health and level, each times its ratio: `scaled(100, { arcane: 0.6, attackDamage: 0.3 })`.
+// The base can be an amount of its own (such as stacks). The stats are the owner's, whoever is hit, and as they stand when the effect runs.
+export const scaled = (
+  base: Amount,
+  ratios: Scaling,
+): ((sim: SimReader, src: EffectSource) => number) => {
+  const sources: Array<[number | undefined, (sim: SimReader, src: EffectSource) => number]> = [
+    [ratios.arcane, arcane()],
+    [ratios.attackDamage, attackDamage()],
+    [ratios.maxHealth, maxHealth()],
+    [ratios.health, health()],
+    [ratios.level, level()],
+  ]
+  return (sim, src) =>
+    sources.reduce((sum, [ratio, source]) => (ratio ? sum + ratio * source(sim, src) : sum), resolveAmount(base, sim, src))
+}
 
 // Counts the owner's markers with this key on the first selected unit.
 export const stacks = (
@@ -459,7 +518,7 @@ export const haste = (
 
 // Sets units alight: they take `damagePerSecond` while the status lasts, in a chunk on every
 // GAME_BURN_PULSE_TICKS-th tick, as ordinary damage (resistance and shields apply) credited to
-// whoever lit them. Lighting a unit again from the same source refreshes the burn instead of
+// whoever lit them. Its amount is read as it is lit (so what it scales with, see `scaled`, is as it stood then). Lighting a unit again from the same source refreshes the burn instead of
 // adding a second one, so a fire that re-applies it every tick keeps it burning for `durationTicks`
 // after the unit last stood in it; burns from different sources add together.
 export const burn = (

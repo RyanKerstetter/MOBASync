@@ -21,6 +21,13 @@ import type { GameMode, HillArea, ModeSetup, ObjectiveState, Vector2 } from './i
 //   it up, and carry it to your own flag's base to score a point, as long as your flag is at home. A
 //   carrier that dies drops the flag where it fell, and it stays there until a champion of the flag's
 //   own team walks over it, which sends it back to its base, or an enemy picks it up again.
+// - core destruction: two teams, each with a core at its base (cores.ts), guarded by its turrets (turrets.ts). Break the enemy's core,
+//   and then every player on that team: a team whose core is broken cannot respawn, so the players it has left are all it has, and a
+//   team with its core broken and no player alive is eliminated. The last team that is not eliminated wins. There is no score limit: it
+//   ends when a team is out. A core, like a turret, is hurt by attacks only, and is protected until its team's turrets are down.
+//
+// Only core destruction has an economy (`GameModeDef.economy`): experience and levels, gold and the shop, and shards. In the others a kill is a kill on
+// the scoreboard and nothing else: nobody levels, earns or buys, whatever they kill, and every champion is at level 1 all game.
 //
 // How long a champion stays dead, and the score a team wins at, are the lobby leader's to set (`LobbyRules`).
 // They are part of what the game is played for (`ModeSetup`), so every peer respawns champions on the same
@@ -31,12 +38,17 @@ import type { GameMode, HillArea, ModeSetup, ObjectiveState, Vector2 } from './i
 // the simulator runs on every frame, so every peer works out the same hill and flags and a late order
 // that changes who was where changes them with it.
 
-export const GAME_MODE_IDS = ['deathmatch', 'koth', 'ctf'] as const
+export const GAME_MODE_IDS = ['deathmatch', 'koth', 'ctf', 'core'] as const
 
-export const DEFAULT_GAME_MODE: GameMode = 'deathmatch'
+// The mode a new lobby starts on, if the map it starts on can be played in it (see `startingMode`).
+export const DEFAULT_GAME_MODE: GameMode = 'core'
+
+// The mode every map can be played in, which is what a game is when it is not told another (as a snapshot with no mode is), and what a lobby is
+// put back on when it changes to a map that cannot be played in the mode it had.
+export const FALLBACK_GAME_MODE: GameMode = 'deathmatch'
 
 // What a mode's score counts, which the lobby and the screen name it by.
-export type ScoreName = 'kills' | 'points' | 'captures'
+export type ScoreName = 'kills' | 'points' | 'captures' | 'cores'
 
 export interface GameModeDef {
   id: GameMode
@@ -44,8 +56,11 @@ export interface GameModeDef {
   // One line for the lobby, under the list of modes.
   summary: string
   scoreName: ScoreName
+  // Whether a game of it has experience and levels, gold and the shop, and shards (see `modeHasEconomy`). Without, killing pays nothing.
+  economy: boolean
   // The lobby's label for the score a team wins at, its default, and the most the leader can set. A limit
-  // of 0 is no limit: the game goes on until the leader ends it.
+  // of 0 is no limit: the game goes on until the leader ends it. A mode whose most is 0 has no limit to set, and the
+  // lobby shows none: it ends when a team has won by its own rules.
   limitLabel: string
   defaultLimit: number
   maxLimit: number
@@ -57,6 +72,7 @@ export const GAME_MODES: readonly GameModeDef[] = [
     name: 'Team Deathmatch',
     summary: 'Every kill scores for your team.',
     scoreName: 'kills',
+    economy: false,
     limitLabel: 'Kills to win',
     defaultLimit: 25,
     maxLimit: 999,
@@ -66,6 +82,7 @@ export const GAME_MODES: readonly GameModeDef[] = [
     name: 'King of the Hill',
     summary: 'Have more players on the hill than any other team to capture it. Hold it to score.',
     scoreName: 'points',
+    economy: false,
     limitLabel: 'Points to win',
     defaultLimit: 100,
     maxLimit: 999,
@@ -75,11 +92,28 @@ export const GAME_MODES: readonly GameModeDef[] = [
     name: 'Capture the Flag',
     summary: 'Bring the enemy flag to your base while your own flag is home. Needs exactly two teams.',
     scoreName: 'captures',
+    economy: false,
     limitLabel: 'Captures to win',
     defaultLimit: 3,
     maxLimit: 99,
   },
+  {
+    id: 'core',
+    name: 'Core Destruction',
+    summary: 'Break the enemy core, then take down every player left on that team: with their core gone they cannot respawn. Needs exactly two teams.',
+    scoreName: 'cores',
+    economy: true,
+    limitLabel: 'No limit',
+    defaultLimit: 0,
+    maxLimit: 0,
+  },
 ]
+
+// The mode a new lobby starts on, given the map it starts on: the default mode if the map can be played in it, and the fallback if not (or if
+// there is no map).
+export function startingMode(map: { name?: string; hill: boolean; flags: boolean; cores: boolean } | undefined): GameMode {
+  return map && modeSupportProblem(DEFAULT_GAME_MODE, map) === undefined ? DEFAULT_GAME_MODE : FALLBACK_GAME_MODE
+}
 
 export function isGameMode(value: unknown): value is GameMode {
   return GAME_MODES.some((mode) => mode.id === value)
@@ -87,6 +121,12 @@ export function isGameMode(value: unknown): value is GameMode {
 
 export function getGameMode(id: GameMode): GameModeDef {
   return GAME_MODES.find((mode) => mode.id === id) ?? GAME_MODES[0]
+}
+
+// Whether a game of this mode has an economy: experience and levels, gold and the shop, and shards. The simulator pays and sells by it, and the page
+// shows the level, the stats and the items only when it is so.
+export function modeHasEconomy(id: GameMode): boolean {
+  return getGameMode(id).economy
 }
 
 // ---------------------------------------------------------------------------- the lobby's rules
@@ -179,11 +219,12 @@ export function modeRules(rules: LobbyRules, mode: GameMode): ModeRules {
 
 // ---------------------------------------------------------------------------- starting a game
 
-// What a map has for the modes besides spawn points: a hill, and a base for the flag of each slot of
-// spawn points (index 0 is slot 1).
+// What a map has for the modes besides spawn points: a hill, a base for the flag of each slot of
+// spawn points (index 0 is slot 1), and where the core of each slot stands.
 export type MapObjectives = {
   hill?: HillArea
   flags: readonly (Vector2 | undefined)[]
+  cores?: readonly (Vector2 | undefined)[]
 }
 
 export const NO_OBJECTIVES: MapObjectives = { flags: [] }
@@ -194,19 +235,26 @@ export function teamCountProblem(mode: GameMode, teamCount: number): string | un
   if (mode === 'ctf' && teamCount !== 2) {
     return `Capture the Flag needs exactly 2 teams, and there ${teamCount === 1 ? 'is 1' : `are ${teamCount}`}.`
   }
+  if (mode === 'core' && teamCount !== 2) {
+    return `Core Destruction needs exactly 2 teams, and there ${teamCount === 1 ? 'is 1' : `are ${teamCount}`}.`
+  }
   return undefined
 }
 
-// Why a mode cannot be played on a map, if it cannot: king of the hill needs a hill, and capture the flag a
-// flag for each of the first two teams. `name` is what the map is called, where it is known.
+// Why a mode cannot be played on a map, if it cannot: king of the hill needs a hill, capture the flag a
+// flag for each of the first two teams, and core destruction a core for each of the first two teams. `name` is what the map is
+// called, where it is known.
 export function modeSupportProblem(
   mode: GameMode,
-  map: { name?: string; hill: boolean; flags: boolean },
+  map: { name?: string; hill: boolean; flags: boolean; cores: boolean },
 ): string | undefined {
   const has = map.name ? `${map.name} has` : 'This map has'
   if (mode === 'koth' && !map.hill) return `${has} no hill, so King of the Hill cannot be played on it.`
   if (mode === 'ctf' && !map.flags) {
     return `${has} no flag for each of the first two teams, so Capture the Flag cannot be played on it.`
+  }
+  if (mode === 'core' && !map.cores) {
+    return `${has} no core for each of the first two teams, so Core Destruction cannot be played on it.`
   }
   return undefined
 }
@@ -214,7 +262,11 @@ export function modeSupportProblem(
 // Why a game of this mode cannot start with these teams (the team of each player) on a map with these
 // objects, if it cannot.
 export function modeStartProblem(mode: GameMode, teams: readonly number[], map: MapObjectives): string | undefined {
-  return modeSupportProblem(mode, { hill: map.hill !== undefined, flags: Boolean(map.flags[0] && map.flags[1]) })
+  return modeSupportProblem(mode, {
+    hill: map.hill !== undefined,
+    flags: Boolean(map.flags[0] && map.flags[1]),
+    cores: Boolean(map.cores?.[0] && map.cores?.[1]),
+  })
     ?? teamCountProblem(mode, new Set(teams).size)
 }
 
@@ -249,6 +301,7 @@ export function createModeSetup(
       ...withRules,
     }
   }
+  if (mode === 'core') return { kind: 'core', teams: rankTeams(teams), ...withRules }
   return { kind: 'deathmatch', ...withRules }
 }
 
@@ -263,12 +316,13 @@ export function initialObjective(setup: ModeSetup): ObjectiveState | undefined {
       scores: {},
     }
   }
+  if (setup.kind === 'core') return { kind: 'core', broken: [], eliminated: [], scores: {} }
   return undefined
 }
 
 // ---------------------------------------------------------------------------- the tick
 
-// Who the objective looks at on a tick: every character, where the tick left it.
+// Who the objective looks at on a tick: every character that is a player, where the tick left it.
 export type ObjectiveUnit = {
   id: number
   team: number
@@ -276,6 +330,9 @@ export type ObjectiveUnit = {
   radius: number
   alive: boolean
 }
+
+// The cores of a game, as a tick left them: whose they are, and whether they are standing.
+export type ObjectiveCore = { team: number; standing: boolean }
 
 export function hillContains(hill: HillArea, point: Vector2): boolean {
   if (!hill.ellipse) {
@@ -363,7 +420,11 @@ export function advanceObjective(
   units: readonly ObjectiveUnit[],
   tick: number,
   killerTeams: readonly number[] = [],
+  cores: readonly ObjectiveCore[] = [],
 ): ObjectiveState | undefined {
+  if (setup.kind === 'core') {
+    return stepCores(state?.kind === 'core' ? state : initialObjective(setup) as CoreState, setup.teams, units, cores)
+  }
   if (setup.kind === 'koth') {
     return stepHill(
       state?.kind === 'koth' ? state : initialObjective(setup) as Extract<ObjectiveState, { kind: 'koth' }>,
@@ -400,6 +461,13 @@ export function leadingTeam(scores: Record<string, number>): number | undefined 
 // The team that has won: the one ahead of the rest once a team has reached the score limit. Two teams that
 // reach it together, level, have not decided it: the game goes on until one is ahead. With no limit no one wins.
 export function winningTeam(setup: ModeSetup, objective: ObjectiveState | undefined): number | undefined {
+  // Core destruction is won by being the last team standing, with no score to reach: when every team but one is out. (If the last two
+  // go out on the same tick, no one has won, and the game goes on with no one in it until the leader ends it.)
+  if (setup.kind === 'core') {
+    if (objective?.kind !== 'core') return undefined
+    const standing = setup.teams.filter((team) => !objective.eliminated.includes(team))
+    return standing.length === 1 ? standing[0] : undefined
+  }
   const limit = setup.scoreLimit
   if (limit === undefined) return undefined
   const scores = objectiveScores(objective)
@@ -409,6 +477,28 @@ export function winningTeam(setup: ModeSetup, objective: ObjectiveState | undefi
 
 type HillState = Extract<ObjectiveState, { kind: 'koth' }>
 type FlagsState = Extract<ObjectiveState, { kind: 'ctf' }>
+type CoreState = Extract<ObjectiveState, { kind: 'core' }>
+
+// A team's core is broken when it is not standing, and stays broken: a core that is down never comes back. A team is eliminated when its core
+// is broken and none of its players is alive, since with its core down they cannot respawn. A team's score is how many cores of the others
+// are broken.
+function stepCores(
+  state: CoreState,
+  teams: readonly number[],
+  units: readonly ObjectiveUnit[],
+  cores: readonly ObjectiveCore[],
+): CoreState {
+  const broken = new Set(state.broken)
+  for (const core of cores) if (!core.standing) broken.add(core.team)
+  const eliminated = new Set(state.eliminated)
+  for (const team of teams) {
+    if (broken.has(team) && !units.some((unit) => unit.team === team && unit.alive)) eliminated.add(team)
+  }
+  const ascending = (set: ReadonlySet<number>): number[] => [...set].sort((left, right) => left - right)
+  const scores: Record<string, number> = {}
+  for (const team of teams) scores[String(team)] = [...broken].filter((other) => other !== team && teams.includes(other)).length
+  return { kind: 'core', broken: ascending(broken), eliminated: ascending(eliminated), scores }
+}
 
 // The bar moves a tick's worth a tick, the way `hillMovement` says: up for the team that leads on the hill, down
 // when the bar is another team's and it is outnumbered, and it stays as it is with no one on the hill or the

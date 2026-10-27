@@ -7,8 +7,8 @@ import {
   type Vector2,
 } from '../../../../packages/shared/src/index.ts'
 
-// What the game mode shows over the screen, as plain data: the score of each team, and for the hill and
-// the flags how they stand. `ClientGameState.getModeView` makes it from the simulation, the HUD
+// What the game mode shows over the screen, as plain data: the score of each team, and for the hill, the
+// flags and the cores how they stand. `ClientGameState.getModeView` makes it from the simulation, the HUD
 // (mode-hud-view.ts) and the world (render/objective-layer.ts) draw it, and the words are all made here.
 
 export type TeamScore = { team: number; score: number }
@@ -21,6 +21,17 @@ export type FlagView = {
   home: Vector2
   position: Vector2
   carrier?: { id: number; name: string; team: number }
+}
+
+// How a team's core stands in Core Destruction: protected (its turrets are still up, so it takes no damage), open (it can be hurt), broken
+// (it is down, so the team cannot respawn, and its players are all it has), or eliminated (broken, and no player left alive).
+export type CoreView = {
+  team: number
+  hp: number
+  maxHp: number
+  status: 'protected' | 'open' | 'broken' | 'eliminated'
+  // How many players of the team are alive.
+  playersAlive: number
 }
 
 export type HillView = {
@@ -44,6 +55,7 @@ export type ModeView =
   | ({ kind: 'deathmatch' } & ScoreView)
   | ({ kind: 'koth' } & ScoreView & HillView)
   | ({ kind: 'ctf'; flags: FlagView[] } & ScoreView)
+  | ({ kind: 'core'; cores: CoreView[] } & ScoreView)
 
 // The heading of the mode's panel: its name, and what a team has to reach to win when the game has a limit.
 export function modeTitle(view: { kind: GameMode; limit?: number }): string {
@@ -95,6 +107,33 @@ export function hillReadout(view: HillView): { fraction: number; team?: number; 
     note = view.leader !== undefined ? ` · ${teamName(view.leader)} taking it` : ' · contested, draining'
   } else if (view.contested) note = ' · contested'
   return { fraction: view.fraction, team, text: `${teamName(team)} ${percent}${note}` }
+}
+
+// What a team's core row says: how full its health is (from 0 to 1) and, in words, how it stands.
+export function coreReadout(core: CoreView): { fraction: number; text: string } {
+  const fraction = core.maxHp > 0 ? Math.max(0, Math.min(1, core.hp / core.maxHp)) : 0
+  const players = `${core.playersAlive} player${core.playersAlive === 1 ? '' : 's'} left`
+  switch (core.status) {
+    case 'eliminated':
+      return { fraction: 0, text: 'Eliminated' }
+    case 'broken':
+      return { fraction: 0, text: `Core broken · ${players}` }
+    case 'protected':
+      return { fraction, text: 'Protected by turrets' }
+    default:
+      return { fraction, text: `${Math.ceil(core.hp)} / ${core.maxHp}` }
+  }
+}
+
+// One line to tell the local player where the game stands, if there is anything to say: their own core is down, so they cannot
+// respawn, or the enemy's is, so the players of that team are what is left to take down.
+export function coreHint(cores: readonly CoreView[], local: { id: number; team: number } | undefined): string | undefined {
+  if (!local) return undefined
+  const own = cores.find((core) => core.team === local.team)
+  if (own?.status === 'broken') return 'Your core is down: you cannot respawn. Keep your team alive.'
+  const enemy = cores.find((core) => core.team !== local.team)
+  if (enemy?.status === 'broken') return `${teamName(enemy.team)}'s core is down. Take down every one of their players to win.`
+  return undefined
 }
 
 export function flagReadout(flag: FlagView): string {

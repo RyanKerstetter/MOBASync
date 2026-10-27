@@ -13,11 +13,22 @@ The client's game code is split by what it does:
 - `game.ts` runs one game: the connection to the server, the player's input, and each frame. It works out
   what to show from `ClientGameState` and hands it on; it draws nothing itself.
 - `render/` draws the world with PixiJS and knows nothing of the network or the simulation.
-  `WorldRenderer` stacks its layers in a fixed order (the map, the hill and flags, ground effects, indicators,
-  champions, carried flags, shots, damage numbers, debug), and each frame it is given a plain `WorldFrame` to draw. The ground is a
+  `WorldRenderer` stacks its layers in a fixed order (the map, the hill and flags, ground effects, the turrets' ranges, indicators,
+  the champions and the walls together, carried flags, shots, the darkness of what the team cannot see, the champions' names
+  and bars, damage numbers, debug), and each frame it is given a plain
+  `WorldFrame` to draw. The ground is a
   `MapView` handed to it: `createGameMap` gives it the Tiled map, or the plain arena floor when there
   is none (see "Maps from Tiled"). The pure layout code the layers draw from (`health-bar.ts`, `stack-pips.ts`,
-  `attack-marker.ts`, `status-labels.ts`, `hitboxes.ts`) is beside them.
+  `attack-marker.ts`, `status-labels.ts`, `hitboxes.ts`, `depth.ts`) is beside them.
+  **Walking behind walls** is a depth sort, not a depth buffer (PixiJS draws back to front and has none for sprites):
+  everything that can be in front of or behind a champion has a depth, which is how far down the map it stands
+  (`depth.ts`), and the champions' bodies and the map's wall art (`MapView.sorted`) are attached to one `RenderLayer`
+  that draws them from the smallest depth up. A champion's depth is where it stands; a wall's is its base, the bottom edge of
+  its collision rectangle, which is where it meets the ground and where a champion stops walking up to it from the south, and
+  all of that wall's art has it, however many pieces it is (the wall itself, the bits that stick off it). So a champion whose
+  middle is above a wall's base is behind it and the wall is drawn over it wherever they overlap, and one below is in front of it.
+  The layer only decides when they are drawn: they stay in the scene where they were, so transforms, the camera and clean-up
+  are as they were. Names and bars are in a layer of their own over it, so one is never hidden by a wall.
 - `ui/` is what is drawn over the canvas as ordinary page elements: the HUD, the game mode's scores, hill bar
   and flags, the scoreboard and killfeed, and the diagnostics overlay, each a `*-view.ts` over its pure logic.
 
@@ -53,8 +64,8 @@ two even teams, and renaming keeps your team. Players on the same team are teamm
 else is an enemy, so if everyone picks a different team, a full lobby is an eight-way free for all.
 Teams can be changed only in the lobby, not once champion select has opened. A team holds at most
 four players (`GAME_MAX_TEAM_SIZE`): the server turns a fifth away, and the button of a full team is off.
-The leader also picks the game mode from the **Game mode** drop-down (team deathmatch, king of the hill or
-capture the flag, see "Game modes") and sets the **Game rules** under it: how long a champion stays dead, the
+The leader also picks the game mode from the **Game mode** drop-down (team deathmatch, king of the hill,
+capture the flag or core destruction, see "Game modes") and sets the **Game rules** under it: how long a champion stays dead, the
 score to win at (the box for the mode that is picked, and only that one), and for king of the hill how long
 the hill takes to capture. Everyone sees what is set, and it is fixed once champion select opens.
 The lobby leader starts the game for the whole lobby, which first opens champion
@@ -149,7 +160,7 @@ map draws the plain arena floor instead (of the map's size) and says why in the 
 the one the server played on says so in the console too. The server finds a new map within a second, but the
 browser's copy of the map files is bundled into the page when it loads, so a map added later needs a reload under
 `npm run dev`, and a rebuild of the client (`npm run build:client`) for a hosted build, before a page can draw it. The shapes of the map's objects are outlined in the debug view (P). `GAME_MAPS_DIR` makes the server
-read its maps from another folder than `res/maps`. Nothing else assumes a map: `DEFAULT_MAP_ID` (`ffa_arena`) is
+read its maps from another folder than `res/maps`. Nothing else assumes a map: `DEFAULT_MAP_ID` (`competetive`) is
 only the map a new lobby starts on, if the server has it (or else the first that can be played on).
 
 ### Choosing a map
@@ -165,8 +176,8 @@ A map that cannot be played on is listed with what is wrong, but cannot be picke
   *Map → Map Properties*). With no title the map is named after its file (`duel_arena` is "Duel Arena").
 - **The leader picks the map** (`POST /api/lobbies/:code/map`, leader only, while the lobby is idle), and the lobby
   says what it is: its size, which team setups it takes, and which modes it has what they need for.
-- **Only modes the map supports can be picked.** King of the hill needs a hill and capture the flag needs a flag for
-  each of the first two teams (`modeSupportProblem`). The others are in the mode list but greyed, with "(not on
+- **Only modes the map supports can be picked.** King of the hill needs a hill, capture the flag needs a flag for
+  each of the first two teams, and core destruction needs a core for each of the first two (`modeSupportProblem`). The others are in the mode list but greyed, with "(not on
   this map)". Picking a map that lacks the selected mode puts the lobby back on team deathmatch and says so; the
   server turns a request for an unsupported mode away, with the reason.
 - **The teams have to fit the map** (`teamSetupProblem`). The biggest team starts at the map's first slot of spawn
@@ -190,6 +201,29 @@ A map that cannot be played on is listed with what is wrong, but cannot be picke
   group layers, with their offsets, opacity and visibility, and the map's background colour. A tile
   larger than the grid sits on the bottom left of its cell, as in Tiled. Not drawn yet: tile
   animations, tints, parallax, and isometric or hexagonal maps.
+- **Walls in front of and behind champions:** a tile layer is drawn under the champions, unless it is depth sorted: then it is
+  drawn in pieces that are each in front of the champions whose middle is below their sort line and behind those above it, so
+  a champion can walk behind a wall and in front of it (see "Walking behind walls" above). A layer is depth sorted if its
+  custom property `y-sort` (a boolean) is set, and where it is not set, if its name starts with "wall" (so a layer called
+  "Wall Layer" is, with nothing set in Tiled). Set `y-sort` on any other layer that stands up out of the ground (a layer of
+  tree tops, say), or to false on a "wall" layer that is only drawn on the ground.
+  **The sort line of a wall is the bottom edge of its `wall` rectangle**, whatever tiles it is drawn from or where the
+  tiles' rows end, so the rectangles are how you say where each wall stands. A wall's own art is the tiles that overlap its
+  rectangle in height and are over it, or up to a tile to either side of it (the bits that stick out of its ends), which takes in
+  the lip of its face that hangs a little below the rectangle where an edge is not on a line of the tiles. A tile whose top is at
+  or below a rectangle's base is in front of that wall and not part of it. **The bits that stick off a wall without being over its
+  rectangle (spikes on top of it) are attached by touching**: a tile that touches (by an edge or a corner) the wall's art has the
+  wall's sort line too, so the wall and the bits are over a champion behind it together, however far the bits are from the
+  rectangle. How many tiles out that goes is `WALL_ATTACH_TILES` (1), or the layer's custom property `y-sort-attach` (a whole
+  number): 0 is the wall's own art alone, and the more there is the further the art of a wall reaches. It is a limit because depth
+  is all or nothing where things overlap on screen and has no sense of distance, so a bit that sticks up two tiles covers a champion
+  two tiles behind the wall. Where a tile could be two walls' it is the one whose columns it is over before one it is only beside
+  (so the lip of a wall's face next to a wall that hangs below it stays the first wall's, and does not take the lower base and
+  draw over a champion standing in front of it), then the one whose height its middle is in, then the one with the highest base on
+  the page, and a tile that no wall has by either is sorted by the bottom edge of its own row (art with no collision under it, say).
+  A tile is drawn whole and has one depth, so one that spans the seam between two walls side by side (the competitive map has two,
+  where a wall's south face meets the face of a taller one) takes one of them, and can cover a champion standing in that corner.
+  Tiles that are objects are not sorted yet; they are drawn under the champions.
 - **Size:** a pixel of the map's art is drawn `GAME_ART_SCALE` (3) world units across, the same as the
   champions' sprites, or whatever the map's own custom property `worldScale` (a float) says.
 - **The arena:** one rectangle object of class `arena` covers the ground champions walk on. Its top left
@@ -226,10 +260,37 @@ A map that cannot be played on is listed with what is wrong, but cannot be picke
   and capture the flag, which is for two teams, uses the flags of slots 1 and 2. Like a spawn point, a flag
   needs room for a champion clear of the walls and the arena's edge, and a way to it from the spawn points.
   A map with fewer than two flags is fine, but capture the flag cannot be started on it.
-- **Monsters:** point objects of class `monster`, each with a text property `monster` naming one of the game's
-  monsters (`wolf`, see "Monsters"). The monster is in the game from the start, at its point, which is its home.
-  A point needs room for that monster's size clear of the walls and the arena's edge, and an unknown name is
-  refused with the list of the known ones. A map with none has none, and every mode has the map's monsters.
+- **Cores (core destruction):** point objects of class `core`, each with a whole-number `team-name` (1 to 8, once each): the slot of
+  spawn points whose base it is the heart of, as for a flag. Core destruction is for two teams, so it uses the cores of slots 1
+  and 2, and a map with both can be played in it; a map with fewer is fine, but the mode cannot be started on it. A core is solid and needs
+  room for its size (`CORE.radius`, `cores.ts`) clear of the walls and the arena's edge, and a way to it from the spawn points. The
+  core is in a game of that mode only: in the others its point is not used. Put it inside the base the turrets guard, and clear of the
+  spawn points and the turrets (below).
+- **Room for turrets and cores.** They are solid, and a champion that starts inside one would have to be shoved out of it, so the map is
+  refused, with every one that is wrong, if a **spawn point** is nearer a turret or a core than its size and the widest champion's
+  (`GAME_MAX_CHAMPION_RADIUS`, 24) put together, or if **a turret or a core overlaps another** of them. The messages say how far apart
+  they are and how far they need to be, in the map's own pixels (`spawn-1-1 is too close to core-1: they are 25.6 map pixels apart and
+  need 28`). A point too close to a wall or the arena's edge says the nearest place that clears the walls and the edge (`about (60, -288)
+  in the map's own pixels`), which may still be too near a spawn point or a turret: that is checked as well. A core is 20 map pixels across from its middle (`CORE.radius`, 60 world units at the default scale of 3), so it cannot sit
+  against the arena's edge: its middle has to be at least 20 pixels in.
+- **Shops:** rectangles of class `shop`, each with a whole-number `team-name` (1 to 8): the slot of spawn points whose team shops there, as for a flag or a
+  core. A champion can buy and sell items only while its middle is in a shop of its team (see "Items and the shop"), so put one over each base, with the
+  spawn points in it. They must be plain rectangles, not turned, and at least partly in the arena. **A map with any shop needs one for every slot that has
+  spawn points** (a second for the same team is fine): `Slot 2 has spawn points but no shop, so its team could never buy: give a shop the team-name 2.` A
+  map with none is fine, and is shopped in from anywhere.
+- **Monsters:** point objects of class `monster-spawn`, each with a text property `monster-type` naming one of the
+  game's monsters (`slime`, `golem` or `wolf`, see "Monsters"; `monester-type`, as the competitive map spells it, is read
+  too). The monster is in the game from the start, at its point, which is its home. A point needs room for that
+  monster's size clear of the walls and the arena's edge, and one with no `monster-type` is refused. A point naming
+  a monster the game does not have yet is left out, and the server logs a warning saying which, when a game starts
+  on the map, so a map can hold places for monsters that are still to come. A map with none has none, and every
+  mode has the map's monsters.
+- **Turrets:** point objects of class `turret`, each with a whole-number `team-name` (1 to 8) and a whole-number
+  `turret-tier` (see "Turrets"). Like a flag, the `team-name` is the slot of spawn points the turret belongs to: the
+  biggest team in a game is at slot 1, so the turrets of slot 1 are its, and every other team is their enemy. A
+  game with no team at a slot has no turrets for it. A point needs room for its tier's size clear of the walls and
+  the arena's edge, and one with no `team-name` or no `turret-tier` is refused. A point for a tier the game does not
+  have yet is left out, with a warning, like a monster's. A map with none has none, and every mode has the map's turrets.
 
 The Tiled file is read by `parseTiledMap` in `packages/shared/src/tiled.ts`, which is only parsing and
 arithmetic, so the server uses it too: `readMapLayout` (`map-layout.ts`) takes the arena, the walls, the
@@ -254,7 +315,10 @@ things:
   wall. It is how a click, a respawn, a blink and the end of a dash are made to land somewhere a champion
   can be, and `keepOutOfWalls` is the push alone. A circle is pushed out of a rectangle by the shortest way,
   along the line from the rectangle's nearest point, so it goes round a corner on a curve, and one whose
-  centre is inside leaves by the nearest side that is still inside the arena. Every tick a walker is pushed
+  centre is inside leaves by the nearest side that is still inside the arena and clear of the other walls. Where
+  another wall is against that side (a narrow wall hanging from a wide one's south face, or two that meet), the
+  point straight out can be inside it, so it leaves by the nearest point on the free part of any wall's edge
+  (`nearestFree`, `exits.ts`): a step along the face, and not round to the far side of the wall. Every tick a walker is pushed
   out of any wall it stepped into, so the part of its step along the wall is kept and it slides; characters
   pushed by others are held out of walls too (the wall wins, and the pair overlap a little). A character
   that is dashing is not, so a dash can be inside a wall on the way, but it lands outside.
@@ -290,6 +354,80 @@ and a target in a wall is moved to the nearest place outside it.
 
 In the debug view (P) the path of the champion you control is drawn as a yellow line through its points.
 
+## Vision
+
+What the local player's team can see. The page darkens what it cannot, so the edge of what is seen is plain, and leaves
+out what stands in the dark: an enemy, a monster or an enemy's shot is drawn only where the team can see it, and a click, Space
+or a unit-aimed ability cannot pick one that is not seen. The map under the darkness is still drawn, dimmed.
+
+**The rules, as they are now.** Vision is the team's: every living champion of the local team sees `GAME_VISION_RANGE` (500
+world units: a little under half the screen's height, so the edge of what is seen shows on every side), and they see together,
+so a teammate's view is yours. So does every standing **turret** of the team, as far as its tier's `visionRange` (see "Turrets"):
+it lights what is round it, behind the walls' shadows like a champion, whether or not a champion of the team is near, and a
+destroyed one sees nothing. Walls block sight (the map's `wall` rectangles, as they block walking). A champion, monster or
+shot is seen if its middle or any of the four furthest points of its body is; the team's own champions and turrets and what
+they put out are always drawn. A team with no champion alive sees the whole game until one is back (its turrets add to what
+a team sees, they do not keep a dead player in the dark), and the debug view (P) shows everything too. The page's address can say `?vision=range` (only how far a champion sees, with no shadows behind walls) or `?vision=off`.
+
+**It is how the page looks, not a rule of the game.** Every client plays the whole game from every order the server sends
+everyone (that is how rollback works), so each already has everyone's position; the server hides nothing, and a changed
+client could show it all. Hiding things from clients would be a different netcode. What the page does with vision is
+`TeamVision` (`team-vision.ts`: whom it looks from, what it leaves out of the frame, what `ClientGameState.setSight` lets a click
+pick) and `FogLayer` (`render/fog-layer.ts`: the darkness).
+
+**How it is worked out is a `VisionSystem`, and one can be swapped for another** (`vision.ts`). A system is given the ground
+(its size and walls: a `Terrain` is one) and `see(viewers)` is asked for what the viewers see together: a `VisionView` that says
+whether a point is seen (`canSee`) and a `VisionMask`, the picture the darkness is drawn from. The same shape as the
+pathfinder. To try another way of working it out:
+
+1. Write a `VisionFactory` (`(ground) => VisionSystem`) and add it to `visionSystems` (`vision-systems.ts`).
+2. Run the page with `?vision=<its name>`; `DEFAULT_VISION_SYSTEM` is what the page uses when it says nothing.
+3. Run `visionContract('name', factory, { blocksSight })` (`tests/vision-contract.ts`) on it: what any system has to do, and the
+   tests of walls if it blocks sight on them.
+
+A mask is a grid of cells (`kind: 'cells'`, each `cell` world units across, a 1 for seen) that the page draws stretched and
+smoothed, so any system can draw its view into cells as fine as it likes. Another kind of picture (polygons) is another member
+of the `VisionMask` type and a branch in `FogLayer`, which the compiler asks for. A system with its own `revision` counter
+(it goes up when the mask changes) spares the page an upload on every frame.
+
+**The default is symmetric shadowcasting on a fine grid** (`shadowcast-vision.ts`). From each viewer's cell the grid is
+swept outward a row at a time in four quadrants, with a window of slopes that is still open: a wall cuts the window, so what is
+behind it is never reached. A cell is seen if its middle is in the window, which makes it symmetric (if A sees B, B sees A: a
+test checks it on the competitive map). The slopes are fractions of whole numbers and are compared by multiplying across, so there
+is no trig and no rounding, and every machine gets the same answer (a system like that could be used by rules one day).
+
+The grid is 8 pixels of the map's art (`SHADOWCAST_CELL`, 24 world units), finer than the 16 pixel tiles because the walls sit on
+8 pixel lines (the competitive map is laid out on them, from the arena's corner, so the grid starts at the world's origin and its
+lines are the map's). A wall is the cells whose middle is inside its rectangle, so each edge is rounded to the nearest line of the
+grid: an edge that is on a line is exact (83 of the competitive map's 104 are, and the rest are 1 or 2 pixels off, bar two at 4),
+and one that is not is up to 12 units off, which is where a map is not laid out on the grid (`ffa_arena`'s four walls are 7 units
+off on average). A sweep is a few hundred cells, so a team of eight moving every frame costs about a tenth of a millisecond,
+and a viewer that stays in the same cells costs nothing (the mask has the same `revision`). A test checks it against a straight line drawn between 8,000 random pairs of points, for every pair the line
+clearly clears or clearly goes through a wall. A viewer a little inside a wall (a dash can leave one there) sees from the nearest
+cell that is not. `?vision=range` is the same code with the walls left out.
+
+**The darkness is smoothed when it is drawn, not when it is worked out** (`FogPicture`, `render/fog.ts`). Drawn as it is, the edge of
+what is seen goes in steps a cell wide, and on a cell of 24 units a circle looks like a staircase. So the mask is blurred a
+little (each cell a quarter of each neighbour and half of itself, along and down, twice), made two pixels to the cell, and
+sharpened again between 0.3 and 0.7 of the blurred value: the edge is where that is a half, a smooth curve through the middle of
+the steps, about two thirds of a cell from nearly dark to nearly clear. On a circle of 20 cells the edge is 0.35 of a cell out of
+true at the most, where the steps alone are 0.8 out, and it is in the same place on average, so the picture shows as much as the mask
+says. It costs about half a millisecond when a viewer crosses a cell, and nothing otherwise. Two things it does not do: a sliver of
+light one cell wide is dimmed almost to nothing (two cells show, three are clear), and the edge still moves a cell at a time as a
+viewer crosses cells, though it is no longer jagged. What a click can pick, and what is drawn, go by the mask itself and not the
+smoothed picture. A finer grid would be smoother still, at about three times the cost for half the cell
+(`createShadowcastVision(ground, { cell })`), and a system that works out polygons could be smooth to start with.
+
+**What is out of sight is kept, not drawn.** A character the team cannot see is left out of the frame (`WorldFrame.characters`) but
+handed on as `unseen`, and its body is kept and updated, hidden: so what it is doing carries on out of sight, and a monster that died
+out of sight (or while you were away) is already gone, or lying down if it died just now, when you see it, and does not die again. (A body taken away when it went
+into the dark would be made again from its first frame when it came back, which is how a corpse used to melt a second time.)
+
+**Not here yet**: brush and other tile-painted hiding places (they are cells that block, so the grid is ready for them),
+wards as places that see, a range for each champion (`SightViewer` already has one each; the page gives every
+champion `GAME_VISION_RANGE`, and every turret its tier's), monsters that notice only what they can see, rules that turn away an order aimed at what is not seen,
+and things fading in and out at the edge of the light instead of appearing.
+
 ## Teams
 
 A character's `team` is a number, held on its `SimCharacter` and sent in the snapshot. Two
@@ -313,13 +451,26 @@ the team's colour over each group.
 
 ## Game modes
 
+A new lobby starts on the default map (`competetive`) in the default mode, **Core Destruction** (`DEFAULT_GAME_MODE`), when that map can be
+played in it, which `startingMode` works out; if not (a map with no cores, or none that can be played on) it starts in team deathmatch. Team
+deathmatch is also `FALLBACK_GAME_MODE`: what a lobby is put back on when its leader picks a map that cannot be played in the mode it had, and
+what a game is when it is given no mode. (Core Destruction needs exactly two teams, so a lobby of one player says so and cannot start until
+there are two teams or another mode is picked.)
+
 The lobby leader picks the mode (`GAME_MODES` in `packages/shared/src/modes.ts`) and the server keeps it on
 the lobby (`POST /api/lobbies/:code/mode`, leader only, while the lobby is idle). Starting a game checks that the
 mode can be played (`modeStartProblem`): the server turns a start away with the reason, and the lobby says
 the same so the leader knows before pressing Start (capture the flag shows what is wrong under the
 drop-down, and Start is off until it is put right). Every mode keeps the kill counts and the leaderboard.
 
-- **Team Deathmatch** (the default): a team's score is the kills its players have made. The kills are kept in
+**Only Core Destruction has an economy** (`GameModeDef.economy`, `modeHasEconomy`): experience and levels, gold and the shop, and shards (see
+"Resources and levels"). In team deathmatch, king of the hill and capture the flag **a kill is a kill on the scoreboard and nothing else**: it pays
+no experience, gold or shards (and nor does anything else, a monster included), nobody starts with gold, every champion is level 1 all game, and an
+order to buy or sell is nothing. The simulator decides it (`Simulator.hasEconomy`, from the mode it was given), so every peer agrees, and the page
+leaves out the two side panels of the HUD (the level and stats, and the items and shops) and does not open the shop. To give another mode an economy, set
+`economy: true` on its entry in `GAME_MODES`.
+
+- **Team Deathmatch** (the mode every map can be played in): a team's score is the kills its players have made. The kills are kept in
   the frame (`ObjectiveState`, scored on the tick of the kill, to the killer's team), not added up from the
   characters, so a team keeps its kills when a player goes back to the lobby.
 - **King of the Hill:** the team with more living players on the hill than any other team fills the hill's bar
@@ -343,13 +494,21 @@ drop-down, and Start is off until it is put right). Every mode keeps the kill co
   where it was, and it stays there until a living champion of the flag's own team walks over it, which sends
   it back to its base, or an enemy picks it up again. A flag does not go home by itself, and only a champion of
   its own team returns it.
+- **Core Destruction:** for exactly two teams. Each team has a **core** at its base (see "Cores", below), on the map's core of the slot the
+  team starts at, guarded by its turrets. Break the enemy core, and that team **cannot respawn**: a player who dies stays dead, and
+  one who was already waiting to come back does not. Take down every player left on it and it is out, and the last team that is not
+  out wins. There is no score limit, and no box for one in the lobby: the game ends when a team is. A team is *out* when its core is
+  broken and none of its players is alive; a team whose core stands is never out, however many of its players are dead, since they
+  come back. (Should the last players of the two teams go down on the same tick, no one has won and the game goes on with no one in
+  it until the leader ends it.) The score each team shows is how many cores of the other team it has broken, 1 or 0.
 
-**Winning.** The leader sets the score a team wins at for each mode (`Kills to win`, `Points to win`, `Captures to win`;
-defaults 25, 100 and 3; 0 is no limit, and a game with none goes on until the leader ends it). The server checks
+**Winning.** The leader sets the score a team wins at for each mode but core destruction (`Kills to win`, `Points to win`,
+`Captures to win`; defaults 25, 100 and 3; 0 is no limit, and a game with none goes on until the leader ends it). The server checks
 the score as the commit tick has it, which no late order can still change, so no one is told of a win that is then
 taken back (`winningTeam`, in `ServerGameState.advanceTick`). The team that has reached the limit and is ahead of
 every other wins; two teams that reach it level play on until one is ahead. The score each team is playing to is in
-the title of the mode's panel on screen (`TEAM DEATHMATCH · FIRST TO 25 KILLS`).
+the title of the mode's panel on screen (`TEAM DEATHMATCH · FIRST TO 25 KILLS`). Core destruction is won by being the last team out
+of the game (`winningTeam` reads who is out from the objective), checked at the commit tick in the same way.
 
 **Respawn time** is a rule too (1 to 60 seconds, three by default). It is part of the setup the snapshot carries
 (`respawnTicks`), so every peer brings a champion back on the same tick, and a champion that is dead sees
@@ -361,8 +520,9 @@ A game is `running` until a team wins or the leader ends it, and then `finished`
 sends everyone still in it the result (`game:ended`, a `GameResult`: how it ended, each team's score, each player's
 kills, marking those who had left). Their game stops taking orders and a results screen
 (`ui/results-view.ts`, from `ui/results.ts`) shows **Victory** or **Defeat** (or the winner's name to a player on no
-team, or "Game ended" when the leader ended it) with the scores and a **Return to lobby** button. The result is also
-kept on the lobby (`lastResult`) and shown to everyone in it until the next game starts.
+team) with the scores and a **Return to lobby** button. The result is also kept on the lobby (`lastResult`) and shown
+to everyone in it until the next game starts. A game the leader ended (`reason: 'ended'`) has no results screen: see
+**End game** below.
 
 Going back to the lobby does not leave it. **Escape → Leave game** (or **Return to lobby** on the results) takes the
 player back to the lobby page (`POST /api/lobbies/:code/leave-game`) and the game goes on without them: their
@@ -371,14 +531,18 @@ still `In game` and how many are playing. A game that has begun and has no one l
 was running or over, and the lobby can start another. A player who left cannot rejoin that game.
 
 The leader's **End game** button in the lobby (`POST /api/lobbies/:code/end`) ends a running game for everyone, with the
-score as it stands (the team ahead wins, if one is); on a game that is already over it reads **Close game** and shuts
-it down, sending anyone still looking at the results back to the lobby. Players who close their tab or leave the
-lobby leave the game the same way.
+score as it stands (the team ahead wins, if one is, and that is kept on the lobby as the last result). Its point is to
+get everyone back in the lobby so another game can start, so the server shuts the game down at once (it never sits in
+`finished`) and sends `game:ended` with `reason: 'ended'`, which makes each player's client skip the results screen and
+go straight back to the lobby ("The leader ended the game."). On a game that is already over (a team reached the limit)
+the button reads **Close game** and shuts it down, sending anyone still looking at the results back to the lobby.
+Players who close their tab or leave the lobby leave the game the same way.
 
 How a game of a mode is played out is `advanceObjective` (`modes.ts`), plain whole-number arithmetic on the
-hill's bar and the flags, run by the simulator at the end of every tick it computes (so after the tick's
+hill's bar, the flags and the cores, run by the simulator at the end of every tick it computes (so after the tick's
 deaths and blinks). Its state is in the frame (`GameFrame.objective`: for the hill the team whose bar it is,
-how full it is and the points, for capture the flag where each flag is, who carries it, and the points),
+how full it is and the points, for capture the flag where each flag is, who carries it, and the points, and for core destruction
+which teams' cores are broken and which teams are out),
 so, like everything else in a frame, it is recomputed when a late order changes who was where, it is in
 every snapshot's checkpoint, and every peer agrees on it. What the mode is played on, which cannot change
 during the game (the hill's shape, or each team's flag base), is the snapshot's `mode` (`ModeSetup`), worked out
@@ -391,7 +555,11 @@ What the players see: the top middle of the screen (`ui/mode-hud.ts`, `mode-hud-
 shows each team's score, highest first with the local player's team marked; on the hill, the bar in the colour
 of the team whose it is, with who is capturing, pushing back or holding it (and that it is contested); in
 capture the flag, a card for each flag (at base, dropped, or carried by whom, in the carrier's team colour)
-and a hint to the local player (bring the flag home, your own flag is out, return your dropped flag). On the
+and a hint to the local player (bring the flag home, your own flag is out, return your dropped flag); in core destruction, a row
+for each team's core instead of the scores, with its health in the team's colour and in words how it stands (`Protected by
+turrets`, its health, `Core broken · 2 players left`, `Eliminated`), and a hint to the local player (their own core is down, so
+they cannot respawn; or the enemy's is, so take down every player left). A dead player whose team has lost its core sees
+`Out of the game: your core is down` where the respawn countdown was. On the
 map (`render/objective-layer.ts`) the hill is outlined and filled from its middle by the share captured, with the
 share written over it, flickering while contested and with a heavy outline once it is held; the flags stand on a
 ring at their bases, a dropped flag lies on the ground with a pulsing ring, and a carried flag is held at the
@@ -400,9 +568,25 @@ makes all of it from the frame being drawn.
 
 ## Monsters
 
-Monsters are characters the game plays itself, to be fought: camps to clear, bosses, whatever the game needs. This is
-the scaffolding for them, with one placeholder monster (the `wolf`) to build on; what they are, and how they behave,
-is for the game's content to work out.
+Monsters are characters the game plays itself, to be fought: camps to clear, bosses, whatever the game needs. There
+are three so far:
+
+- **Slime** (`slime`): small, slow and soft, in the pockets beside the competitive map's lane. It notices no one, but
+  goes after whoever hurts it, from however far, bumps them for a little damage once a cooldown, and goes home once
+  it has been drawn too far from where it spawned. It is slower than every champion, so it can be walked away from, and
+  it comes back 30 seconds after it dies.
+- **Golem** (`golem`): a huge, slow lump of rock in a notch of the wall on each side of the competitive map's middle.
+  It has five times a slime's health and four times its damage, but strikes only once every 2.5 seconds, after a
+  windup of 0.7 seconds in which it rises up and leaps, and it comes back a minute after it dies. It chases by the
+  way round the walls, like anyone, so a player who stands where it can be seen but not reached through the wall
+  has it walking the long way round.
+- **Wolf** (`wolf`): a placeholder to build on, which no map has yet.
+
+Everything that makes a monster what it is, to be tuned, is its entry in `monsters.ts`, with times written in
+seconds: how near a player must come for it to chase (`aggroRange`), how far from its spawn it goes before it gives up (`deaggroRange`),
+its damage, how long until it can hit again and its health (the `base` stats: `base: { maxHp: 300, attackDamage: 10, attackSpeed: attackEvery(1.5) }`,
+where `attackEvery(1.5)` is once every 1.5 seconds, to the tick), how near it must be to hit (`attackRange`), the windup before a hit
+lands and its speed.
 
 **What a monster is** (`monsters.ts`). A `Monster` is a champion (health, an attack, abilities, a size: the simulator
 plays it with the same combat code as a player's champion, so everything abilities can do, they can do to a monster and
@@ -414,32 +598,40 @@ on the champion select screen; ids are shared, so a monster cannot have a champi
 
 | Field | Meaning |
 | --- | --- |
-| `aggroRange` | An idle monster goes after the nearest player this near. |
-| `deaggroRange` | A monster after someone gives up on them when they get this far from it (default 1.5 × aggro). Between the two ranges it keeps hold of a target it has, but would not have noticed them. |
-| `leashRange` | How far from home it will go. Past it, it gives up whoever it is after, however close, and walks home. |
+| `aggroRange` | An idle monster goes after the nearest player this near (by the walk, round any walls). 0 notices no one, and only fights back. |
+| `deaggroRange` | How far from its home (where it spawned) it will go: how far it would have to walk to get back to the spawn, round any walls and not the straight line through them, which does not move. While the monster is outside it, its deaggro bar fills, wherever the one it is after is. Default 1.5 × aggro, so a monster with no aggro range has to say. |
+| `deaggroTicks` | How long, in ticks (write `seconds(3)`), the bar takes to fill while the monster is outside its deaggro range (default 3 seconds). When it is full the monster ignores everyone and goes home. |
+| `deaggroRecovery` | How much the bar empties each tick while the monster is back inside the range (default 1: as fast as it filled). |
 | `abilities` | Rules for what it casts in a fight, best first: an ability, `withinRange` of the target (else the ability's own range, else its attack range) and optionally `belowHealth` (a share, for an ability it keeps for when it is hurt). The first rule that can be cast is, when it is free to act. |
 | `respawnTicks` | How long after dying it comes back at home with full health. Without it, it does not. |
 | `resetOnReturn` | Healed to full (and cleansed) when it gets home after giving up. Default yes. |
-| `aggroOnHit` | An idle monster goes after whoever hurts it, from beyond its aggro range, if they are within its deaggro range. Default yes. |
+| `aggroOnHit` | An idle monster goes after whoever hurts it, from however far they hit it, if there is any way to them. Default yes. |
 | `homeRadius` | How near home counts as home (default 30). |
 
 **How it behaves** (`think`, `ai.ts`). A monster is *idle* (at home), *chasing* or *returning*:
 
-- Idle, it notices the nearest living enemy in its aggro range (or whoever hurt it), and starts a chase.
-  If something pushes it off its post it walks back.
+- Idle, it notices the nearest living enemy in its aggro range, or goes after whoever hurt it from wherever they did
+  (if there is a way to them), and starts a chase. If something pushes it off its post it walks back.
 - Chasing, it gives its attack order, and the simulator's attack lock does the rest: it walks up to its target and
   strikes it again and again, round walls. It keeps the same target while it can, uses its abilities when its rules say
-  (an ability with a windup stops the attack lock, so it puts it back afterwards), and gives up when the target dies or
-  passes the deaggro range (taking the nearest player in aggro range instead, if there is one) or when it is past
-  its leash.
-- Returning, it walks home paying no attention to anyone, so it cannot be kited back and forth. At home it is healed
-  and idle again.
+  (an ability with a windup stops the attack lock, so it puts it back afterwards), and gives up at once when the
+  target dies (taking the nearest player in its aggro range instead, if there is one). Its deaggro range is the walk
+  home: while the monster is outside it, its **deaggro bar** fills a tick at a time (and it does while there
+  is no way to its target, which is a chase going nowhere), and while it is inside the bar empties. When the bar is
+  full, it ignores everyone and goes home. There is no other limit on how far it is drawn.
+- Returning, it walks home paying no attention to anyone, so it cannot be kited back and forth. A monster whose bar
+  filled keeps it full on the way. At home it is healed and idle again.
+
+The walk to someone is `Terrain.walkDistance`, the length of the pathfinder's route. Only someone within the aggro range in
+a straight line can be within it on foot, so the pathfinder is asked only about those, and a clear line is answered
+without searching. It is also asked once for the one a monster is after, or hurt by, to see that there is a way to them,
+and, for a monster that is after someone and within its deaggro range of home in a line, for the way back home.
 
 **It runs inside the simulation**, not beside it. `think` is a pure function of what a monster can see (the frame: where
 everyone is, health, cooldowns, what it was doing), and the simulator calls it for every monster on every tick it
 computes, turning what it decides into the same orders a player gives (move, attack, cast, with ids like
 `ai:10:482:0`). So the server and every client work out the same monsters with nothing sent about them (only the `ai`
-state in a monster's frame: its mode and target, which the frame keeps because it cannot be worked out from the rest),
+state in a monster's frame: its mode, target and deaggro bar, which the frame keeps because they cannot be worked out from the rest),
 a late order that changes who was where plays the monsters out again from that tick, and a snapshot carries them. The rule
 that follows: **a monster's choices may depend only on what is in its arguments**. No random numbers, no clock, no
 iteration order that is not by ID. If a monster needs a variety of choices, derive it from the tick and the IDs.
@@ -452,20 +644,332 @@ deathmatch, so killing a monster, or being killed by one, scores for no one: the
 (the killfeed shows "Alice defeated Wolf"), with the victim and killer to look up, for whatever the game decides it is
 worth.
 
-**On the page.** Monsters are named and drawn like champions (a circle in the monsters' colour, until they have sprites,
-which go in `champion-sprites.ts` under the monster's id), can be right-clicked and attacked, and are what Space attacks if
-they are the enemy nearest the cursor. The debug view (P) draws each monster's aggro range (yellow) and deaggro range (orange) round
-it and its leash range (cyan) round its home, which is marked.
+**On the page.** Monsters are named and drawn like champions (from the sprites in `champion-sprites.ts` under the
+monster's id, or as a circle in the monsters' colour without), can be right-clicked and attacked, and are what Space
+attacks if they are the enemy nearest the cursor. The slime's and the golem's art (`res/monsters`) is drawn facing four
+ways, a row of each sheet for each: a set with `directions` (which row is down, up, left and right) turns to the way the
+character is going, and to what it attacks, instead of being flipped. Going corner-wise it keeps the way it faces
+until the other is clearly more of the step (`DIAGONAL_BIAS`), and like the flip it only turns once it has gone
+`TURN_DISTANCE` the new way, so a wobble does not turn it. It idles facing down, toward the player. A figure that
+stands taller than its body is wide (the golem) says how far up it reaches (`top` in its set), and its name and health
+bar are put over that, not over its radius. A monster that is losing interest has a **deaggro bar** under its health bar: amber
+as it fills, red when it is full and the monster is on its way home (`layoutDeaggroBar`). It is not drawn when the bar is
+empty, or for a dead monster. The debug view (P) draws each monster's aggro range (yellow) round it, and its deaggro range
+(orange) round its home, which is marked. The circles are straight-line distances, but both ranges are walks, so past a
+wall a circle shows further than the monster goes: a monster on the far side of a wall can be inside the orange circle
+and still out of its range, if the way back round is long.
 
-**To add one:** write its abilities in `abilities.ts` if it has new ones, add a `Monster` to the list in `monsters.ts`, and
-put a `monster` point with its id on a map. `tests/ai.test.ts` is `think` on its own (aggro, targets, leash, deaggro,
+**When a monster dies** its nameplate (its name, health bar and the bars under it) is gone at once, its death animation plays and it lies where
+it fell, and after `CORPSE_SECONDS` (2, from the tick it died on) its body is gone as well (`layoutCorpse`, `render/corpse.ts`). It is drawn again,
+whole, when it respawns. The page works out how long it has been dead from the tick it died on (`RenderedCharacter.deadForSeconds`), so a monster
+that died out of sight, or before you arrived, is already gone when you look. A player's champion is not a corpse: it stays as a ghost until it
+respawns, and a structure that is destroyed is gone at once (see "Structures"). `tests/corpse.test.ts` covers it.
+
+**To add one:** write its abilities in `abilities.ts` if it has new ones, add a `Monster` to the list in `monsters.ts`, give
+it a sprite set in `champion-sprites.ts`, and put a `monster-spawn` point with its id as the `monster-type` on a map. `tests/ai.test.ts` is `think` on its own (aggro, targets, deaggro,
 abilities, returning), `tests/monsters.test.ts` is monsters in a simulator (fights, going home, respawning, rolling back,
 snapshots), and `defineMonster` in `tests/fixtures.ts` registers one for a test.
 
 **Not here yet**, where a game would want it: monsters in a camp helping each other (a hit on one aggros the others),
-patrols or wandering, target choices other than the nearest, the AI telling players what it is about to do, loot or
-experience for a kill, and a lobby switch for whether a game has monsters. They would go in `think` (new fields in the
+patrols or wandering, target choices other than the nearest, the AI telling players what it is about to do, loot
+beyond the resources a kill pays (below), and a lobby switch for whether a game has monsters. They would go in `think` (new fields in the
 profile and in `AiState`) and in `thinkMonsters` in `simulator.ts`, which gathers what `think` sees.
+
+### Monsters level up
+
+In a game with an economy (Core Destruction), **a monster gains a level each time it is killed**, so it comes back stronger, and pays more:
+
+- **Its level** is in its frame (`GameFrameCharacter.level`, absent is level 1), so it is rolled back with the frame and carried in a snapshot. It goes up
+  when the monster respawns (`respawnCharacter`), by `monsterLevelAfterKill` in `progression.ts`: a kill is one level. A monster with no `respawnTicks` does
+  not come back, so it does not level. In a mode with no economy a monster stays level 1.
+- **Its stats** are `Champion.statsAt(level)` like a champion's: its `base` plus its `growth` for each level above the first, so they rise in a straight
+  line. A monster says its own growth in its entry (`growth: { maxHp: 40, attackDamage: 2 }` for the slime), and comes back at the full health of its new level.
+- **Its experience** is `monsterXpAt(baseXp, xpGrowth, level)` (in `progression.ts`: the one place that says how it scales): its `reward.xp` at level 1 plus
+  `xpGrowth` more for each level after, also a straight line. `MonsterDef.xpGrowth` is a whole number (default `DEFAULT_MONSTER_XP_GROWTH`, 10; the
+  slime has 10 and the golem 25). It pays the experience of the level it died at.
+- **Its gold and its shards** are the same at every level.
+
+## Turrets
+
+A turret is a structure the map puts on the ground. It stands where it is put for the whole game, belongs to a team, and
+shoots the enemy players who come within its range: it is attackable by every other team, and kills what it shoots if it is
+left alone. It is a champion that cannot move (`turrets.ts`), so the same combat code plays it, but it is a **structure** (see
+"Structures", below): only an attack hurts it, and it is protected until the turret below it has fallen.
+
+**Tiers.** What a turret is, is its tier, and every number that makes one what it is lives in the `TURRET_TIERS` table in
+`turrets.ts`, one entry for each tier, with times in ticks (60 a second) and distances in world units (a champion is about 40 across):
+
+| Field | What it is |
+| --- | --- |
+| `base` | `maxHp`, `attackDamage`, `attackSpeed` (shots a second), and `resistance` (`x / (100 + x)` off every hit it takes, as for a champion: 100 takes half) |
+| `radius` | How big it is, to hit and to walk into |
+| `attackRange` | How far it reaches, from its middle to the middle of whoever it shoots, and the radius of the circle drawn round it |
+| `visionRange` | How far its team sees from it, round any walls (see "Vision"). Leave it out for as far as a champion sees, `GAME_VISION_RANGE` |
+| `attackWindupTicks` | How long after it starts to shoot until the shot leaves |
+| `attackProjectile` | The bolt it fires: `speed`, `radius` and `color`. Leave it out for a hit that lands as the windup ends |
+| `reward` | What the player who destroys it is paid: `gold`, `xp` and `shards`, each a whole number. What it leaves out is `DEFAULT_TURRET_REWARD` |
+
+A tier is tuned by changing its entry, and a new one is a new entry; the map says which tier each of its turrets is. A tier has no
+name or description to set: it is called `Tier <n> Turret`, which is only said where something has to say what it is (the killfeed,
+a map with no room for one), and nothing is written over a turret in the game. The two tiers there are, 1 and 2, are numbers to tune.
+The map's `turret-tier` of a
+tier that is not in the table is left out of the game with a warning in the server log, so a map can keep places for tiers still to
+come. A turret never levels, so a tier has no growth. The id of its body is `turret-<tier>`, which is what a snapshot says it is, and
+turrets are in a registry of their own (`turrets`), so no one can pick one in champion select.
+
+**What it does.** Every tick (`thinkTurrets` in `simulator.ts`, which reads only the frame, so every peer works out the same
+shots and nothing about a turret is sent) each living turret chooses a target with `chooseTurretTarget`:
+
+- It shoots enemy **players** only. It never targets a monster or another turret, no monster goes after a turret, and a turret does not shoot its own team.
+- It keeps the player it is shooting for as long as they are alive and in its range, even if another is nearer. When they die or
+  walk out of its range, it takes the nearest player in its range (the lowest id if two are as near), or none.
+- Range is measured from the turret's middle to the player's middle, the same way every auto attack in the game is, so the circle
+  drawn round it is exactly where it stops. A player on the edge is in it.
+- It cannot chase: a target that walks out of its range is dropped on that tick, and a shot not yet away is called off.
+- It shoots with the same attack as any champion: a windup, a hit (or a bolt that homes on arrival) for its `attackDamage`, and a
+  cooldown from its `attackSpeed`. It cannot be stunned, so nothing stops it shooting, and it shoots while it is protected too.
+
+**Being destroyed.** It has health and resistance like any champion, and is hurt by auto attacks (whether a swing or a shot) and
+nothing else. When it is destroyed it stays destroyed (it never respawns, and
+is not drawn), is no longer solid, and pays its `reward` to the player who did it (the shards when the kill can no longer
+be undone, the experience and the gold on the tick, as for a monster). Destroying a turret is not a kill on the scoreboard and scores nothing for a
+team, and a turret that kills a player is paid nothing and scores nothing for its team: only players score.
+
+**Solid, and fixed.** Living characters are solid, and a turret is too, but it does not give way: a player walking into one is
+held off and takes the whole push, and a knockback, a pull or a dash aimed at it does not move it. The pathfinder does not
+know about turrets, so a walk that goes straight through one slides round it, as it does round another champion. Mind the room
+round them in the map: a champion needs about 48 clear between the turret and a wall to get by.
+
+**On screen.** A turret is drawn as a dark ring edged in its team's colour, with a core of that colour, and its health bar over it
+(no name). Round it is a **transparent circle** out to the end of its range (`TurretRangeLayer`, `turret-range.ts`): only a thin line
+in its team's colour, very faint (`TURRET_RING_EDGE_ALPHA`), with nothing filled in inside it, under the champions, so whoever stands in
+it and whatever is under it show through. It is drawn for every turret the team can see, and not for one that is
+destroyed. A turret of the other team can be right-clicked and picked with Space like an enemy champion, until it is protected: a protected one has a
+pale **barrier** ring round it and cannot be clicked on or picked, since nothing would come of it.
+A team always sees its own turrets, an enemy turret in the dark is not drawn (like any enemy), and a standing turret is a place its
+team **sees from**, out to its `visionRange` (`TeamVision`): an enemy who comes within it is drawn, can be clicked on and picked
+with Space, even with no champion of the team near, and a turret that is destroyed stops seeing. Turrets are not on the scoreboard, the leaderboard or the results.
+
+**To add a tier:** add an entry to `TURRET_TIERS`, and put `turret` points with that `turret-tier` on a map. `tests/turrets.test.ts`
+covers the tiers, the targeting on its own (`chooseTurretTarget`), turrets in a simulator (shooting, range, destruction, rewards,
+being fixed, rolling back, snapshots), reading them from a map (including the competitive map's own), and the server starting them;
+`tests/turret-range.test.ts` covers how the page shows them. `defineTurret` in `tests/fixtures.ts` registers a tier for a test.
+
+**Not here yet**, where a game would want it: targeting other things first (minions, or whoever hit an allied champion), a lobby
+switch for whether a game has turrets, and art for the body and a destruction effect in place of the shapes drawn now.
+
+## Structures
+
+Turrets and cores are **structures** (`structures.ts`; `SimCharacter.structure`). They stand where they are put, are solid, belong to a
+team, are destroyed for good (nothing brings one back), and are never paid for what they kill, scored for, or on the scoreboard. Two
+rules make them what they are:
+
+- **Only attacks hurt them.** An auto attack, a swing or a shot, does its damage to a structure, less its resistance. An ability does
+  **nothing** to one: no damage (however it reaches it, a blast, a bolt, a burn), no health lost, no heal, no knockback or pull, no
+  blink, and no status or mark, so it cannot be stunned, rooted, slowed, silenced or burnt. (The simulator tells an attack's damage
+  by its source id, `ATTACK_SOURCE_PREFIX`: an auto's damage is physical, an ability's is magic.) It is done in `applyWrites`, where every
+  effect lands, so no effect has to know of it.
+- **A structure is protected until what guards it is down.** While it is, it takes no damage at all, from anything: a hit that
+  splashes it does nothing either, and an order to attack it changes nothing, so a champion walking up to it is not stopped. It can
+  still shoot. It is open once what guards it is down, and stays open, since nothing that is destroyed comes back.
+  - A **turret** is guarded by every turret of its own team of a lower tier: tier 2 takes no damage until the tier 1 turrets are down,
+    and tier 3 waits for tier 2, which waits for tier 1. With a tier missing from a map, the next up waits for every one below it,
+    and turrets of the same tier do not guard each other (tier 2 waits for all of tier 1).
+  - A **core** is guarded by the turrets of its team up to its `guardedByTier` (`CORE` in `cores.ts`, 1 by default): the core can be
+    hurt once the tier 1 turrets of its team are down, whatever stands above them. Set it to 2 for the core to wait for the tier 2 turrets
+    as well, or to 0 for a core with no guard.
+
+Who is protected is `shieldedStructures`, a pure function of the structures and which of them stand, so the server and every client
+work out the same set from a frame (`Simulator.shieldedIn`). It is worked out at the start of each tick's writes, so a turret that
+falls on a tick opens the one it guards from the next.
+
+## Cores
+
+A core is the heart of a team's base, and what Core Destruction is played for. It is a champion that cannot move or attack (`cores.ts`)
+and a structure, so it is hurt by attacks only and is protected until its turrets are down. Everything that makes it what it is, to be
+tuned, is `CORE`: `maxHp`, `resistance`, `radius`, `guardedByTier`, and a `reward` (gold, experience and shards for the player who
+breaks it, nothing by default). The server puts one in a game of that mode for each of its two teams, at the base of the slot the team
+starts at (the biggest team at the first core of the map), after the players and the turrets. No monster goes after one, and it gives
+its team no vision.
+
+Once a core is broken its team cannot respawn (`Simulator.canRespawn`; in `computeFrame`, a dead character's respawn is skipped while
+its team's core is down, so a player who died before it fell and was waiting to come back stays dead as well). It is drawn as a
+diamond in its team's colour, with its health bar over it, and the barrier ring while it is protected; a broken one is gone.
+
+**To add one to a map:** put a point of class `core` with the `team-name` of the slot on each team's base (see "Maps from Tiled"). The
+competitive map has none yet, so Core Destruction is greyed on it until it does. `tests/structures.test.ts` covers the two rules
+(who is protected, what hurts a structure) and `tests/core-mode.test.ts` the mode (the objective, respawns, winning, reading it from
+a map, the server, and what the page shows); `defineCore` in `tests/fixtures.ts` registers a core for a test.
+
+## Resources and levels
+
+*This is for the modes that have an economy: only Core Destruction does (see "Game modes"). In the others none of it happens.*
+
+A player collects **gold**, **shards** and **experience**, and the level their experience makes. The level makes the champion
+stronger (see *Stats and growth*, below); the gold buys items (see *Items and the shop*, below); the shards are only kept and shown for now,
+as nothing is bought with them. The numbers are in `progression.ts`.
+
+- **What a kill pays.** Whoever makes a kill is paid, whatever they killed: a monster pays what its entry in `monsters.ts`
+  says (`reward`, below, and more experience for each level it has gained: see "Monsters level up"), and a player pays
+  `PLAYER_KILL_REWARD` (300 gold, 60 experience), flat, whatever level either is. A monster that kills is paid nothing. The golem alone pays shards.
+- **Setting a monster's reward.** `MonsterDef.reward` is `{ gold, xp, shards }`, each a whole number, 0 or more. Whatever it
+  leaves out is `DEFAULT_MONSTER_REWARD` (25 gold, 25 experience, no shards), so a monster that says nothing is worth that.
+  At level 1 the slime pays 20 gold and 60 experience, and the golem 120 gold, 100 experience and 1 shard.
+- **Levels.** You start at level 1, and each level takes **more experience than the one before**, in a straight line: `xpToNextLevel(level)` is
+  `GAME_XP_FIRST_LEVEL` (100) plus `GAME_XP_STEP` (50) for each level after the first, so the levels take 100, 150, 200, 250 ... and level 2 is at 100
+  experience, level 3 at 250, level 4 at 450. Up to `GAME_MAX_LEVEL` (18), and experience past the highest is still counted. **`xpToNextLevel` is the one
+  place that says how levelling scales**: `levelForXp`, `xpProgress` (how far it is to the next) and `xpToReachLevel` (the experience a level starts at) are all
+  worked out from it, so to change the scaling change that function (or the two numbers it reads).
+- **Monsters level up.** See below.
+- **The experience is in the frame.** It is `GameFrameCharacter.xp`, credited on the tick of the kill in `applyWrites`, like the
+  health. It has to be: a level changes what a frame works out (a hit's damage, a cooldown, the health), so every peer must have
+  it on the same tick, and a death that a late order undoes must take it back with the rest of the frame. (A tally kept outside
+  the frames, credited when the commit tick passes the kill, would let a frame come out differently depending on when it was worked out.)
+  It is kept through a death and a respawn, and it is in a snapshot's checkpoint frame, so it shows on screen as soon as the kill does.
+- **The gold is in the frame too.** It is `GameFrameCharacter.gold`, credited on the tick of the kill with the experience, because what it buys
+  (items) changes what a frame works out. A player starts with `GAME_STARTING_GOLD` (500, in `progression.ts`: the one place to change it); a monster
+  or a structure has none. It is kept through a death and a respawn, and a kill that a late order undoes takes it back.
+- **The shards are a tally.** `shards` on `SimCharacter` are credited when a kill can no longer be undone, the same moment the kill is counted
+  (`confirmDeathsUpTo`), since nothing in a frame depends on them. They are the same on the server and on every client, a kill that a late order
+  undoes pays nothing, they are kept through a death and a respawn, and they are in a snapshot (`GameCharacterSchema`; a snapshot without them
+  has none). They show up a moment after a kill, like the leaderboard.
+- **On screen.** The level and experience bar are in the left panel of the HUD (below), and the gold and shards on the buttons of the right one.
+
+## Items and the shop
+
+A champion has **eight slots**, one for each kind of item: boots, chest, back, head, weapon, accessory, pet and potion (`ITEM_SLOTS`, in the order of the
+grid on the HUD, four across and two down, which they fill). Each holds **one** item: to buy another of that kind, the one in the slot has to be sold first. An item costs
+gold, and **adds its stats** to the champion that carries it.
+
+**The items** are in `items.ts`, a plain list of records (`ItemDef`): an `id`, a `name`, a `slot`, a `cost` in whole gold, an `icon`
+(the file in `res/shop_icons` without `.png`; it is the `id` when left out), and `stats`. The items there now are filler (a cost and stats made up to try the shop with), one for each
+picture in `res/shop_icons`, 75 of them. Adding one is adding a record and a picture. An item can add any of these, each a flat amount to the stat of the same name
+(`ITEM_STAT_KEYS`): `maxHp` (whole), `attackDamage`, `attackSpeed` (attacks a second), `resistance`, `haste`, `arcane` (ability power, in whole
+points: 20 is 20 more of it, see "Stats and growth"), `attackRange` and `moveSpeed`. A mistake in one (a slot that is not one, a cost that is not a whole number, a stat that does not exist) is
+refused with the item named, when the game starts.
+
+**Selling** pays back `ITEM_SELL_RATE` of the cost, rounded down: **0.7**, which is 70%. It is one number at the top of `items.ts`; the simulator
+and the shop both read it, so changing it changes both.
+
+**What the stats do.** What a champion carries is added to what it has at its level (`withItems`), and everything that reads a champion's stats
+reads that: the damage of its autos and its abilities (attack damage, arcane), what it takes (resistance), its cooldowns (haste), its swing (attack
+speed), how far it hits from (attack range), how fast it walks (move speed), and its health. An item with health raises the most health a champion
+can have and the health it has by as much, as a level does, and selling it takes the same off again (never down to 0 for one that is alive, so
+buying and selling is not a way to heal). The stats panel and the champion's bars on screen show what the items make of them. Items are not
+for monsters or structures.
+
+**Buying and selling are orders**, like moving and casting (`buy` with an `itemId`, `sell` with a `slot`). They are done on the order's tick, by the
+simulator, with the gold and the slots that frame has (`buyProblem`), so the server and every client agree, and an order that arrives late changes the
+frames after it like any other. One that cannot be carried out (it costs too much, the slot is full, the item does not exist) is nothing, on every
+peer alike; the server turns away one for an item that is not in the game (`unknown_item`). The gold and the items are in the frame
+(`GameFrameCharacter.gold` and `.items`), so they roll back with it, are in every snapshot's checkpoint, and are kept through a death: the dead
+can shop, and are back with what they bought, at the health it gives.
+
+**Where.** The shop can be **opened from anywhere**, to look at, but items are **bought and sold only in a shop of your own team**: a rectangle the map
+draws (a `shop` object, see "Maps from Tiled"). A champion is in one when its middle is inside it, edges included (`shopZoneContains`, `mayShop`, in
+`shops.ts`). The rule is the simulator's (`Simulator.canShop`, checked by `buy` and `sell` orders on their tick), so an order sent from outside a shop is
+nothing on the server and on every client alike, and the page checks it first (`NOT_IN_SHOP`: "You can only buy and sell in your own shop.") and sends none.
+The zones are fixed for the game, so they are in the snapshot (`shops`), not in the frames, as the ground is. The server makes each shop the shop of the team
+that starts at its slot, as it does a turret (`rankTeams`): the biggest team shops in the shop of slot 1. Three details:
+- **A dead champion can shop**, wherever its body lies: it comes back in its base, where its shop is. (To make the dead need a shop too, drop the
+  `!isAlive(state)` from `mayShopNow` and `state.isDead()` from `canShop` in `simulator.ts`.)
+- **A game with no shops can be shopped in from anywhere**, so a map made without any (the free-for-all one) is not left with items nobody can buy.
+- **A map with shops needs one for every slot that has spawn points**, or that team could never buy: it is refused, saying which slot (see below).
+
+**On screen.**
+- **The slots** are the grid on the right of the HUD, four across and two down (`HUD_ITEM_COLUMNS` by `HUD_ITEM_ROWS`, the one place that says so: the
+  panel and the grid are sized from it): each shows the picture of the item in it, or the name of the kind, dim, when it is empty. The kinds fill it
+  from the top left in the order of `ITEM_SLOTS`, and any cells left over are dashed outlines that do nothing, room for kinds to come (there are none now, with
+  eight kinds): a new kind is a new entry in `ITEM_SLOTS`, and a test fails if the grid has no cell for it, so make `HUD_ITEM_ROWS` bigger first. *Clicking* a slot opens the shop on that kind of item; *right-clicking* one with an
+  item in it sells it, in a shop. Pointing at one says what is in it, what it adds, and what selling it pays (away from your shop it says that it is sold
+  there).
+- **The gold button** shows the gold you have, and opens the shop on the kind of item you looked at last (the first, boots, the first time). Pressing the same
+  button again (or a slot, with the shop open on that kind) puts the shop away; so do the cross on the shop and Escape.
+- **The shop** (`ui/shop-view.ts`) is a panel over the game, which goes on behind it, sorted by kind, with a tab for each kind of item and none for all of
+  them (cheapest first in each), the gold you have, and a grid of the items there, each a picture with its price. Pointing at one
+  says its name, what kind it is, its cost, what it adds, and a line about what it is; **clicking one buys it**, in your shop (away from it, a line under the
+  tabs says you are away and can only look, and clicking says `You can only buy and sell in your own shop.`). One you cannot buy now, because it costs more
+  than you have or because another item is in its slot, is drawn **grey** but can still be pointed at, and the tooltip says why (`You need 60 more
+  gold.`, `You already have Worn Boots in your boots slot: sell it first.`); the one you have is marked *Owned*. What was bought, or why not, is said
+  in a line under the tabs.
+- What it shows is `ui/shop.ts` (pure: `shopEntries`, `shopTooltip`, `ownedTooltip`, `itemStatLines`), and the rule it asks, `buyProblem`, is the one the
+  simulator buys by, so the shop never offers what the game would refuse. The tooltip is one box shared by the shop and the slots (`ui/item-tooltip.ts`).
+
+**To add an item:** add a record to `ITEM_DEFS` in `items.ts` and a picture to `res/shop_icons` (the 16 px art is scaled up with hard edges). Nothing
+else needs to know of it: the shop lists it, the slots show it, the stats apply. `tests/items.test.ts` covers the rules and what each stat does in a
+simulator (and checks each shipped item has its picture), `tests/shop.test.ts` what the shop lists and says and how the page buys and sells, and
+`tests/shops.test.ts` where (the zones, the map's shops, the server, and the grid); `defineItem` in `tests/fixtures.ts` registers an item for a test.
+
+**Making items do more.** An item is a plain record, and the one place the simulator asks what a character carries is `statsOfState` (with
+`itemTotals` for what only the cost of a swing or a step needs), so an item that does more than add stats grows from there: an effect when an attack
+lands (`onAttackHit`) or when an ability is cast (`onCast`) would be a field of `ItemDef`, run next to the champion's own in `launchAction`; an
+ability an item gives would be a field naming it, added to what `startCast` accepts;. None of those is built yet: items add stats, and nothing else.
+
+## Stats and growth
+
+A champion is made of more than health and a swing. `stats.ts` has the types and the formulas, and `Champion.statsAt(level)` is
+what a champion is at a level: its **base** stats are what it is at level 1, and each level after that adds its **growth**.
+Every one that a frame works out is read at the level in that frame.
+
+| Stat | What it does |
+| --- | --- |
+| `maxHp`, `attackDamage`, `attackSpeed` | As before, and they grow. A level gained adds its health to the maximum and to the health the character has (a dead one's stays 0), and a respawn is at the health of its level. |
+| `arcane` | **Ability power**: an amount, 0 for none, that does **nothing by itself**. Damage is as it is written unless an ability says it scales with arcane, by its own ratio (`scaled(100, { arcane: 0.6 })` is 100 and 0.6 for each point of it), so one ability can grow harder with it than another. Items and levels add points of it; the stats panel shows the amount. See "Scaling an ability" below. |
+| `resistance` | Takes `x / (100 + x)` off every hit taken, League's formula: 100 takes half, 300 three quarters, and no amount all of it. It applies to autos, abilities and burns alike, and then to a `resist` status as well (they multiply). A health cost (`loseHealth`) is not damage and ignores it. |
+| `haste` | Takes `x / (100 + x)` off an ability's cooldown, as it starts it (`hastedCooldownTicks`, whole ticks, never under one). It applies to a cooldown that is put back on its whole (`startCooldown`) and to what a refund takes off (a share of the shortened cooldown). An auto attack's rate is the attack speed, not this. |
+
+**Base and growth.** A champion holds its stats twice, as two `StatBlock`s (`stats.ts`), a class of the six numbers `maxHp`,
+`attackDamage`, `attackSpeed`, `resistance`, `haste` and `arcane`, each a number, 0 or more. `base` is what it is at level 1, and
+`growth` is what each level after the first adds. Both are said in the champion's own entry, so its numbers are all in one place to change:
+
+```ts
+base: { maxHp: 800, attackDamage: 40, attackSpeed: 1.3, resistance: 0, haste: 0, arcane: 0 },
+growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
+moveSpeed: 140, radius: 20, attackRange: 190, attackWindupTicks: 12,
+```
+
+There is no growth shared by all of them: each champion in the game says its own, in all six stats (they are the same placeholder
+numbers for now, to tune one at a time). The range and the move speed do not grow. A stat left out of a block is made up from what
+nothing means: in a `base`, no resistance, no haste and no arcane; in a `growth`, nothing added. The health, the attack damage and
+the attack speed of a `base` have to be said, and a number that is not (or is negative) is refused, naming the champion and the stat.
+`champion.base` and `champion.growth` are the blocks, `champion.maxHp` (and the other five) read the base's, and `statsAt(level)`
+is the base plus the growth for every level above the first (`StatBlock.grownBy`). A stat written on the champion itself (`maxHp: 800`
+beside `radius`, as it used to be) is refused with an error, and not quietly ignored.
+
+### Scaling an ability
+
+Nothing multiplies an ability's damage on its own: `damage(100)` is 100 whatever the caster has, and a burn is as written. An ability grows with
+the caster's stats only if it says so in its amount, with a ratio for each stat it uses, so abilities can scale as hard or as little as they like
+(arcane is League's ability power: an amount you have, used in the sum, and not a multiplier). The amounts that read the **caster** (the owner of the
+effect, whoever is hit, as they stand when it runs, with their level and items) are in `effects.ts`:
+
+| Amount | Is |
+| --- | --- |
+| `arcane()` | The caster's arcane. |
+| `attackDamage()` | The caster's attack damage. |
+| `maxHealth()` | The most health the caster can have. |
+| `health()` | The health the caster has now (before this tick's writes). |
+| `level()` | The caster's level. |
+
+Use them in `linear(base, each, of)` (base plus `each` times the amount), or give several ratios at once with `scaled(base, { arcane, attackDamage,
+maxHealth, health, level })`, where each ratio left out adds nothing and the base can itself be an amount (such as `linear(60, 30, swordStacks)`):
+
+```ts
+damage(scaled(120, { arcane: 0.7 }), enemiesInRadius(200))                        // 120 and 0.7 per point of arcane
+damage(scaled(100, { maxHealth: 0.08, arcane: 0.3 }), enemiesInRadius(200))       // 100, 8% of the caster's health, and 0.3 per arcane
+burn(scaled(30, { arcane: 0.2 }), seconds(3), enemiesInRadius(200))                // a burn's amount is read when it is lit
+```
+
+An auto attack takes the same: `damage(scaled(attackDamage(), { arcane: 0.2 }))`. The abilities in the game scale a little now (Spout, Bubbles,
+Hex, Grenade, Molotov, Stick, Feast and Radiance with arcane; Shadow Step, Kunai, Bolt and Slash with attack damage; Tsunami with health and
+arcane; Radiance with level too), and those ratios are the numbers written in `abilities.ts` to tune. A champion's arcane is 0 until a level or an item
+gives it some, so an ability that scales only with arcane plays exactly as it is written until then.
+
+A monster is a champion, so it has a `base` and a `growth` too (a monster in the game says its own: health and damage). A monster does not earn experience, but
+it **levels up each time it is killed**: see "Monsters level up" under Monsters.
+
+The stats panel of the HUD lists all of them at the champion's level. A level-up shows at once, and the cooldowns on the ability
+slots fill over the shortened time. The champion select screen shows the champion as it is at level 1.
 
 ## Collision
 
@@ -500,11 +1004,29 @@ enough that an ability aimed at its full range is on screen, since the champion 
 the longest reach of any ability is about 650. Past the map's edge you see the dark background.
 
 The bottom of the screen is the HUD (`ui/hud.ts` works out what it shows and `ui/hud-view.ts` fills in the
-elements): the controlled champion's exact health as `hp / max`, with any shield as `+n` beside it and
-laid after the health on the bar, and a slot for each ability on its key. A slot fills from the
-bottom as the cooldown runs, shows the seconds left, and lights up when the ability is ready; a key
-that has turned into its recast shows that ability's cooldown. The debug overlay at the top left
-keeps only the network and simulation diagnostics.
+elements): three separate panels in a row, each standing on the bottom edge with nothing under it. (In a mode with no economy, which is every one but Core
+Destruction, the two side panels are left out and the middle one, the abilities and the health, stands alone: `HudInput.economy`.) The whole UI is flat: square
+corners (the level's circle is the one exception), solid colours, and no shadows, glows or gradients. The dark screens share one set of
+colours (the `--ui-*` custom properties at the top of `style.css`), text on a picture is plain text with a hard one-pixel edge and
+nothing behind it, and the browser's own buttons, inputs and focus rings are square too.
+
+- **Left: the level, the experience and the stats.** The experience bar is on the far left of the panel and fills upward from
+  the level, a circle at its foot that stands out past the panel's left edge a little. It has no numbers, only how full it is
+  (full at the highest level). To the right of it are the champion's stats, one row each (`statRows`): max health, attack
+  damage, attack speed (a rate, to two places), attack range, move speed, arcane (a whole amount, `46`), and resistance and haste (each as the
+  stat and, after it, what it takes off: `33 (25%)`). They are the champion's stats at its level (`ChampionStats`, from
+  `Champion.statsAt`), and are where items will add to them.
+- **Middle: the abilities, over the health.** A slot for each ability on its key, which fills from the bottom as the cooldown runs,
+  shows the seconds left, and lights up when the ability is ready (a key that has turned into its recast shows that ability's
+  cooldown); and under the slots the exact health as `hp / max`, with any shield as `+n` beside it and laid after the health on
+  the bar.
+- **Right: the items and the shops.** A grid of item slots, four across and two down (`HUD_ITEM_COLUMNS` by `HUD_ITEM_ROWS`), and under
+  it two buttons: the shop, which shows the gold, and the shard shop, which shows the shards (always a number, even 0), each with
+  its picture from `res/general` (`gold.png`, `shard.png`, found by `ui/general-icon-urls.ts`). The slots and the gold button work (see
+  "Items and the shop"): this panel takes clicks (`pointer-events`), and the rest of the HUD does not, so they go through to the game. **The
+  shard shop is still a mock-up**: its button does nothing.
+
+The debug overlay at the top left keeps only the network and simulation diagnostics.
 
 Because the camera moves under a still mouse, the mouse is remembered as a screen position and
 converted to a world point (`computeCamera` and `screenToWorld` in `camera.ts`) at the moment
@@ -771,7 +1293,8 @@ per stack.
 after any of its abilities launches and marks it `empowered` (one marker, so casting twice
 does not stack); its next auto spends the marker for bonus damage. Q, Tsunami, sends a
 piercing rectangular wave (70 wide, 20 deep) that deals damage, shoves each target along the wave's
-direction (up to 140 px, and never more than 50 px past where the wave stops), and interrupts it. W, Bubbles, fires a stream of five bubbles: on each target the first bubble
+direction (up to 140 px, and never more than 50 px past where the wave stops), and stuns it for 0.6 seconds (which also
+interrupts a windup that has not launched). W, Bubbles, fires a stream of five bubbles: on each target the first bubble
 to hit deals full damage, leaves a short `bubbled` marker, and the rest deal half. E, Spout,
 marks a small circle (65 radius) at the aimed point. After a 0.7 second warning it erupts,
 damaging and slowing whoever is still inside, so the warning is the chance to step out.
@@ -783,7 +1306,7 @@ entity's travel plus that much (entities tell their effects where their travel e
 `travelEnd`), so something caught right at the end of a wave is not thrown as far as something
 caught early in it. An entity's hits now carry its travel direction as their `aim`, which is
 how a wave knows which way to push. `interrupt()` cancels a windup that has not launched
-without stunning. `spawnEntity` takes a `volley` option (`count` copies from one spot, each
+without stunning (no champion in the game uses it at the moment: the Tsunami stuns instead). `spawnEntity` takes a `volley` option (`count` copies from one spot, each
 `intervalTicks` after the last, waiting unseen at the origin until their turn) and an `at`
 anchor such as `aimPoint()`. An entity can also carry `onPulse` effects that run every
 `pulseEveryTicks` ticks with a fresh source ID each time (the Soldier's medic bot heals with it).
@@ -1206,7 +1729,7 @@ such as `pm2` keeps for you (`pm2 logs moba`). The time is UTC, and what follows
 `name=value` fields:
 
 ```
-2026-10-24T09:41:22.752Z INFO  lobby created lobby=6LWDQ6 leader=Alice map=ffa_arena mode=deathmatch lobbies=1
+2026-10-24T09:41:22.752Z INFO  lobby created lobby=6LWDQ6 leader=Alice map=competetive mode=core lobbies=1
 2026-10-24T09:41:22.757Z INFO  player joined lobby=6LWDQ6 name="Bob Smith" players=2/8
 2026-10-24T09:41:22.765Z WARN  join rejected lobby=6LWDQ6 name=Dave reason="This lobby has already started a game."
 2026-10-24T09:41:33.582Z INFO  game started lobby=UATV6Q mode=deathmatch map=ffa_arena players="Alice (Red), Bob (Blue)"

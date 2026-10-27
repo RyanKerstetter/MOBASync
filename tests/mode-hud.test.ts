@@ -101,7 +101,7 @@ function game(setup: ModeSetup): ClientGameState {
 
 test('in team deathmatch a team\'s score is the kills its players have made, with the limit it plays to', () => {
   const state = game({ kind: 'deathmatch', scoreLimit: 10 })
-  const killer = new Champion({ ...brawler, abilities: [...brawler.abilities], attackDamage: 5000 })
+  const killer = new Champion({ ...brawler, abilities: [...brawler.abilities], base: { ...brawler.base, attackDamage: 5000 } })
   state.simulator.addPlayer(1, 'p1', 'P1', { x: 300, y: 300 }, killer, 1)
   state.simulator.addPlayer(2, 'p2', 'P2', { x: 360, y: 300 }, brawler, 2)
   state.simulator.addPlayer(3, 'p3', 'P3', { x: 900, y: 900 }, brawler, 3)
@@ -135,7 +135,7 @@ test('the panel says what a game is played to, when it has a limit', () => {
 test('the view carries the limit in every mode, and says how long a dead champion has to wait', () => {
   const home = [{ x: 200, y: 300 }, { x: 1800, y: 300 }]
   const state = game({ kind: 'ctf', flags: [{ team: 1, home: home[0] }, { team: 2, home: home[1] }], scoreLimit: 3, respawnTicks: 10 * GAME_TPS })
-  const killer = new Champion({ ...brawler, abilities: [...brawler.abilities], attackDamage: 5000 })
+  const killer = new Champion({ ...brawler, abilities: [...brawler.abilities], base: { ...brawler.base, attackDamage: 5000 } })
   state.simulator.addPlayer(1, 'a', 'A', { x: 1000, y: 1000 }, brawler, 1)
   state.simulator.addPlayer(2, 'b', 'B', { x: 1060, y: 1000 }, killer, 2)
   state.setLocalCharacterId(1)

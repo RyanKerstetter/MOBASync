@@ -94,7 +94,7 @@ test('the client shows a death as soon as it predicts it, but counts the kill on
   const gameState = new ClientGameState()
   gameState.simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 100 }, new Champion({
     ...championDef(brawler),
-    attackSpeed: GAME_TPS,
+    base: { ...brawler.base, attackSpeed: GAME_TPS },
   }))
   gameState.simulator.addPlayer(2, 'player-2', 'Player 2', { x: 140, y: 100 }, brawler)
   gameState.setLocalCharacterId(2)

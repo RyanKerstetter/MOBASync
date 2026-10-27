@@ -6,7 +6,16 @@ import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 import { isMapId } from '../apps/server/src/map.ts'
 import { MapCatalog } from '../apps/server/src/maps.ts'
-import { DEFAULT_MAP_ID } from '../packages/shared/src/index.ts'
+import {
+  DEFAULT_GAME_MODE,
+  DEFAULT_MAP_ID,
+  FALLBACK_GAME_MODE,
+  parseTiledMap,
+  readMapLayout,
+  startingMode,
+  summarizeMap,
+  supportedModes,
+} from '../packages/shared/src/index.ts'
 
 // The maps the server has: every map in the folder, with what it can be played for, kept up to date as the files change.
 
@@ -97,14 +106,14 @@ test('a map saved as .json is a map, and when the same map is both it is read fr
 })
 
 test('the map a lobby starts on is the default if it can be played on, or else the first that can', () => {
-  const both = folder({ 'ffa_arena.tmj': REAL, 'a_map.tmj': duel() })
+  const both = folder({ [`${DEFAULT_MAP_ID}.tmj`]: REAL, 'a_map.tmj': duel() })
   const noDefault = folder({ 'zeta.tmj': duel(), 'alpha.tmj': noHill(), 'broken.tmj': '{' })
   const none = folder({ 'broken.tmj': '{' })
-  const brokenDefault = folder({ 'ffa_arena.tmj': '{', 'other.tmj': duel() })
+  const brokenDefault = folder({ [`${DEFAULT_MAP_ID}.tmj`]: '{', 'other.tmj': duel() })
   const empty = folder({})
   try {
-    assert.equal(DEFAULT_MAP_ID, 'ffa_arena')
-    assert.equal(new MapCatalog(both.directory).defaultMapId(), 'ffa_arena')
+    assert.equal(DEFAULT_MAP_ID, 'competetive')
+    assert.equal(new MapCatalog(both.directory).defaultMapId(), DEFAULT_MAP_ID)
     assert.equal(new MapCatalog(noDefault.directory).defaultMapId(), 'zeta', 'the first by name, which here is Duel')
     assert.equal(new MapCatalog(brokenDefault.directory).defaultMapId(), 'other', 'the default is passed over when it is broken')
     assert.equal(new MapCatalog(none.directory).defaultMapId(), undefined)
@@ -168,4 +177,14 @@ test('a map is picked by an id of letters, digits, underscores and dashes, which
   for (const bad of ['', '..', '../secret', 'a/b', 'a\\b', 'with space', 'dot.ext', 'x'.repeat(101), undefined, 7, null]) {
     assert.equal(isMapId(bad), false, String(bad))
   }
+})
+
+test('the map a new lobby starts on can be played in the mode it starts in, which is core destruction, and every map can be played in the fallback', () => {
+  assert.equal(DEFAULT_GAME_MODE, 'core')
+  assert.equal(FALLBACK_GAME_MODE, 'deathmatch')
+  const file = new URL(`../res/maps/${DEFAULT_MAP_ID}.tmj`, import.meta.url)
+  const summary = summarizeMap(DEFAULT_MAP_ID, readMapLayout(parseTiledMap(JSON.parse(readFileSync(file, 'utf-8')))))
+  assert.ok(supportedModes(summary).includes(DEFAULT_GAME_MODE), 'the default map has what the default mode needs: a core for each of two teams')
+  assert.equal(startingMode(summary), DEFAULT_GAME_MODE)
+  assert.equal(new MapCatalog().defaultMapId(), DEFAULT_MAP_ID, 'and the server finds it in its own folder')
 })

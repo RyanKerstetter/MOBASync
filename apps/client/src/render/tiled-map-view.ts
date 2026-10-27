@@ -10,6 +10,7 @@ import {
   type ObjectLayer,
   type TiledObject,
 } from '../../../../packages/shared/src/index.ts'
+import { attachTiles, groupByDepth, isDepthSorted } from './depth.ts'
 import type { MapView } from './map-view.ts'
 import type { LoadedTiledMap, LoadedTileset } from './tiled-loader.ts'
 
@@ -27,14 +28,26 @@ type Flips = { flipH: boolean; flipV: boolean; flipD: boolean }
 // at negative positions and past its far edges. The shapes of the map's objects (what will be walls,
 // say) are not part of how it looks: the debug view (P) draws them.
 //
+// A tile layer that is depth sorted (the map's walls: see `isDepthSorted`) is not drawn as one picture but as pieces, each
+// with its depth (see depth.ts): all the art of one wall, which has the depth of the wall's base (its collision rectangle,
+// from `walls`), and the rest of it a row at a time. The pieces are `sorted` for the world renderer to draw in order with the
+// champions, so a champion can walk behind a wall and in front of it.
+//
 // Not drawn yet: tile animations, tile layer tints, parallax, and rotated or hexagonal maps.
 export class TiledMapView implements MapView {
   readonly view = new Container()
+  readonly sorted: Sprite[] = []
   private readonly content = new Container()
   private readonly debugLayer = new Container()
   private readonly missingTilesets = new Set<number>()
 
-  constructor(private readonly loaded: LoadedTiledMap, private readonly scale: number, arena: Rect) {
+  // `walls` are the map's collision rectangles in world units, which the depth of the walls' art is worked out from.
+  constructor(
+    private readonly loaded: LoadedTiledMap,
+    private readonly scale: number,
+    private readonly arena: Rect,
+    private readonly walls: readonly Rect[] = [],
+  ) {
     const { map } = loaded
     this.content.scale.set(scale)
     this.content.position.set(-arena.x * scale, -arena.y * scale)
@@ -55,8 +68,12 @@ export class TiledMapView implements MapView {
         this.drawDebugObjects(debugShapes, layer, placed.offsetx, placed.offsety)
         if (visible) this.addTileObjects(layer, placed)
       } else if (visible && layer.type === 'tilelayer') {
-        const sprite = this.drawTileLayer(layer)
-        if (sprite) this.place(sprite, placed)
+        if (isDepthSorted(layer)) {
+          this.addDepthSortedLayer(layer, placed)
+        } else {
+          const sprite = this.drawTileLayer(layer)
+          if (sprite) this.place(sprite, placed)
+        }
       } else if (visible && layer.type === 'imagelayer') {
         const picture = loaded.imageLayers.get(layer)
         if (picture) this.place(new Sprite(textureOf(picture)), placed)
@@ -80,8 +97,41 @@ export class TiledMapView implements MapView {
   // just big enough for the tiles the layer has (a layer of a few flowers is a small picture, not one
   // as big as the map), and a tile bigger than the grid is drawn whole, past the edge of its cell.
   private drawTileLayer(layer: Parameters<typeof tileLayerCells>[0]): Sprite | undefined {
+    const { cells, bounds } = tileLayerCells(layer, this.loaded.map)
+    return this.drawCells(layer.name, cells, bounds)
+  }
+
+  // A depth sorted layer: a picture of each group of its cells that share a depth (see `groupByDepth`: the art of a wall, or
+  // a row of the rest), so each is in front of a champion or behind it as a whole. A tile is in the cell its bottom left
+  // corner is in, so a tile taller than the grid is drawn whole with its cell and rises over the ones above it.
+  private addDepthSortedLayer(layer: Parameters<typeof tileLayerCells>[0], placed: { offsetx: number; offsety: number; opacity: number }): void {
     const { map } = this.loaded
     const { cells, bounds } = tileLayerCells(layer, map)
+    const grid = {
+      tileWidth: map.tilewidth,
+      tileHeight: map.tileheight,
+      offsetX: placed.offsetx,
+      offsetY: placed.offsety,
+      arenaX: this.arena.x,
+      arenaY: this.arena.y,
+      scale: this.scale,
+    }
+    for (const group of groupByDepth(cells, grid, this.walls, { attachTiles: attachTiles(layer) })) {
+      const piece = this.drawCells(layer.name, group.cells, bounds)
+      if (!piece) continue
+      this.place(piece, placed)
+      piece.zIndex = group.depth
+      this.sorted.push(piece)
+    }
+  }
+
+  // These cells of a layer drawn onto one canvas, as a picture placed where they are on the map.
+  private drawCells(
+    layerName: string,
+    cells: ReturnType<typeof tileLayerCells>['cells'],
+    bounds: ReturnType<typeof tileLayerCells>['bounds'],
+  ): Sprite | undefined {
+    const { map } = this.loaded
     const placements: Array<{ image: CanvasImageSource; rect: Rect; x: number; y: number; flips: Flips }> = []
     for (const cell of cells) {
       const found = this.tileGraphic(cell.gid)
@@ -104,7 +154,7 @@ export class TiledMapView implements MapView {
     const width = right - left
     const height = bottom - top
     if (width > MAX_LAYER_PIXELS || height > MAX_LAYER_PIXELS) {
-      throw new Error(`The layer "${layer.name}" is ${width} by ${height} pixels, which is too big to draw.`)
+      throw new Error(`The layer "${layerName}" is ${width} by ${height} pixels, which is too big to draw.`)
     }
     const canvas = document.createElement('canvas')
     canvas.width = width

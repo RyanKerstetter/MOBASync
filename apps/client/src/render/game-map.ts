@@ -25,7 +25,7 @@ export async function createGameMap(
     const loaded = await loadTiledMap(file, mapAssetUrl)
     // The world begins at the corner of the map's arena, which is where the server puts the spawn points from.
     const { arenaRect, terrain } = readMapLayout(loaded.map)
-    return { map: new TiledMapView(loaded, mapWorldScale(loaded.map, GAME_ART_SCALE), arenaRect), terrain }
+    return { map: new TiledMapView(loaded, mapWorldScale(loaded.map, GAME_ART_SCALE), arenaRect, terrain.walls), terrain }
   } catch (error) {
     console.warn(`Could not use the map "${file}", so the plain arena is used instead.`, error)
     return { map: createArenaFloor(arena) }

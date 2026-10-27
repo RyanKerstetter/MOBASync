@@ -5,6 +5,11 @@ import { Container, Graphics } from 'pixi.js'
 // another, drawn the same way in the game and in anything else that shows the map.
 export type MapView = {
   readonly view: Container
+  // The parts of the ground that stand up out of it (the faces of walls), each a child of `view` with its depth set
+  // as its `zIndex` (see depth.ts). The world renderer draws them in order with the champions, so a champion walks
+  // behind them and in front of them, instead of over all of them. A map that has none, or a renderer that does not
+  // sort them, draws them with the ground.
+  readonly sorted?: readonly Container[]
   // The debug view (P in the game) is on or off. A map with something only worth seeing while
   // debugging, such as the true outlines of its walls, shows it then.
   setDebug?(enabled: boolean): void

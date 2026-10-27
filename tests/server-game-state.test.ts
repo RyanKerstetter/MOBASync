@@ -192,7 +192,7 @@ test('the server counts a kill once the lethal tick is committed, and has no dea
   game.simulator.addPlayer(99, 'attacker', 'Attacker', { x: targetAt.x + 40, y: targetAt.y }, new Champion({
     ...brawler,
     abilities: [...brawler.abilities],
-    attackSpeed: GAME_TPS,
+    base: { ...brawler.base, attackSpeed: GAME_TPS },
   }))
   const hitsToKill = Math.ceil(target.maxHp / brawler.attackDamage)
   for (let index = 0; index < hitsToKill + 4; index += 1) {

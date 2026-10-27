@@ -20,10 +20,11 @@ export type MapSummary = {
   // biggest at the second, and so on, so this is what is the most each team, biggest first, can have, and
   // how many teams there can be.
   spawns: number[]
-  // Whether it has a hill (for king of the hill), and a flag for each of the first two teams (for capture
-  // the flag).
+  // Whether it has a hill (for king of the hill), a flag for each of the first two teams (for capture
+  // the flag), and a core for each of the first two teams (for core destruction).
   hill: boolean
   flags: boolean
+  cores: boolean
   // How many monsters it starts with.
   monsters: number
   // Why the map cannot be played on, if it cannot (what is wrong with its file). It is listed so the leader
@@ -32,7 +33,7 @@ export type MapSummary = {
 }
 
 // Just what the checks below need of a map, which is less than a summary.
-export type MapCapabilities = Pick<MapSummary, 'name' | 'spawns' | 'hill' | 'flags' | 'problem'>
+export type MapCapabilities = Pick<MapSummary, 'name' | 'spawns' | 'hill' | 'flags' | 'cores' | 'problem'>
 
 // "Duel arena" for "duel_arena": a name for a map that does not give itself a title.
 export function mapDisplayName(id: string): string {
@@ -50,13 +51,14 @@ export function summarizeMap(id: string, layout: MapLayout): MapSummary {
     spawns: layout.spawns.map((points) => points.length),
     hill: layout.hill !== undefined,
     flags: Boolean(layout.flags[0] && layout.flags[1]),
+    cores: Boolean(layout.cores[0] && layout.cores[1]),
     monsters: layout.monsters.length,
   }
 }
 
 // A map whose file has something wrong with it: all of what is wrong, as `readMapLayout` says it.
 export function unplayableMap(id: string, problem: string): MapSummary {
-  return { id, name: mapDisplayName(id), width: 0, height: 0, spawns: [], hill: false, flags: false, monsters: 0, problem }
+  return { id, name: mapDisplayName(id), width: 0, height: 0, spawns: [], hill: false, flags: false, cores: false, monsters: 0, problem }
 }
 
 // The modes the map can be played in, which is every mode it has what it needs for.

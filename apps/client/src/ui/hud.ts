@@ -1,4 +1,4 @@
-import { GAME_TPS } from '../../../../packages/shared/src/index.ts'
+import { GAME_TPS, statReduction, type ChampionStats } from '../../../../packages/shared/src/index.ts'
 import { layoutHealthBar } from '../render/health-bar.ts'
 
 export type AbilitySlotView = {
@@ -54,8 +54,69 @@ export function healthReadout(health: { hp: number; maxHp: number; shield: numbe
   }
 }
 
+// The grid of item slots in the shop panel: four across and two down. A slot for each kind of item (`ITEM_SLOTS`) fills it from the top left, and what is
+// left over is room for kinds still to come: a new slot is a new entry in `ITEM_SLOTS`, and takes the next cell. (There is a test that they fit.)
+export const HUD_ITEM_COLUMNS = 4
+export const HUD_ITEM_ROWS = 2
+
+export type ProgressReadout = {
+  // The level, such as "7".
+  level: string
+  // How much of the experience bar is full, as a percentage of its width. The bar has no numbers, only this: full at the highest
+  // level, where there is no next.
+  xpPercent: number
+  gold: string
+  // The shards, which are shown as a number even when there are none, since the shard shop button is always there.
+  shards: string
+}
+
+export function progressReadout(progress: {
+  level: number
+  // How far it is through this level, from 0 to 1 (see `XpProgress`).
+  fraction: number
+  gold: number
+  shards: number
+}): ProgressReadout {
+  const whole = (amount: number): string => String(Math.max(0, Math.floor(amount)))
+  return {
+    level: String(progress.level),
+    xpPercent: Math.max(0, Math.min(1, progress.fraction)) * 100,
+    gold: whole(progress.gold),
+    shards: whole(progress.shards),
+  }
+}
+
+// The numbers a champion is made of, which the stats panel lists: its stats at its level (see stats.ts). Items will change them, and it
+// is what the items change that the panel is given.
+export type PlayerStats = ChampionStats
+
+export type StatRow = { label: string; value: string }
+
+// One row of the stats panel for each stat, in the order they are listed: whole numbers (the arcane is a whole amount of ability power), except for the
+// attack speed, a rate, which is told to two places without a tail of zeros (1.2, not 1.20; 1, not 1.00). The resistance and the haste are told as the
+// stat and, after it, what it takes off a hit or a cooldown (see `statReduction`).
+export function statRows(stats: PlayerStats): StatRow[] {
+  const finite = (amount: number): number => (Number.isFinite(amount) ? Math.max(0, amount) : 0)
+  const whole = (amount: number): string => String(Math.round(finite(amount)))
+  const rate = (amount: number): string => String(Number(finite(amount).toFixed(2)))
+  const takesOff = (stat: number): string => `${whole(stat)} (${Math.round(statReduction(finite(stat)) * 100)}%)`
+  return [
+    { label: 'Max health', value: whole(stats.maxHp) },
+    { label: 'Attack damage', value: whole(stats.attackDamage) },
+    { label: 'Attack speed', value: rate(stats.attackSpeed) },
+    { label: 'Attack range', value: whole(stats.attackRange) },
+    { label: 'Move speed', value: whole(stats.moveSpeed) },
+    { label: 'Arcane', value: whole(stats.arcane) },
+    { label: 'Resistance', value: takesOff(stats.resistance) },
+    { label: 'Haste', value: takesOff(stats.haste) },
+  ]
+}
+
 // What the health bar says while the champion is dead: how long until it is back, counted down in whole seconds
 // (so it reads 1 until it is back, not 0).
 export function respawnText(secondsLeft: number): string {
   return `Respawning in ${Math.max(1, Math.ceil(secondsLeft))}s`
 }
+
+// What it says while the champion is dead and will not come back: in Core Destruction, its team's core is broken.
+export const OUT_TEXT = 'Out of the game: your core is down'

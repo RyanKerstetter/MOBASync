@@ -5,14 +5,16 @@ import { fileURLToPath } from 'node:url'
 import {
   CharacterAnimator,
   chooseAnimation,
+  DIAGONAL_BIAS,
+  directionOf,
   frameAt,
   MOVING_GRACE_MS,
   TURN_DISTANCE,
   type AnimationClip,
   type AnimationKey,
 } from '../apps/client/src/animation.ts'
-import { championSprites } from '../apps/client/src/champion-sprites.ts'
-import { champions } from '../packages/shared/src/index.ts'
+import { championSprites, spriteRows } from '../apps/client/src/champion-sprites.ts'
+import { champions, monsters } from '../packages/shared/src/index.ts'
 
 const idle: AnimationClip = { frames: 4, fps: 6, loop: true }
 const walk: AnimationClip = { frames: 4, fps: 8, loop: true }
@@ -66,7 +68,7 @@ test('a clip starts from its first frame when it changes, and runs on its own cl
     x += 2
     return animator.update({ position: { x, y: 100 }, dead: false, now }, clips)
   }
-  assert.deepEqual(step(start), { key: 'walk', frame: 0, facing: 1 })
+  assert.deepEqual(step(start), { key: 'walk', frame: 0, facing: 1, direction: 'down' })
   assert.equal(step(start + 100)?.frame, 0)
   assert.equal(step(start + 130)?.frame, 1)
   assert.equal(step(start + 380)?.frame, 3)
@@ -156,7 +158,7 @@ test('an attack spreads its first three frames over the windup and plays the las
   // The windup: three frames, the last of them just before the hit.
   assert.deepEqual([0, 0.33, 0.34, 0.66, 0.67, 0.99].map((p, i) => during(p, i)?.frame), [0, 0, 1, 1, 2, 2])
   // The hit: the action is gone, and the fourth frame shows for one frame's time, 1/12 s.
-  assert.deepEqual(after(100), { key: 'attack', frame: 3, facing: 1 })
+  assert.deepEqual(after(100), { key: 'attack', frame: 3, facing: 1, direction: 'down' })
   assert.equal(after(100 + 83)?.frame, 3)
   assert.equal(after(100 + 84)?.key, 'idle', 'and then it is standing')
 })
@@ -188,7 +190,7 @@ test('dying plays from the first frame when the champion dies, and standing up a
   const withDead = { ...clips, dead: dying }
   const state = (dead: boolean, now: number) => animator.update({ position: at, dead, now }, withDead)
   assert.equal(state(false, 0)?.key, 'idle')
-  assert.deepEqual(state(true, 1000), { key: 'dead', frame: 0, facing: 1 })
+  assert.deepEqual(state(true, 1000), { key: 'dead', frame: 0, facing: 1, direction: 'down' })
   assert.equal(state(true, 1399)?.frame, 0, 'it sits on the first frame for 0.4 s')
   assert.equal(state(true, 1400)?.frame, 1, 'then the second')
   assert.equal(state(true, 90000)?.frame, 1, 'and stays on it')
@@ -218,19 +220,75 @@ function pngSize(url: string): { width: number; height: number } {
   return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) }
 }
 
-test('every sprite set belongs to a champion, and every clip fits its sheet exactly', () => {
+test('every sprite set belongs to a champion or a monster, and every clip fits its sheet exactly', () => {
   assert.ok(Object.keys(championSprites).length > 0)
   for (const [championId, set] of Object.entries(championSprites)) {
-    assert.ok(champions.has(championId), `${championId} is a champion`)
+    assert.ok(champions.has(championId) || monsters.has(championId), `${championId} is a champion or a monster`)
     assert.ok(set.anchor.x >= 0 && set.anchor.x <= set.frameWidth && set.anchor.y >= 0 && set.anchor.y <= set.frameHeight, `${championId}'s anchor is inside a frame`)
     assert.ok(set.scale > 0)
     assert.ok(set.clips.idle, `${championId} has an idle to fall back on`)
+    if (set.directions) {
+      const rows = Object.values(set.directions)
+      assert.equal(new Set(rows).size, 4, `${championId} has a row of its own for each way it faces`)
+      assert.deepEqual([...rows].sort(), Array.from({ length: spriteRows(set) }, (_, row) => row), 'with none skipped')
+    }
     for (const [key, clip] of Object.entries(set.clips)) {
       assert.ok(clip)
       const sheet = pngSize(clip.url)
       assert.equal(sheet.width, clip.frames * set.frameWidth, `${championId} ${key}: the frames fill the sheet across`)
-      assert.equal(sheet.height, set.frameHeight, `${championId} ${key}: and it is one row high`)
+      assert.equal(sheet.height, spriteRows(set) * set.frameHeight, `${championId} ${key}: and its rows fill it down`)
       assert.ok(clip.fps > 0)
     }
   }
+  assert.ok(championSprites.slime?.directions, 'slimes are drawn facing the way they go')
+})
+
+test('a character drawn facing four ways faces down until it moves, then the way it goes most', () => {
+  const animator = new CharacterAnimator()
+  let position = { ...at }
+  let now = 0
+  const go = (dx: number, dy: number) => {
+    position = { x: position.x + dx, y: position.y + dy }
+    return animator.update({ position, dead: false, now: (now += 16) }, clips)?.direction
+  }
+  assert.equal(animator.update({ position, dead: false, now }, clips)?.direction, 'down', 'toward the player at first')
+  assert.equal(go(0, -2), 'down', 'not on the first step')
+  assert.equal(go(0, -TURN_DISTANCE), 'up')
+  assert.equal(go(-TURN_DISTANCE, 1), 'left', 'mostly across is across')
+  assert.equal(go(TURN_DISTANCE, -1), 'right')
+  assert.equal(go(1, TURN_DISTANCE), 'down', 'and mostly down is down')
+  now += 500
+  assert.equal(go(0, 0), 'down', 'and it keeps facing it standing')
+})
+
+test('a character facing four ways keeps its way along a diagonal and through a wobble, but not a real turn', () => {
+  const animator = new CharacterAnimator()
+  let position = { ...at }
+  let now = 0
+  const go = (dx: number, dy: number) => {
+    position = { x: position.x + dx, y: position.y + dy }
+    return animator.update({ position, dead: false, now: (now += 16) }, clips)?.direction
+  }
+  go(0, 0)
+  go(TURN_DISTANCE, 0)
+  // Corner-wise down and to the right, a little more down than across, and the other way about.
+  const diagonal = [[2, 2.2], [2.2, 2], [2, 2.4], [2.3, 2], [2, 2]].map(([dx, dy]) => go(dx, dy))
+  assert.deepEqual(diagonal, diagonal.map(() => 'right'))
+  // Steps back of a pixel or two, as the drawn position does when it is corrected or pushed.
+  const wobbly = [[2.5, 0], [-1.5, 0], [2.5, 0], [0, 2], [2.5, 0], [0, -1.5]].map(([dx, dy]) => go(dx, dy))
+  assert.deepEqual(wobbly, wobbly.map(() => 'right'))
+  // A step that is clearly more down than the bias, kept up, turns it.
+  assert.equal(directionOf(1, DIAGONAL_BIAS + 0.1, 'right'), 'down')
+  assert.equal(go(1, 2.5), 'right')
+  assert.equal(go(1, 2.5), 'down')
+})
+
+test('while it attacks, a character facing four ways turns at once to face what it is aimed at', () => {
+  const animator = new CharacterAnimator()
+  const toward = (aimAt: { x: number; y: number }) =>
+    animator.update({ position: at, dead: false, action: { kind: 'attack', progress: 0.1, aimAt }, now: 0 }, { ...clips, attack })?.direction
+  assert.equal(toward({ x: 100, y: 40 }), 'up')
+  assert.equal(toward({ x: 30, y: 110 }), 'left')
+  assert.equal(toward({ x: 200, y: 90 }), 'right')
+  assert.equal(toward({ x: 105, y: 300 }), 'down')
 })

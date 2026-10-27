@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { ClientGameState } from '../apps/client/src/game-state.ts'
 import { HITBOX_COLORS, hitboxShapes } from '../apps/client/src/render/hitboxes.ts'
 import { ServerGameState } from '../apps/server/src/game-state.ts'
 import {
+  flattenLayers,
   GAME_MONSTER_TEAM,
   GameSnapshotSchema,
   getMonster,
+  getProperty,
+  monsters,
   parseTiledMap,
   readMapLayout,
   summarizeMap,
@@ -21,24 +25,20 @@ import { testSpawns } from './test-spawns.ts'
 const grunt = defineMonster({
   id: 't-camp-grunt',
   name: 'Camp Grunt',
-  maxHp: 600,
+  base: { maxHp: 600, attackDamage: 20, attackSpeed: 1 },
   moveSpeed: 200,
   radius: 20,
-  attackDamage: 20,
-  attackSpeed: 1,
   attackRange: 60,
   attackWindupTicks: 0,
   abilities: [],
-  ai: { aggroRange: 300, leashRange: 600 },
+  ai: { aggroRange: 300 },
 })
 const slayer = defineChampion({
   id: 't-camp-slayer',
   name: 'Slayer',
-  maxHp: 1000,
+  base: { maxHp: 1000, attackDamage: 5000, attackSpeed: 1 },
   moveSpeed: 220,
   radius: 18,
-  attackDamage: 5000,
-  attackSpeed: 1,
   attackRange: 150,
   attackWindupTicks: 0,
   abilities: [...brawler.abilities],
@@ -72,14 +72,14 @@ function mapWith(objects: unknown[]): ReturnType<typeof parseTiledMap> {
   })
 }
 let nextId = 500
-const camp = (kind: unknown, x: number, y: number, extra: Record<string, unknown> = {}) => ({
+const camp = (kind: unknown, x: number, y: number, extra: Record<string, unknown> = {}, property = 'monster-type') => ({
   id: nextId++,
   name: `camp-${String(kind)}`,
-  type: 'monster',
+  type: 'monster-spawn',
   point: true,
   x,
   y,
-  properties: kind === undefined ? [] : [{ name: 'monster', type: 'string', value: kind }],
+  properties: kind === undefined ? [] : [{ name: property, type: 'string', value: kind }],
   ...extra,
 })
 const problemsOf = (objects: unknown[]): string => {
@@ -92,18 +92,40 @@ const problemsOf = (objects: unknown[]): string => {
 }
 
 test('a map puts monsters where its monster points are, by the monster they name', () => {
-  const layout = readMapLayout(mapWith([camp('wolf', 400, 300), camp('wolf', 100.4, 80.6)]))
+  const layout = readMapLayout(mapWith([camp('wolf', 400, 300), camp('slime', 100.4, 80.6)]))
   // Map pixels from the arena's corner are three world units each, in whole numbers.
-  assert.deepEqual(layout.monsters, [{ monster: 'wolf', at: { x: 1200, y: 900 } }, { monster: 'wolf', at: { x: 301, y: 242 } }])
+  assert.deepEqual(layout.monsters, [{ monster: 'wolf', at: { x: 1200, y: 900 } }, { monster: 'slime', at: { x: 301, y: 242 } }])
+  assert.deepEqual(layout.warnings, [])
   assert.deepEqual(readMapLayout(mapWith([])).monsters, [], 'a map need not have any')
   assert.equal(summarizeMap('camps', layout).monsters, 2, 'and the lobby is told how many')
+  // The competitive map spells the property `monester-type`, and is read as it is.
+  assert.deepEqual(readMapLayout(mapWith([camp('slime', 400, 300, {}, 'monester-type')])).monsters, [{ monster: 'slime', at: { x: 1200, y: 900 } }])
+})
+
+test('a point for a monster the game does not have yet is left out, and the map says so, but can still be played on', () => {
+  const layout = readMapLayout(mapWith([camp('dragon', 400, 300), camp('slime', 200, 300)]))
+  assert.deepEqual(layout.monsters, [{ monster: 'slime', at: { x: 600, y: 900 } }])
+  assert.equal(layout.warnings.length, 1)
+  assert.match(layout.warnings[0], /camp-dragon is for a monster called "dragon", which the game does not have \(only slime, golem, wolf\b.*\), so it is left out/)
+})
+
+test('every monster point on the competitive map is a monster in the game, but those the game does not have yet', () => {
+  const map = parseTiledMap(JSON.parse(readFileSync(new URL('../res/maps/competetive.tmj', import.meta.url), 'utf-8')))
+  const layout = readMapLayout(map)
+  const points = flattenLayers(map.layers).flatMap(({ layer }) => layer.type === 'objectgroup' ? layer.objects : [])
+    .filter((object) => (object.class ?? object.type) === 'monster-spawn')
+    .map((object) => String(getProperty(object.properties, 'monster-type') ?? getProperty(object.properties, 'monester-type')))
+  assert.ok(points.includes('slime') && points.includes('golem'), 'it has slimes and golems')
+  for (const kind of ['slime', 'golem']) assert.ok(layout.monsters.some((camp) => camp.monster === kind), `and the game puts the ${kind}s there`)
+  assert.deepEqual(layout.monsters.map((camp) => camp.monster), points.filter((kind) => monsters.has(kind)))
+  assert.equal(layout.warnings.length, points.filter((kind) => !monsters.has(kind)).length, 'and says which it left out')
 })
 
 test('a monster point that is not right says which, and what is wrong', () => {
   assert.match(problemsOf([camp('wolf', 400, 300, { point: false, width: 5, height: 5 })]), /camp-wolf is not a point/)
-  assert.match(problemsOf([camp(undefined, 400, 300)]), /camp-undefined needs a monster property that names a monster \(wolf/)
-  assert.match(problemsOf([camp('dragon', 400, 300)]), /camp-dragon needs a monster property that names a monster/)
-  assert.match(problemsOf([camp(7, 400, 300)]), /needs a monster property/)
+  assert.match(problemsOf([camp(undefined, 400, 300)]), /camp-undefined needs a monster-type property that names a monster \(slime, golem, wolf/)
+  assert.match(problemsOf([camp(7, 400, 300)]), /needs a monster-type property/)
+  assert.match(problemsOf([camp(' ', 400, 300)]), /needs a monster-type property/)
   assert.match(problemsOf([camp('wolf', -5, 300)]), /camp-wolf is outside the arena/)
   // The wolf is 22 across from its middle, a third of that in map pixels, so one a pixel from the edge has no room.
   assert.match(problemsOf([camp('wolf', 1, 300)]), /camp-wolf is too close to a wall or the arena's edge: a Wolf would start inside it/)
@@ -205,7 +227,7 @@ test('monsters are named, and have their ranges and what they are doing, which p
   const monster = characters.find((character) => character.id === 10)
   assert.equal(monster?.name, 'Camp Grunt')
   assert.equal(monster?.player, undefined)
-  assert.deepEqual(monster?.monster, { aggroRange: 300, deaggroRange: 450, leashRange: 600, home: { x: 600, y: 600 }, mode: 'idle' })
+  assert.deepEqual(monster?.monster, { aggroRange: 300, deaggroRange: 450, deaggro: 0, home: { x: 600, y: 600 }, mode: 'idle' })
   assert.equal(characters.find((character) => character.id === 1)?.name, 'Ann')
   assert.equal(characters.find((character) => character.id === 1)?.monster, undefined)
 })
@@ -230,15 +252,66 @@ test('monsters are not on the leaderboard or the team scores, and are in the kil
   assert.deepEqual([line?.killer?.name, line?.victim.name, line?.victim.team], ['Ann', 'Camp Grunt', GAME_MONSTER_TEAM])
 })
 
-test('the debug view marks a monster\'s aggro and deaggro ranges round it and its leash round its home, and nothing for a player', () => {
+test('the debug view marks a monster\'s aggro range round it and its deaggro range round its home, and nothing for a player', () => {
   const state = clientWithMonster()
-  const shapes = hitboxShapes(state.getCharacters(0), [], 1)
+  // The monster has been drawn off its home, to 200 east of it: its aggro range goes with it, and its deaggro range does not.
+  const drawn = state.getCharacters(0).map((character) => (character.monster ? { ...character, position: { x: 800, y: 600 } } : character))
+  const shapes = hitboxShapes(drawn, [], 1)
   const rings = shapes.filter((shape) => shape.kind === 'circle' && shape.outline)
   assert.deepEqual(rings.map((shape) => shape.kind === 'circle' && [shape.color, shape.radius, shape.x, shape.y]), [
-    [HITBOX_COLORS.aggro, 300, 600, 600],
+    [HITBOX_COLORS.aggro, 300, 800, 600],
     [HITBOX_COLORS.deaggro, 450, 600, 600],
-    [HITBOX_COLORS.leash, 600, 600, 600],
   ])
-  assert.equal(shapes.length, 3 + 1 + 3, 'three bodies, three rings, and a mark on its home')
-  assert.equal(getMonster('wolf').ai.leashRange > getMonster('wolf').ai.aggroRange, true)
+  assert.equal(shapes.length, 3 + 2 + 1, 'three bodies, two rings, and a mark on its home')
+})
+
+// ---------------------------------------------------------------------------- the deaggro bar, on the page
+
+// Hits from a long way off, and runs much faster than the monster can.
+const sprinter = defineChampion({
+  id: 't-bar-sprinter',
+  name: 'Sprinter',
+  base: { maxHp: 2000, attackDamage: 10, attackSpeed: 1 },
+  moveSpeed: 400,
+  radius: 18,
+  attackRange: 500,
+  attackWindupTicks: 0,
+  abilities: [...brawler.abilities],
+})
+// Loses interest once it is more than 450 from where it started, and its bar takes a second to fill.
+const sulker = defineMonster({
+  id: 't-bar-sulker',
+  name: 'Sulker',
+  base: { maxHp: 800, attackDamage: 10, attackSpeed: 1 },
+  moveSpeed: 200,
+  radius: 20,
+  attackRange: 60,
+  attackWindupTicks: 0,
+  abilities: [],
+  ai: { aggroRange: 300, deaggroRange: 450, deaggroTicks: 60 },
+})
+
+test('a monster that is losing interest is shown with its deaggro bar, as a share of full, full while it walks home, and with none at rest', () => {
+  const state = new ClientGameState()
+  state.simulator.addMonster(10, sulker, { x: 700, y: 300 })
+  state.simulator.addPlayer(1, 'p1', 'Ann', { x: 1100, y: 300 }, sprinter, 1)
+  state.setLocalCharacterId(1)
+  state.simulator.addOrder(1, { id: 'snipe', seq: 1, tick: 1, type: 'attack', targetId: 10 })
+  state.simulator.addOrder(1, { id: 'run', seq: 2, tick: 40, type: 'move', target: { x: 2300, y: 300 } })
+  const monster = () => state.getCharacters(0).find((character) => character.id === 10)?.monster
+
+  // It is hit from 400 away, and goes after them: it is a long way out already by tick 100, but still within 450 of where it started.
+  state.simulator.at(100)
+  assert.equal(monster()?.mode, 'chase')
+  assert.equal(monster()?.deaggro, 0, 'it is after them, and within its range of home: nothing in the bar')
+  // It leaves that range at about tick 134, and the bar fills a tick at a time from there.
+  state.simulator.at(170)
+  const filling = monster()?.deaggro ?? 0
+  assert.ok(filling > 0.5 && filling < 0.65, `about 34 ticks of the 60 (${filling.toFixed(2)})`)
+  assert.equal(monster()?.mode, 'chase')
+  assert.equal(filling, state.simulator.at(170).getCharacterState(10)?.ai?.deaggro as number / 60, 'the share the frame says')
+  state.simulator.at(230)
+  assert.deepEqual([monster()?.mode, monster()?.deaggro], ['return', 1], 'full, and walking home')
+  state.simulator.at(500)
+  assert.deepEqual([monster()?.mode, monster()?.deaggro], ['idle', 0], 'home, and the bar is empty')
 })

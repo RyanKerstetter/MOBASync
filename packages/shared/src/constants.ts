@@ -8,7 +8,7 @@ export const GAME_ARENA_HEIGHT = 1440
 export const GAME_MAX_CHAMPION_RADIUS = 24
 // The map a new lobby starts on, if the server has it: res/maps/<id>.tmj, made in Tiled. The leader can pick any
 // other map in res/maps. Nothing else assumes it: a game is played on the map its lobby picked.
-export const DEFAULT_MAP_ID = 'ffa_arena'
+export const DEFAULT_MAP_ID = 'competetive'
 // How much of the world the camera shows at least, centred on the controlled champion. A screen
 // with another shape shows more of the world on its long side rather than adding bars. It is wide
 // enough that an ability aimed at its full range is on screen: the longest reach of any champion's
@@ -16,6 +16,10 @@ export const DEFAULT_MAP_ID = 'ffa_arena'
 // come close to it.
 export const GAME_VIEW_WIDTH = 16 * 120
 export const GAME_VIEW_HEIGHT = 9 * 120
+// How far a champion sees, in world units, from its middle. It is a little under the shortest half of the view
+// (`GAME_VIEW_HEIGHT` / 2, 540) so the edge of what is seen is on screen on every side, not just behind walls.
+// What blocks sight, and how it is worked out, is the vision system's (see vision.ts).
+export const GAME_VISION_RANGE = 500
 // The most players one lobby can hold.
 export const GAME_MAX_PLAYERS = 8
 // The most players one team can hold. With GAME_MAX_PLAYERS it decides how many spawn points a map

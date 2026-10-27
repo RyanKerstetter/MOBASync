@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { ITEM_SLOTS } from './items.js'
 import { GAME_MODE_IDS } from './modes.js'
 
 const TickSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
@@ -48,10 +49,30 @@ export const CastOrderSchema = z.object({
   origin: Vector2Schema,
 })
 
+// Buys an item (see items.ts) with the gold the champion has on the order's tick, if it has the slot for it. It can be given while dead.
+export const BuyOrderSchema = z.object({
+  id: z.string().min(1).max(160),
+  seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  tick: TickSchema,
+  type: z.literal('buy'),
+  itemId: z.string().min(1).max(64),
+})
+
+// Sells what is in a slot for the part of its cost the sell rate pays back.
+export const SellOrderSchema = z.object({
+  id: z.string().min(1).max(160),
+  seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  tick: TickSchema,
+  type: z.literal('sell'),
+  slot: z.enum(ITEM_SLOTS),
+})
+
 export const GameOrderSchema = z.discriminatedUnion('type', [
   MoveOrderSchema,
   GameAttackOrderSchema,
   CastOrderSchema,
+  BuyOrderSchema,
+  SellOrderSchema,
 ])
 
 // An order is sent to every player with only who gave it. Their name and session are already known
@@ -64,11 +85,15 @@ const BroadcastFields = {
 export const GameMoveSchema = MoveOrderSchema.extend(BroadcastFields)
 export const GameAttackSchema = GameAttackOrderSchema.extend(BroadcastFields)
 export const GameCastSchema = CastOrderSchema.extend(BroadcastFields)
+export const GameBuySchema = BuyOrderSchema.extend(BroadcastFields)
+export const GameSellSchema = SellOrderSchema.extend(BroadcastFields)
 
 export const GameBroadcastOrderSchema = z.discriminatedUnion('type', [
   GameMoveSchema,
   GameAttackSchema,
   GameCastSchema,
+  GameBuySchema,
+  GameSellSchema,
 ])
 
 export const GameHealthStatsSchema = z.object({
@@ -117,6 +142,9 @@ export const GameCharacterSchema = z.object({
   orders: z.array(CharacterOrderSchema),
   // Kills made up to the snapshot's commit tick: the ones that can no longer be undone.
   kills: z.number().int().nonnegative().default(0),
+  // What those kills paid in shards (see progression.ts), and what a snapshot from before there was any says: none. (The experience and
+  // the gold are in the frame, since the stats of a level and of the items the gold buys change what a frame works out.)
+  shards: z.number().int().nonnegative().default(0),
   highestOrderSequence: TickSchema,
   championId: z.string().min(1).max(64),
   // Who it is on. Characters with the same team are teammates; anyone else is an enemy.
@@ -219,6 +247,11 @@ export const AiStateSchema = z.object({
   targetId: z.number().int().positive().optional(),
   // The last player to hurt it, which an idle monster goes after on its next tick (see `AiProfileDef.aggroOnHit`).
   provokedBy: z.number().int().positive().optional(),
+  // How far its deaggro bar is filled, in ticks, from 1 (absent when it is empty) to `AiProfileDef.deaggroTicks`, which is full. The
+  // bar fills a tick at a time while whoever it is after is outside its range, and a monster whose bar is full gives up on
+  // everyone and walks home (it stays full till it is there). It is in the frame because how long they have been out of range
+  // cannot be worked out from the rest of it.
+  deaggro: z.number().int().positive().optional(),
 })
 
 export const GameFrameCharacterSchema = z.object({
@@ -237,6 +270,19 @@ export const GameFrameCharacterSchema = z.object({
   // Orders written by effects; they resolve after logged orders on their tick.
   queuedOrders: z.array(CharacterOrderSchema),
   ai: AiStateSchema.optional(),
+  // The experience it has, from which its level is worked out (see progression.ts), and with it its stats (stats.ts). It is in the
+  // frame, credited on the tick of the kill, because a level changes what the frame works out (a hit's damage, a cooldown, the
+  // health), so every peer has to have it on the same tick, and a death that a late order undoes has to take it back. Absent for none.
+  xp: z.number().int().positive().optional(),
+  // The gold it has, to spend in the shop (see items.ts), and the items it carries by slot. They are in the frame, like the experience, because
+  // what a champion carries changes what a frame works out, and gold is what buying and selling are done with, so every peer has to have them on
+  // the same tick, and a purchase or a kill that a late order undoes has to take them back with the rest of the frame. Absent gold is none, and
+  // absent items are none.
+  gold: z.number().int().nonnegative().optional(),
+  items: z.record(z.string(), z.string().min(1).max(64)).optional(),
+  // A monster's level, which it gains each time it is killed (see `monsterLevelAfterKill`): it is in the frame because the level changes its stats and what it
+  // pays, so every peer has to have it on the same tick. Absent is level 1, and a player has none (its level is its experience's).
+  level: z.number().int().min(2).optional(),
 })
 
 export const GameFrameEntitySchema = z.object({
@@ -295,6 +341,12 @@ export const ModeSetupSchema = z.discriminatedUnion('kind', [
     flags: z.array(z.object({ team: z.number().int().positive(), home: Vector2Schema })),
     ...RulesFields,
   }),
+  z.object({
+    kind: z.literal('core'),
+    // The two teams that have a core, the biggest team first: the game is won by the last of them that is not eliminated.
+    teams: z.array(z.number().int().positive()),
+    ...RulesFields,
+  }),
 ])
 
 // Points by team, keyed by the team's number.
@@ -322,6 +374,15 @@ export const ObjectiveStateSchema = z.discriminatedUnion('kind', [
     })),
     scores: ScoresSchema,
   }),
+  z.object({
+    kind: z.literal('core'),
+    // The teams whose core is broken: they can no longer respawn.
+    broken: z.array(z.number().int().positive()),
+    // The teams that are out of the game: a core broken and every player dead. The last team that is not wins.
+    eliminated: z.array(z.number().int().positive()),
+    // For each team, how many cores of other teams are broken.
+    scores: ScoresSchema,
+  }),
 ])
 
 export const GameFrameSchema = z.object({
@@ -339,10 +400,20 @@ export const TerrainSchema = z.object({
   walls: z.array(z.tuple([z.number(), z.number(), z.number().positive(), z.number().positive()])),
 })
 
+// Where each team can shop, in world units (see shops.ts). A snapshot without any is a game with no shops, shopped in from anywhere.
+export const ShopZoneSchema = z.object({
+  team: z.number().int().positive(),
+  x: z.number().finite(),
+  y: z.number().finite(),
+  width: z.number().finite().positive(),
+  height: z.number().finite().positive(),
+})
+
 export const GameSnapshotSchema = z.object({
   tick: TickSchema,
   commitTick: TickSchema,
   terrain: TerrainSchema.optional(),
+  shops: z.array(ShopZoneSchema).optional(),
   mode: ModeSetupSchema.optional(),
   // The map the game is played on (see `MapSummary`), so a page can check it drew the same one.
   map: z.string().min(1).max(100).optional(),
@@ -359,7 +430,8 @@ export const GameSnapshotSchema = z.object({
 export const GameStatusSchema = z.enum(['idle', 'selecting', 'starting', 'running', 'finished'])
 
 // How a game ended, as every player is shown it: who won (the team ahead, or none if none was), how each team
-// scored, and what each player did. `reason` is a team reaching the score limit, or the leader ending the game.
+// scored, and what each player did. `reason` is the game's own end (a team reaching the score limit, or the last team standing in Core
+// Destruction), or the leader ending the game.
 export const GameResultSchema = z.object({
   mode: GameModeSchema,
   reason: z.enum(['limit', 'ended']),
@@ -381,6 +453,8 @@ export const GameResultSchema = z.object({
 export type Vector2 = z.infer<typeof Vector2Schema>
 export type MoveOrder = z.infer<typeof MoveOrderSchema>
 export type GameOrder = z.infer<typeof GameOrderSchema>
+export type BuyOrder = z.infer<typeof BuyOrderSchema>
+export type SellOrder = z.infer<typeof SellOrderSchema>
 export type GameAttackOrder = z.infer<typeof GameAttackOrderSchema>
 export type CastTarget = z.infer<typeof CastTargetSchema>
 export type CastOrder = z.infer<typeof CastOrderSchema>
@@ -405,6 +479,10 @@ export type ModeSetup = z.infer<typeof ModeSetupSchema>
 export type ObjectiveState = z.infer<typeof ObjectiveStateSchema>
 
 export * from './constants.js'
+export * from './progression.js'
+export * from './items.js'
+export * from './shops.js'
+export * from './stats.js'
 export { boxTouchesCircle } from './geometry.js'
 export type { BoxShape } from './geometry.js'
 export {
@@ -412,6 +490,7 @@ export {
   alliesInBox,
   alliesInRadius,
   alongAim,
+  arcane,
   attackDamage,
   attackRangeBonus,
   attackSpeedBonus,
@@ -428,11 +507,14 @@ export {
   getEntityDef,
   haste,
   heal,
+  health,
   interrupt,
   knockback,
+  level,
   linear,
   loseHealth,
   mark,
+  maxHealth,
   missingHealth,
   ownEntity,
   popMarkers,
@@ -449,6 +531,7 @@ export {
   silence,
   slow,
   spawnEntity,
+  scaled,
   stacks,
   startCooldown,
   stun,
@@ -458,6 +541,7 @@ export {
   when,
 } from './effects.js'
 export type {
+  Scaling,
   DashDef,
   GameEvent,
   EntityDef,
@@ -507,9 +591,11 @@ export {
   createModeSetup,
   defaultRules,
   DEFAULT_GAME_MODE,
+  FALLBACK_GAME_MODE,
   GAME_MODE_IDS,
   GAME_MODES,
   getGameMode,
+  modeHasEconomy,
   hillCaptureTicks,
   hillContains,
   hillLeader,
@@ -527,13 +613,26 @@ export {
   readRulesChange,
   RESPAWN_SECONDS,
   teamCountProblem,
+  startingMode,
   winningTeam,
 } from './modes.js'
-export type { GameModeDef, HillMovement, LobbyRules, MapObjectives, ModeRules, ObjectiveUnit, RulesChange, ScoreName } from './modes.js'
+export type { GameModeDef, HillMovement, LobbyRules, MapObjectives, ModeRules, ObjectiveCore, ObjectiveUnit, RulesChange, ScoreName } from './modes.js'
 export { Terrain } from './terrain.js'
 export type { Rect, TerrainData } from './terrain.js'
 export { createVisibilityGraph } from './visibility-graph.js'
 export type { PathfinderFactory, PathWorld, Pathfinder } from './pathfinding.js'
+export { canSeeBody } from './vision.js'
+export type {
+  SightViewer,
+  VisionFactory,
+  VisionGround,
+  VisionMask,
+  VisionSystem,
+  VisionView,
+} from './vision.js'
+export { createShadowcastVision, SHADOWCAST_CELL } from './shadowcast-vision.js'
+export type { ShadowcastOptions } from './shadowcast-vision.js'
+export { createVision, DEFAULT_VISION_SYSTEM, visionSystems } from './vision-systems.js'
 export type { SpawnSlots } from './spawns.js'
 export { readMapLayout } from './map-layout.js'
 export {
@@ -546,12 +645,18 @@ export {
   unplayableMap,
 } from './maps.js'
 export type { MapCapabilities, MapSummary } from './maps.js'
-export type { MapLayout, MapMonster, MapRect } from './map-layout.js'
+export type { MapLayout, MapMonster, MapRect, MapShop, MapTurret } from './map-layout.js'
 export { Champion, champions, DEFAULT_CHAMPION_ID, getChampion } from './champions.js'
 export { aimAt, think } from './ai.js'
-export type { AiBody, AiDecision, AiOrder, AiOther } from './ai.js'
-export { getCharacterChampion, getMonster, Monster, monsters } from './monsters.js'
+export type { AiBody, AiDecision, AiOrder, AiOther, WalkDistance } from './ai.js'
+export { attackEvery, getCharacterChampion, getMonster, Monster, monsters } from './monsters.js'
 export type { AiAbilityRule, AiProfile, AiProfileDef, MonsterDef } from './monsters.js'
+export { chooseTurretTarget, getTurret, Turret, TURRET_TIERS, turretId, turrets, turretTiers } from './turrets.js'
+export type { TurretBody, TurretPrey, TurretTierDef } from './turrets.js'
+export { Core, CORE, CORE_ID, cores, getCore } from './cores.js'
+export type { CoreDef } from './cores.js'
+export { shieldedStructures } from './structures.js'
+export type { StructureRef } from './structures.js'
 export type { ChampionDef } from './champions.js'
 export {
   CharacterTickSnapshot,

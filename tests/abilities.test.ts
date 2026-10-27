@@ -253,6 +253,8 @@ test('effects write only through the context they are given', () => {
     posAt: (id) => units.get(id)?.initialPosition,
     unitsInRadius: () => [1, 2, 3],
     markersOn: () => [],
+    // Damage reads its owner's arcane.
+    statsOf: (id) => units.get(id)?.champion.statsAt(1),
     emitEvent: (event) => events.push(event),
   }
 
@@ -570,7 +572,7 @@ test('attackDamage() makes an auto deal whatever the champion stat says', () => 
   for (const damageStat of [60, 250]) {
     const caster = new Champion({
       ...brawler,
-      attackDamage: damageStat,
+      base: { ...brawler.base, attackDamage: damageStat },
       onAttackHit: [damage(attackDamage())],
     })
     const simulator = new Simulator()
@@ -2080,7 +2082,7 @@ test('stim costs health and gives attack speed, move speed and resistance for fi
 })
 
 test('stim\'s cost never kills: at low health it takes everything but the last point', () => {
-  const fragile = new Champion({ ...soldier, maxHp: 100 })
+  const fragile = new Champion({ ...soldier, base: { ...soldier.base, maxHp: 100 } })
   const simulator = createSoldierDuel([{ x: 700, y: 400 }], brawler, fragile)
   simulator.addOrder(1, cast(1, 1, 't-stim', { mode: 'none' }))
 
@@ -2261,7 +2263,7 @@ test('a lighter hit leaves the bot standing, still healing', () => {
 
 test('healing cannot revive a unit that is already at zero health', () => {
   const healer = new Champion({ ...soldier, abilities: ['t-first-aid'] })
-  const killer = new Champion({ ...bigHitter, attackDamage: 5000 })
+  const killer = new Champion({ ...bigHitter, base: { ...bigHitter.base, attackDamage: 5000 } })
   const simulator = createSoldierDuel([{ x: 160, y: 100 }], killer, healer)
   simulator.addOrder(2, enemyOrder(1, 1, { type: 'attack', targetId: 1 }))
   simulator.addOrder(1, cast(1, 10, 't-first-aid', { mode: 'none' }))

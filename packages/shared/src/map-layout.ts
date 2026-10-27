@@ -3,6 +3,8 @@ import type { HillArea, Vector2 } from './index.js'
 import { monsters } from './monsters.js'
 import type { SpawnSlots } from './spawns.js'
 import { Terrain, type Rect } from './terrain.js'
+import { CORE_ID, cores } from './cores.js'
+import { turretId, turrets, turretTiers } from './turrets.js'
 import { flattenLayers, getProperty, mapWorldScale, type TiledMap, type TiledObject } from './tiled.js'
 
 // What the game takes from a map made in Tiled besides how it looks, found by the class of the
@@ -27,16 +29,38 @@ import { flattenLayers, getProperty, mapWorldScale, type TiledMap, type TiledObj
 //   - `ctf-flag` points, each with the `team-name` of the slot of spawn points whose base it is: slot 1
 //     is where the biggest team starts, and so on, as for spawn points. Capture the flag is for two
 //     teams, so it uses the flags of slots 1 and 2.
-// - `monster` points, each with a `monster` property naming one of the game's monsters (see monsters.ts). A
-//   monster is in the game from the start, at its point, which is its home: where it goes back to after a fight,
-//   and comes back to when it respawns. They are in every mode, and a map with none is a map with none.
+// - `monster-spawn` points, each with a `monster-type` property naming one of the game's monsters (see monsters.ts).
+//   A monster is in the game from the start, at its point, which is its home: where it goes back to after a fight,
+//   and comes back to when it respawns. They are in every mode, and a map with none is a map with none. A point for a
+//   monster the game does not have (yet) is left out, and said so in the layout's `warnings`, so a map can keep
+//   places for monsters still to come.
+// - `turret` points, each with a `team-name` (the slot of spawn points whose team it belongs to: the team that starts there has the
+//   turret, and every other team is its enemy) and a `turret-tier` (which of the game's tiers of turret it is: see turrets.ts, where
+//   each tier's health, damage, resistance, range and the rest are). A turret stands where its point is for the whole game, is in every
+//   mode, and is left out of a game whose slot has no team (a map for two teams played by one has no turret for the second). A point
+//   for a tier the game does not have (yet) is left out, and said so in `warnings`, like a monster's.
+// - `core` points, each with the `team-name` of the slot of spawn points whose base it is the heart of, like a flag: slot 1 is where the
+//   biggest team starts, and so on. Core destruction is for two teams, so it uses the cores of slots 1 and 2, and a map that has both can
+//   be played in it (see modes.ts). A core is solid and needs room for its size (cores.ts) clear of the walls and the arena's edge, and a
+//   way to it from the spawn points. The core is in a game of that mode only: in the others its point is not used.
+// - `shop` rectangles, each with the `team-name` of the slot of spawn points whose team shops there: a champion can buy and sell items only while
+//   it stands in a shop of its team (see shops.ts). A map with no shops can be shopped in from anywhere; a map with any needs one for every slot that
+//   has spawn points, or a team would have nowhere to buy, and is refused without.
+// - A turret or a core is solid, so a spawn point has to be clear of each by its size and the widest champion's, and each has to be clear
+//   of the others by their sizes, or the map is refused (a champion would start inside one, or two would stand in each other). A point too close to a wall or the arena's edge is refused with the nearest place that clears them.
 const ARENA_CLASS = 'arena'
 const WALL_CLASS = 'wall'
 const SPAWN_CLASS = 'spawn'
 const HILL_CLASS = 'hill'
 const FLAG_CLASS = 'ctf-flag'
-const MONSTER_CLASS = 'monster'
-const MONSTER_PROPERTY = 'monster'
+const MONSTER_CLASS = 'monster-spawn'
+const MONSTER_PROPERTY = 'monster-type'
+// The competitive map spells it `monester-type`, so that is read too, after the right spelling.
+const MONSTER_PROPERTY_MISSPELT = 'monester-type'
+const CORE_CLASS = 'core'
+const SHOP_CLASS = 'shop'
+const TURRET_CLASS = 'turret'
+const TURRET_TIER_PROPERTY = 'turret-tier'
 const SLOT_PROPERTY = 'team-name'
 const NUMBER_PROPERTY = 'spawn-number'
 
@@ -44,6 +68,12 @@ export type MapRect = { x: number; y: number; width: number; height: number }
 
 // A monster the map has: which one, and where it starts, in whole world units.
 export type MapMonster = { monster: string; at: Vector2 }
+
+// A shop the map has: the slot of spawn points whose team shops there (from 1) and the rectangle, in whole world units.
+export type MapShop = { slot: number; x: number; y: number; width: number; height: number }
+
+// A turret the map has: which tier, which slot of spawn points it is the team of (from 1), and where it stands, in whole world units.
+export type MapTurret = { tier: number; slot: number; at: Vector2 }
 
 export interface MapLayout {
   // What the lobby calls the map, and a line about it, if the map says (its `title` and `description` properties).
@@ -63,6 +93,15 @@ export interface MapLayout {
   flags: readonly (Vector2 | undefined)[]
   // The monsters the game starts with, in the order the map lists them.
   monsters: readonly MapMonster[]
+  // The turrets the game starts with, in the order the map lists them.
+  turrets: readonly MapTurret[]
+  // Where the core of each slot of spawn points stands, in whole world units: index 0 is slot 1, and a slot the map has no core for is
+  // undefined.
+  cores: readonly (Vector2 | undefined)[]
+  // The shops, in the order the map lists them (see shops.ts). None means the whole map is a shop.
+  shops: readonly MapShop[]
+  // What on the map was left out, though it can be played on without it: a point for a monster the game does not have.
+  warnings: readonly string[]
 }
 
 type Spawn = { at: Vector2; label: string }
@@ -151,6 +190,32 @@ export function readMapLayout(map: TiledMap): MapLayout {
   const spawns: Vector2[][] = slots.slice(0, used).map((points) => points.map((spawn) => spawn.at))
   const placed: Spawn[] = slots.slice(0, used).flat()
 
+  const shops: MapShop[] = []
+  for (const { object, x, y } of ofClass(SHOP_CLASS)) {
+    const label = object.name || `shop object ${object.id}`
+    const slot = getProperty(object.properties, SLOT_PROPERTY)
+    if (!isPlainRectangle(object)) {
+      problems.push(`${label} is not a plain rectangle (a shop cannot be rotated, or any other shape).`)
+    } else if (!isWhole(slot, 1, GAME_MAX_PLAYERS)) {
+      problems.push(`${label} needs a ${SLOT_PROPERTY} from 1 to ${GAME_MAX_PLAYERS}: the slot of spawn points whose team shops there.`)
+    } else {
+      const topLeft = inWorld(x, y)
+      const bottomRight = inWorld(x + (object.width ?? 0), y + (object.height ?? 0))
+      if (bottomRight.x <= 0 || bottomRight.y <= 0 || topLeft.x >= width || topLeft.y >= height) {
+        problems.push(`${label} is outside the arena.`)
+      } else {
+        shops.push({ slot, x: topLeft.x, y: topLeft.y, width: bottomRight.x - topLeft.x, height: bottomRight.y - topLeft.y })
+      }
+    }
+  }
+  // A map with shops has one for every team that can start on it: one with none for a slot would leave that team nowhere to buy.
+  if (shops.length > 0) {
+    for (let slot = 1; slot <= used; slot += 1) {
+      if (shops.some((shop) => shop.slot === slot)) continue
+      problems.push(`Slot ${slot} has spawn points but no shop, so its team could never buy: give a shop the ${SLOT_PROPERTY} ${slot}.`)
+    }
+  }
+
   const hills = ofClass(HILL_CLASS)
   let hill: HillArea | undefined
   if (hills.length > 1) {
@@ -181,14 +246,18 @@ export function readMapLayout(map: TiledMap): MapLayout {
     }
   }
   const camps: MapMonster[] = []
+  const warnings: string[] = []
+  const known = [...monsters.keys()].join(', ')
   for (const { object, x, y } of ofClass(MONSTER_CLASS)) {
     const label = object.name || `monster object ${object.id}`
-    const kind = getProperty(object.properties, MONSTER_PROPERTY)
+    const kind = getProperty(object.properties, MONSTER_PROPERTY) ?? getProperty(object.properties, MONSTER_PROPERTY_MISSPELT)
     const body = typeof kind === 'string' ? monsters.get(kind) : undefined
     if (!object.point) {
       problems.push(`${label} is not a point (make it with Tiled's Insert Point tool).`)
+    } else if (typeof kind !== 'string' || !kind.trim()) {
+      problems.push(`${label} needs a ${MONSTER_PROPERTY} property that names a monster (${known}).`)
     } else if (!body) {
-      problems.push(`${label} needs a ${MONSTER_PROPERTY} property that names a monster (${[...monsters.keys()].join(', ')}).`)
+      warnings.push(`${label} is for a monster called "${kind}", which the game does not have (only ${known}), so it is left out.`)
     } else {
       const at = inWorld(x, y)
       if (at.x < 0 || at.y < 0 || at.x > width || at.y > height) {
@@ -201,8 +270,104 @@ export function readMapLayout(map: TiledMap): MapLayout {
     }
   }
 
-  // The flags are only worth having if they can be walked to.
-  placed.push(...flagPoints.values())
+  // Where, in the map's own pixels, a body of this radius fits nearest to a place it does not, for the message that says so, and how far
+  // apart two places are in the same pixels. A map is made in pixels, so that is what it is told in.
+  const nearestFit = (at: Vector2, radius: number): string => {
+    const fit = terrain.resolve(at, radius)
+    const pixel = (value: number, origin: number): number => Math.round((origin + value / scale) * 10) / 10
+    return (
+      ` The nearest place that clears the walls and the edge is about (${pixel(fit.x, arenaRect.x)}, ${pixel(fit.y, arenaRect.y)}) in the map's own pixels`
+      + ' (keep it clear of the spawn points and the turrets too).'
+    )
+  }
+  const pixels = (units: number): number => Math.round((units / scale) * 10) / 10
+
+  // The turrets and cores that are standing in the ground, which are solid: a champion cannot start inside one.
+  const solids: Array<{ label: string; at: Vector2; radius: number }> = []
+  const posts: MapTurret[] = []
+  const tiers = turretTiers().join(', ')
+  for (const { object, x, y } of ofClass(TURRET_CLASS)) {
+    const label = object.name || `turret object ${object.id}`
+    const slot = getProperty(object.properties, SLOT_PROPERTY)
+    const tier = getProperty(object.properties, TURRET_TIER_PROPERTY)
+    const body = isWhole(tier, 1, Infinity) ? turrets.get(turretId(tier)) : undefined
+    if (!object.point) {
+      problems.push(`${label} is not a point (make it with Tiled's Insert Point tool).`)
+    } else if (!isWhole(slot, 1, GAME_MAX_PLAYERS)) {
+      problems.push(`${label} needs a ${SLOT_PROPERTY} from 1 to ${GAME_MAX_PLAYERS}: the slot of spawn points whose team it belongs to.`)
+    } else if (!isWhole(tier, 1, Infinity)) {
+      problems.push(`${label} needs a ${TURRET_TIER_PROPERTY} of 1 or more (the game has tiers ${tiers}).`)
+    } else if (!body) {
+      warnings.push(`${label} is for a tier ${tier} turret, which the game does not have (only tiers ${tiers}), so it is left out.`)
+    } else {
+      const at = inWorld(x, y)
+      if (at.x < 0 || at.y < 0 || at.x > width || at.y > height) {
+        problems.push(`${label} is outside the arena.`)
+      } else if (!roomFor(terrain, at, body.champion.radius)) {
+        problems.push(`${label} is too close to a wall or the arena's edge: a ${body.name} would stand in it.${nearestFit(at, body.champion.radius)}`)
+      } else {
+        posts.push({ tier, slot, at })
+        solids.push({ label, at, radius: body.champion.radius })
+      }
+    }
+  }
+
+  const corePoints = new Map<number, Spawn>()
+  const coreBody = cores.get(CORE_ID)
+  for (const { object, x, y } of ofClass(CORE_CLASS)) {
+    const label = object.name || `core object ${object.id}`
+    const slot = getProperty(object.properties, SLOT_PROPERTY)
+    if (!object.point) {
+      problems.push(`${label} is not a point (make it with Tiled's Insert Point tool).`)
+    } else if (!isWhole(slot, 1, GAME_MAX_PLAYERS)) {
+      problems.push(`${label} needs a ${SLOT_PROPERTY} from 1 to ${GAME_MAX_PLAYERS}: the slot of spawn points whose base it is the heart of.`)
+    } else if (corePoints.has(slot)) {
+      problems.push(`${label} has the same ${SLOT_PROPERTY} (${slot}) as another core.`)
+    } else {
+      const at = inWorld(x, y)
+      if (at.x < 0 || at.y < 0 || at.x > width || at.y > height) {
+        problems.push(`${label} is outside the arena.`)
+      } else if (coreBody && !roomFor(terrain, at, coreBody.champion.radius)) {
+        problems.push(`${label} is too close to a wall or the arena's edge: the core would stand in it.${nearestFit(at, coreBody.champion.radius)}`)
+      } else {
+        corePoints.set(slot, { at, label })
+        if (coreBody) solids.push({ label, at, radius: coreBody.champion.radius })
+      }
+    }
+  }
+
+  // A champion that starts inside a turret or a core would have to be shoved out of it, so a spawn point has to be clear of each, by their
+  // sizes and the widest champion's.
+  for (const spawn of placed) {
+    for (const solid of solids) {
+      const need = solid.radius + GAME_MAX_CHAMPION_RADIUS
+      const apart = Math.hypot(spawn.at.x - solid.at.x, spawn.at.y - solid.at.y)
+      if (apart < need) {
+        problems.push(
+          `${spawn.label} is too close to ${solid.label}: they are ${pixels(apart)} map pixels apart and need ${Math.ceil((need / scale) * 10) / 10}, `
+          + 'or a champion would start inside it.',
+        )
+      }
+    }
+  }
+  // And one solid cannot stand in another: neither gives way, so two that overlap would stay that way.
+  for (let first = 0; first < solids.length; first += 1) {
+    for (let second = first + 1; second < solids.length; second += 1) {
+      const one = solids[first]
+      const other = solids[second]
+      const need = one.radius + other.radius
+      const apart = Math.hypot(one.at.x - other.at.x, one.at.y - other.at.y)
+      if (apart < need) {
+        problems.push(
+          `${one.label} is too close to ${other.label}: they are ${pixels(apart)} map pixels apart and need ${Math.ceil((need / scale) * 10) / 10}, `
+          + 'or they would stand in each other.',
+        )
+      }
+    }
+  }
+
+  // The flags and the cores are only worth having if they can be walked to.
+  placed.push(...flagPoints.values(), ...corePoints.values())
 
   // Every spawn point and flag can be walked to from every other, or a team could start walled off.
   const [reference, ...others] = placed
@@ -222,6 +387,10 @@ export function readMapLayout(map: TiledMap): MapLayout {
     spawns,
     flags,
     monsters: camps,
+    turrets: posts,
+    shops,
+    cores: Array.from({ length: Math.max(0, ...corePoints.keys()) }, (_, index) => corePoints.get(index + 1)?.at),
+    warnings,
     ...(hill ? { hill } : {}),
   }
 }

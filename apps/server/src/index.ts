@@ -7,7 +7,7 @@ import {
   applyRulesChange,
   balancedTeam,
   champions,
-  DEFAULT_GAME_MODE,
+  FALLBACK_GAME_MODE,
   defaultRules,
   GAME_MAX_PLAYERS,
   GAME_MAX_TEAM_SIZE,
@@ -23,6 +23,7 @@ import {
   parseIdentifiedMessage,
   readRulesChange,
   ReliableMessenger,
+  startingMode,
   teamHasRoom,
   type ChatMessage,
   type GameBroadcastOrder,
@@ -284,7 +285,15 @@ function readGameMap(id: string): GameMap {
   if (!summary) throw new HttpError(409, `The map "${id}" is not on the server any more. Pick another.`)
   try {
     const layout = loadMapLayout(id, mapsDirectory)
-    log.info('map loaded', { map: id, width: layout.terrain.width, height: layout.terrain.height, walls: layout.terrain.walls.length })
+    log.info('map loaded', {
+      map: id,
+      width: layout.terrain.width,
+      height: layout.terrain.height,
+      walls: layout.terrain.walls.length,
+      monsters: layout.monsters.length,
+      turrets: layout.turrets.length,
+    })
+    for (const warning of layout.warnings) log.warn('map has something left out', { map: id, warning })
     return { ...layout, id, name: summary.name }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -294,7 +303,8 @@ function readGameMap(id: string): GameMap {
 }
 
 // A game that is over: its results are kept on the lobby, for players back in it, and sent to everyone still
-// in the game to be shown.
+// in the game to be shown (except when the leader ended it, which sends them straight back to the lobby
+// instead: see the `end` action).
 function announceResult(lobby: Lobby, result: GameResult, endedBy?: string): void {
   lobby.lastResult = result
   emitToRoom(lobby.code, 'game:ended', result, { reliable: true })
@@ -442,14 +452,16 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
 
   if (request.method === 'POST' && url.pathname === '/api/lobbies') {
     const playerRequest = getPlayerRequest(await readJson(request))
+    // A new lobby starts on the default map, and in the default mode if that map can be played in it.
+    const startMapId = maps.defaultMapId()
     const lobby: Lobby = {
       code: createLobbyCode(),
       players: new Map(),
       leaderId: playerRequest.sessionId,
       messages: [],
       nextMessageId: 1,
-      mapId: maps.defaultMapId() ?? '',
-      mode: DEFAULT_GAME_MODE,
+      mapId: startMapId ?? '',
+      mode: startingMode(startMapId ? maps.get(startMapId) : undefined),
       rules: defaultRules(),
       // Where teams start comes from the map picked, when the game opens champion select (see `beginSelection`).
       game: new ServerGameState([]),
@@ -507,7 +519,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
   }
 
   // The leader picks the map the next game is played on, until the game starts. A mode the map has nothing for
-  // is dropped for the default one, since it could not be played.
+  // is dropped for the fallback one (team deathmatch), since it could not be played.
   if (isAction('map')) {
     const body = await readJson(request)
     const sessionId = requireBodySessionId(body)
@@ -520,13 +532,13 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     if (map.problem) throw new HttpError(409, `${map.name} cannot be played on: ${map.problem}`)
     const before = { map: lobby.mapId, mode: lobby.mode }
     lobby.mapId = map.id
-    if (modeSupportProblem(lobby.mode, map)) lobby.mode = DEFAULT_GAME_MODE
+    if (modeSupportProblem(lobby.mode, map)) lobby.mode = FALLBACK_GAME_MODE
     if (lobby.mapId !== before.map) {
       log.info('map changed', {
         lobby: lobby.code,
         by: nameOf(sessionId),
         map: lobby.mapId,
-        // The mode is put back to the default when the new map cannot be played in it.
+        // The mode is put back to team deathmatch when the new map cannot be played in it.
         ...(lobby.mode !== before.mode ? { mode: lobby.mode, modeWas: before.mode } : {}),
       })
     }
@@ -590,16 +602,20 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     return
   }
 
-  // The leader ends the game for everyone, with the score as it stands (the team ahead wins), or, if it is
-  // already over, shuts it down so players still looking at its results are sent back to the lobby.
+  // The leader ends the game for everyone, with the score as it stands (the team ahead wins, which is kept on
+  // the lobby as the last result). The point is to get everyone back in the lobby so another can start, so the
+  // game is shut down at once and the players in it are sent straight back, without a results screen. If the
+  // game is already over, it is shut down so players still looking at its results are sent back too.
   if (isAction('end')) {
     const sessionId = requireBodySessionId(await readJson(request))
     requireLeader(lobby, sessionId)
     const { status } = lobby.game
     if (status !== 'running' && status !== 'finished') throw new HttpError(409, 'There is no game running to end.')
     const result = lobby.game.end()
-    if (result) announceResult(lobby, result, nameOf(sessionId))
-    else log.info('game closed', { lobby: lobby.code, reason: 'the leader closed it', by: nameOf(sessionId) })
+    if (result) {
+      announceResult(lobby, result, nameOf(sessionId))
+      lobby.game.close()
+    } else log.info('game closed', { lobby: lobby.code, reason: 'the leader closed it', by: nameOf(sessionId) })
     sendJson(response, 200, { lobby: toPublicLobby(lobby) })
     return
   }

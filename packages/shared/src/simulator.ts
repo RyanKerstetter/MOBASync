@@ -13,6 +13,7 @@ import {
 } from './constants.js'
 import {
   areEnemies,
+  ATTACK_SOURCE_PREFIX,
   getDashDef,
   getEntityDef,
   mark,
@@ -21,11 +22,19 @@ import {
   type GameEvent,
   type SimContext,
 } from './effects.js'
-import { advanceObjective, initialObjective, type ObjectiveUnit } from './modes.js'
+import { advanceObjective, initialObjective, modeHasEconomy, type ObjectiveCore, type ObjectiveUnit } from './modes.js'
+import { cores, type Core } from './cores.js'
 import { getCharacterChampion, monsters, type Monster } from './monsters.js'
+import { buyProblem, getItem, ITEM_SLOTS, itemTotals, sellValue, withItems, type Inventory } from './items.js'
+import { GAME_STARTING_GOLD, levelForXp, monsterLevelAfterKill, monsterXpAt, PLAYER_KILL_REWARD, type Resources } from './progression.js'
+import { mayShop, type ShopZone } from './shops.js'
+import { hastedCooldownTicks, statMultiplier, type ChampionStats } from './stats.js'
 import { Terrain } from './terrain.js'
+import { shieldedStructures, type StructureRef } from './structures.js'
+import { chooseTurretTarget, turrets, type Turret, type TurretPrey } from './turrets.js'
 import type {
   AiState,
+  BuyOrder,
   CastOrder,
   CastTarget,
   CharacterOrder,
@@ -39,6 +48,7 @@ import type {
   Marker,
   ModeSetup,
   ObjectiveState,
+  SellOrder,
   SimEntity,
   Status,
   Vector2,
@@ -68,6 +78,10 @@ export class SimCharacter {
   // The deaths it has caused that can no longer be undone, which are the ones at or before the
   // commit tick. A death after it may still be undone by an order that has not arrived yet.
   kills: number
+  // What those kills have paid in shards, which are kept the same way. They are the character's and not a frame's, so they are kept through a
+  // death and a respawn. (The experience, which is its level, and the gold, which buys its items, are in the frame: see `GameFrameCharacter.xp`
+  // and `.gold`.)
+  shards: number
   private lastOrderSequence: number
 
   constructor(
@@ -81,9 +95,11 @@ export class SimCharacter {
     // Characters on the same team are teammates. By default each is on a team of its own, so
     // everyone is an enemy of everyone else.
     readonly team: number = id,
+    resources: Partial<Pick<Resources, 'shards'>> = {},
   ) {
     this.orders = orders.map(cloneOrder).sort(compareCharacterOrders)
     this.kills = kills
+    this.shards = resources.shards ?? 0
     this.lastOrderSequence = Math.max(
       highestOrderSequence,
       ...this.orders.map((order) => order.seq),
@@ -94,6 +110,44 @@ export class SimCharacter {
   get monster(): Monster | undefined {
     const monster = monsters.get(this.champion.id)
     return monster?.champion === this.champion ? monster : undefined
+  }
+
+  // What it is, if it is a turret: a structure the map puts on the ground, which shoots the enemy players in its range and does
+  // not move (see turrets.ts).
+  get turret(): Turret | undefined {
+    const turret = turrets.get(this.champion.id)
+    return turret?.champion === this.champion ? turret : undefined
+  }
+
+  // What it is, if it is a core: the structure that decides Core Destruction, which does not move or attack (see cores.ts).
+  get core(): Core | undefined {
+    const core = cores.get(this.champion.id)
+    return core?.champion === this.champion ? core : undefined
+  }
+
+  // Whether it is a structure, a turret or a core: it stands where it was put, is solid, is hurt by attacks only and never by an
+  // ability, takes no status, and is destroyed for good (see structures.ts).
+  get structure(): boolean {
+    return this.turret !== undefined || this.core !== undefined
+  }
+
+  // Whether the game plays it (a monster, a turret or a core) and not a player. None of these scores, holds the hill or carries a flag,
+  // and none is paid for what it kills.
+  get isNpc(): boolean {
+    return this.monster !== undefined || this.structure
+  }
+
+  // What it is to the rules of structures, if it is one.
+  asStructure(): StructureRef | undefined {
+    const turret = this.turret
+    if (turret) return { id: this.id, team: this.team, turretTier: turret.tier }
+    const core = this.core
+    return core ? { id: this.id, team: this.team, guardedByTier: core.guardedByTier } : undefined
+  }
+
+  // Takes the shards a kill paid. (Its experience and gold are paid in the frame, on the tick of the kill.)
+  earn(reward: Readonly<Resources>): void {
+    this.shards += reward.shards
   }
 
   get highestOrderSequence(): number {
@@ -110,6 +164,7 @@ export class SimCharacter {
       initialPosition: { ...this.initialPosition },
       orders: this.orders.map(cloneOrder),
       kills: this.kills,
+      shards: this.shards,
       highestOrderSequence: this.highestOrderSequence,
       championId: this.champion.id,
       team: this.team,
@@ -165,6 +220,25 @@ export class CharacterTickSnapshot {
 
   getNextAttackTick(): number {
     return this.state.nextAttackTick
+  }
+
+  // The experience it has, and the level that makes (see progression.ts).
+  getXp(): number {
+    return this.state.xp ?? 0
+  }
+
+  // A player's level is what its experience makes, and a monster's is what it has gained by being killed.
+  getLevel(): number {
+    return levelOfState(this.state)
+  }
+
+  // The gold it has to spend, and the items it carries by slot (see items.ts).
+  getGold(): number {
+    return this.state.gold ?? 0
+  }
+
+  getItems(): Inventory {
+    return { ...this.state.items }
   }
 
   // The character this one is going after, if it has been told to attack someone and not to stop.
@@ -328,6 +402,15 @@ class TickContext implements SimContext {
       .map((marker) => ({ ...marker }))
   }
 
+  statsOf(unitId: number): ChampionStats | undefined {
+    return statsOfState(this.characters.get(unitId), this.states.get(unitId))
+  }
+
+  levelOf(unitId: number): number | undefined {
+    const state = this.states.get(unitId)
+    return state ? levelOfState(state) : undefined
+  }
+
   healthOf(unitId: number): { hp: number; maxHp: number } | undefined {
     const health = this.states.get(unitId)?.health
     return health ? { hp: health.hp, maxHp: health.maxHp } : undefined
@@ -448,11 +531,39 @@ export class Simulator {
   }
 
   // With no terrain given, the game is on the plain arena with no walls, and with no mode it is team
-  // deathmatch.
-  constructor(terrain: Terrain = Terrain.plain(), setup: ModeSetup = { kind: 'deathmatch' }) {
+  // deathmatch. With no shops it can be shopped in from anywhere.
+  constructor(terrain: Terrain = Terrain.plain(), setup: ModeSetup = { kind: 'deathmatch' }, shops: readonly ShopZone[] = []) {
     this.ground = terrain
     this.setup = setup
+    this.shops = shops.map((zone) => ({ ...zone }))
     this.storeFrame(this.createInitialFrame())
+  }
+
+  // Where each team can shop (see shops.ts). Like the ground it is the same for the whole game, so it is not in the frames, and a restored
+  // snapshot brings it with it.
+  private shops: readonly ShopZone[]
+
+  get shopZones(): readonly ShopZone[] {
+    return this.shops
+  }
+
+  // Whether this game has an economy (see `modeHasEconomy`): if not, nothing pays experience, gold or shards, there is nothing to buy, and every champion is
+  // at level 1.
+  get hasEconomy(): boolean {
+    return modeHasEconomy(this.setup.kind)
+  }
+
+  // Whether a character that is where a frame has it can buy and sell now: a champion that is dead can, and a living one must be in a shop of its team
+  // (any place, if the game has no shops). It is the rule `buy` and `sell` orders are done by, and what the page asks before it sends one.
+  canShop(characterId: number, frame: GameTickSnapshot): boolean {
+    const character = this.characters.get(characterId)
+    const state = frame.get(characterId)
+    if (!character || !state || !this.hasEconomy) return false
+    return state.isDead() || mayShop(this.shops, character.team, state.getPosition())
+  }
+
+  private mayShopNow(character: SimCharacter, state: GameFrameCharacter): boolean {
+    return this.hasEconomy && (!isAlive(state) || mayShop(this.shops, character.team, state.position))
   }
 
   addPlayer(
@@ -495,6 +606,71 @@ export class Simulator {
     this.characters.set(id, character)
     if (this.tick === 0 && this.commitTick === 0) this.resetFrameHistory()
     return character
+  }
+
+  // Puts a turret in the game where it stands for good, on a team: an enemy of every other team, monsters too. It is solid and does
+  // not move, and when it is destroyed it stays destroyed.
+  addTurret(id: number, turret: Turret, position: Vector2, team: number): SimCharacter {
+    const character = new SimCharacter(
+      id,
+      this.ground.resolve(position, turret.champion.radius),
+      [],
+      turret.champion,
+      undefined,
+      0,
+      0,
+      team,
+    )
+    this.characters.set(id, character)
+    if (this.tick === 0 && this.commitTick === 0) this.resetFrameHistory()
+    return character
+  }
+
+  // Puts a core in the game where it stands for good, on a team, as the heart of its base: an enemy of every other team. It is solid and
+  // does not move or attack, and when it is broken it stays broken.
+  addCore(id: number, core: Core, position: Vector2, team: number): SimCharacter {
+    const character = new SimCharacter(
+      id,
+      this.ground.resolve(position, core.champion.radius),
+      [],
+      core.champion,
+      undefined,
+      0,
+      0,
+      team,
+    )
+    this.characters.set(id, character)
+    if (this.tick === 0 && this.commitTick === 0) this.resetFrameHistory()
+    return character
+  }
+
+  // The structures that are protected on a frame: they take no damage at all while what guards them is standing (see structures.ts).
+  shieldedIn(frame: GameTickSnapshot): ReadonlySet<number> {
+    return this.shieldedBy((id) => frame.get(id)?.isDead() === false)
+  }
+
+  // Whether a character that is dead on a frame will come back: not in Core Destruction once its team's core is broken, when what is
+  // left of the team is all it has. (It is always true for a character that is alive, and for any other mode.)
+  canRespawn(characterId: number, frame: GameTickSnapshot): boolean {
+    const character = this.characters.get(characterId)
+    return !character || !this.teamCoreBroken(character.team, (id) => frame.get(id)?.isDead() === false)
+  }
+
+  private shieldedBy(isStanding: (id: number) => boolean): Set<number> {
+    const structures: StructureRef[] = []
+    for (const character of this.characters.values()) {
+      const ref = character.asStructure()
+      if (ref) structures.push(ref)
+    }
+    return structures.length === 0 ? new Set() : shieldedStructures(structures, isStanding)
+  }
+
+  private teamCoreBroken(team: number, isStanding: (id: number) => boolean): boolean {
+    if (this.setup.kind !== 'core') return false
+    for (const character of this.characters.values()) {
+      if (character.core && character.team === team && !isStanding(character.id)) return true
+    }
+    return false
   }
 
   addOrder(characterId: number, order: CharacterOrder): boolean {
@@ -568,11 +744,17 @@ export class Simulator {
     for (const [deathTick, deaths] of confirmed) {
       this.pendingDeaths.delete(deathTick)
       for (const death of deaths) {
-        // A kill is one player's of another: monsters do not score, and nor does killing one (what that is worth
+        // A kill is one player's of another: monsters and turrets do not score, and nor does killing one (what that is worth
         // is for the game's rules to say, from the death record).
         if (death.killerId !== undefined) {
           const killer = this.characters.get(death.killerId)
-          if (killer && !killer.monster && !this.characters.get(death.victimId)?.monster) killer.kills += 1
+          const victim = this.characters.get(death.victimId)
+          if (killer && !killer.isNpc) {
+            if (!victim?.isNpc) killer.kills += 1
+            // Any kill a player makes pays them, of a player, a monster or a turret: what the monster's or the turret's entry says it
+            // is worth, or a flat amount for a player. A monster or a turret that kills is paid nothing.
+            if (this.hasEconomy) killer.earn(killReward(victim))
+          }
         }
         this.onDeathConfirmed?.({ ...death })
       }
@@ -580,10 +762,11 @@ export class Simulator {
   }
 
   // Empties the game. With a terrain, the next game is played on that ground instead, and with a mode
-  // it is played for that.
-  reset(terrain?: Terrain, setup?: ModeSetup): void {
+  // it is played for that. Its shops are the ones given, and none if none are.
+  reset(terrain?: Terrain, setup?: ModeSetup, shops: readonly ShopZone[] = []): void {
     if (terrain) this.ground = terrain
     if (setup) this.setup = setup
+    this.shops = shops.map((zone) => ({ ...zone }))
     this.characters.clear()
     this.tick = 0
     this.commitTick = 0
@@ -609,6 +792,7 @@ export class Simulator {
       tick: this.tick,
       commitTick: this.commitTick,
       terrain: this.ground.toData(),
+      ...(this.shops.length > 0 ? { shops: this.shops.map((zone) => ({ ...zone })) } : {}),
       // Team deathmatch with the default rules is what a snapshot without a mode is, so it is left out.
       ...(isPlainDeathmatch(this.setup) ? {} : { mode: this.setup }),
       characters: [...this.characters.values()].map((character) => ({
@@ -634,6 +818,7 @@ export class Simulator {
     if (!snapshot.terrain) this.ground = Terrain.plain()
     else if (!this.ground.sameAs(snapshot.terrain)) this.ground = Terrain.fromData(snapshot.terrain)
     this.setup = snapshot.mode ?? { kind: 'deathmatch' }
+    this.shops = (snapshot.shops ?? []).map((zone) => ({ ...zone }))
     // The deaths up to the checkpoint that this simulator had not yet seen confirmed are confirmed by
     // it now (their kills are already in the snapshot's tallies). Later ones are worked out again.
     const confirmedByCheckpoint = [...this.pendingDeaths]
@@ -652,6 +837,7 @@ export class Simulator {
         character.highestOrderSequence,
         character.kills,
         character.team,
+        { shards: character.shards },
       ))
     })
     for (const [, deaths] of confirmedByCheckpoint) {
@@ -684,7 +870,7 @@ export class Simulator {
         if (finished) state.dash = undefined
       } else if (state.movement && !isImmobilized(prior.statuses)) {
         // Movement over (tick - 1, tick] uses the previous frame's statuses, as they stood then.
-        const speed = getMoveSpeed(character, prior.statuses, tick - 1)
+        const speed = getMoveSpeed(character, prior.statuses, tick - 1, itemTotals(prior.items).moveSpeed ?? 0)
         const radius = character.champion.radius
         // The way round any walls in the way, from where it is now, which is worked out again every
         // tick so it needs nothing kept in the frame: its first point is where to head.
@@ -707,10 +893,14 @@ export class Simulator {
       }
       state.statuses = state.statuses.filter((status) => status.endTick > tick)
       state.markers = state.markers.filter((marker) => marker.endTick > tick)
-      // A dead character comes back a fixed time after the tick it died on.
-      const wait = character.monster ? character.monster.ai.respawnTicks : this.respawnTicks
+      // A dead character comes back a fixed time after the tick it died on: a monster when its profile says (never, if it does not),
+      // and a structure never, as it is destroyed for the rest of the game. In Core Destruction a player whose team's core is broken
+      // does not either: it is a player of a team that is running out of them.
+      const wait = character.monster ? character.monster.ai.respawnTicks : character.structure ? undefined : this.respawnTicks
       if (wait !== undefined && state.health?.deathTick !== undefined && tick === state.health.deathTick + wait) {
-        respawnCharacter(character, state, tick)
+        const standing = (id: number): boolean => previous.getCharacterState(id)?.health?.deathTick === undefined
+        // A monster comes back a level higher, in a game with an economy (the levels of the game are that).
+        if (!this.teamCoreBroken(character.team, standing)) respawnCharacter(character, state, tick, character.monster !== undefined && this.hasEconomy)
       }
       states.set(characterId, state)
     }
@@ -776,9 +966,20 @@ export class Simulator {
     // The monsters decide what to do from where everyone stands now, and what they decide is orders like any
     // other, so they are carried out the same way, after the players' of the tick.
     orders.push(...this.thinkMonsters(characters, states, tick))
+    orders.push(...this.thinkTurrets(characters, states, tick))
     for (const { character, order } of orders) {
       const state = states.get(character.id)
-      if (!state || !isAlive(state)) continue
+      if (!state) continue
+      // The shop is open to the dead as well as the living: what they buy is there when they are back.
+      if (order.type === 'buy') {
+        this.buyItem(character, state, order)
+        continue
+      }
+      if (order.type === 'sell') {
+        this.sellItem(character, state, order)
+        continue
+      }
+      if (!isAlive(state)) continue
       if (order.type === 'move') {
         // Walking somewhere cancels a windup and stops going after anyone.
         state.action = undefined
@@ -798,6 +999,7 @@ export class Simulator {
       if (state.action && state.action.endTick <= tick) state.action = undefined
     }
     const deaths = this.applyWrites(context, states, entities, tick)
+    this.anchorStructures(states)
     const objective = this.advanceObjective(previous, states, tick, deaths)
 
     return new GameTickSnapshot(tick, {
@@ -820,8 +1022,8 @@ export class Simulator {
     if (this.setup.kind !== 'deathmatch') {
       for (const state of states.values()) {
         const character = this.characters.get(state.characterId)
-        // Monsters stand on the hill and walk over flags without taking either.
-        if (!character || character.monster) continue
+        // Monsters stand on the hill and walk over flags without taking either, and turrets are not on it.
+        if (!character || character.isNpc) continue
         units.push({
           id: character.id,
           team: character.team,
@@ -831,12 +1033,20 @@ export class Simulator {
         })
       }
     }
-    // A team scores for the players its players kill, not for monsters, or for the players monsters kill.
+    // A team scores for the players its players kill, not for monsters or turrets, or for the players they kill.
     const killerTeams = deaths.flatMap((death) => {
       const killer = death.killerId === undefined ? undefined : this.characters.get(death.killerId)
-      return killer && !killer.monster && !this.characters.get(death.victimId)?.monster ? [killer.team] : []
+      return killer && !killer.isNpc && !this.characters.get(death.victimId)?.isNpc ? [killer.team] : []
     })
-    return advanceObjective(previous.getObjective(), this.setup, units, tick, killerTeams)
+    // The cores, for the mode that has them: whose they are, and whether they are standing as the tick leaves them.
+    const standing: ObjectiveCore[] = []
+    if (this.setup.kind === 'core') {
+      for (const character of this.characters.values()) {
+        const state = states.get(character.id)
+        if (character.core && state) standing.push({ team: character.team, standing: isAlive(state) })
+      }
+    }
+    return advanceObjective(previous.getObjective(), this.setup, units, tick, killerTeams, standing)
   }
 
   // Every monster that is alive decides what to do (see `think`): it reads where everyone stands this tick, what it
@@ -849,10 +1059,11 @@ export class Simulator {
   ): Array<{ character: SimCharacter; order: CharacterOrder }> {
     const issued: Array<{ character: SimCharacter; order: CharacterOrder }> = []
     if (!characters.some((character) => character.monster)) return issued
+    // What a monster can notice is the players: a structure is on a team of its own, but no monster goes after one.
     const sight: AiOther[] = []
     for (const character of characters) {
       const state = states.get(character.id)
-      if (state) sight.push({ id: character.id, team: character.team, position: state.position, alive: isAlive(state) })
+      if (state && !character.structure) sight.push({ id: character.id, team: character.team, position: state.position, alive: isAlive(state) })
     }
     for (const character of characters) {
       const monster = character.monster
@@ -875,7 +1086,9 @@ export class Simulator {
         moving: state.movement !== undefined,
         ready: (abilityId) => (state.cooldowns[abilityId] ?? 0) <= tick,
       }
-      const decision = think(monster, body, state.ai ?? { mode: 'idle' }, sight)
+      // How far it has to walk to someone is what its ranges are measured in: the way round the walls, for a body of its size.
+      const radius = character.champion.radius
+      const decision = think(monster, body, state.ai ?? { mode: 'idle' }, sight, (from, to) => this.ground.walkDistance(from, to, radius))
       state.ai = decision.state
       if (decision.reset) {
         state.health = { hp: state.health.maxHp, maxHp: state.health.maxHp, hpSeq: state.health.hpSeq + 1, finalizedTick: tick }
@@ -887,6 +1100,54 @@ export class Simulator {
       })
     }
     return issued
+  }
+
+  // Every turret that is alive shoots (see `chooseTurretTarget`): the enemy player it is shooting while they are alive and in its
+  // range, and else the nearest in its range. It gives the same kind of order a player does, an attack, which makes the turret's
+  // attack lock do the shooting, and it drops its target the tick they leave its range, since it cannot go after them. A turret
+  // never targets a monster or another turret.
+  private thinkTurrets(
+    characters: readonly SimCharacter[],
+    states: ReadonlyMap<number, GameFrameCharacter>,
+    tick: number,
+  ): Array<{ character: SimCharacter; order: CharacterOrder }> {
+    const issued: Array<{ character: SimCharacter; order: CharacterOrder }> = []
+    if (!characters.some((character) => character.turret)) return issued
+    const prey: TurretPrey[] = []
+    for (const character of characters) {
+      const state = states.get(character.id)
+      if (state && !character.isNpc) prey.push({ id: character.id, team: character.team, position: state.position, alive: isAlive(state) })
+    }
+    for (const character of characters) {
+      const state = states.get(character.id)
+      if (!character.turret || !state || !isAlive(state)) continue
+      const target = chooseTurretTarget({
+        team: character.team,
+        position: state.position,
+        range: character.champion.attackRangeWith(state.statuses),
+        attacking: state.attackTarget?.targetId,
+      }, prey)
+      if (target === undefined) {
+        // No one to shoot: whoever it was shooting has gone out of its range, or died, so a shot not yet away is called off.
+        state.attackTarget = undefined
+        if (state.action?.kind === 'attack') state.action = undefined
+      } else if (state.attackTarget?.targetId !== target) {
+        issued.push({ character, order: aiOrder(character, { type: 'attack', targetId: target }, state.position, tick, 0) })
+      }
+    }
+    return issued
+  }
+
+  // A structure stands where it was put: whatever pushed or pulled it this tick is undone, and it is not walking or dashing anywhere.
+  private anchorStructures(states: ReadonlyMap<number, GameFrameCharacter>): void {
+    for (const character of this.characters.values()) {
+      if (!character.structure) continue
+      const state = states.get(character.id)
+      if (!state) continue
+      state.position = { ...character.initialPosition }
+      state.movement = undefined
+      state.dash = undefined
+    }
   }
 
   // A dash with effects of its own: every enemy its body reached on this tick's step, each once for
@@ -945,10 +1206,34 @@ export class Simulator {
     }
   }
 
+  // Buys an item with the gold the character has on this tick, if it is in a shop (`mayShopNow`) and can afford it (`buyProblem`): the gold is spent,
+  // the item is in its slot, and the health goes up by what the item adds to it, as a level does. An order that cannot be carried out is nothing, on
+  // every peer alike.
+  private buyItem(character: SimCharacter, state: GameFrameCharacter, order: BuyOrder): void {
+    const item = getItem(order.itemId)
+    if (!item || !this.mayShopNow(character, state) || buyProblem(item, state.gold ?? 0, state.items ?? {}) !== undefined) return
+    state.gold = (state.gold ?? 0) - item.cost
+    state.items = { ...copyItems(state.items), [item.slot]: item.id }
+    refitHealth(character, state)
+  }
+
+  // Sells what is in a slot, in a shop, for the part of its cost the sell rate pays back, and takes what it added to the health off it again.
+  private sellItem(character: SimCharacter, state: GameFrameCharacter, order: SellOrder): void {
+    const id = state.items?.[order.slot]
+    if (id === undefined || !this.mayShopNow(character, state)) return
+    const items = copyItems(state.items)
+    delete items[order.slot]
+    if (Object.keys(items).length > 0) state.items = items
+    else delete state.items
+    const item = getItem(id)
+    state.gold = (state.gold ?? 0) + (item ? sellValue(item) : 0)
+    refitHealth(character, state)
+  }
+
   // An attack order makes its target the one this character goes after, until it is told to do
   // something else. It does not swing here: `driveAttacks` does, as soon as the character is able
   // and in reach. An order for something that cannot be attacked (a teammate, a character who is
-  // dead or gone) changes nothing, so it does not interrupt a walk.
+  // dead or gone, a structure that is protected) changes nothing, so it does not interrupt a walk.
   private lockOnto(
     character: SimCharacter,
     state: GameFrameCharacter,
@@ -958,6 +1243,7 @@ export class Simulator {
     const target = this.characters.get(order.targetId)
     const targetState = target ? states.get(target.id) : undefined
     if (!target || !targetState || !areEnemies(character, target) || !isAlive(targetState) || !isAlive(state)) return
+    if (target.structure && this.shieldedBy((id) => { const other = states.get(id); return other !== undefined && isAlive(other) }).has(target.id)) return
     state.attackTarget = { targetId: order.targetId, orderId: order.id }
     state.movement = undefined
   }
@@ -984,7 +1270,7 @@ export class Simulator {
       }
       if (isWindingUp(state, tick) || state.dash || isStunned(state.statuses)) continue
 
-      if (distanceBetween(state.position, targetState.position) > character.champion.attackRangeWith(state.statuses)) {
+      if (distanceBetween(state.position, targetState.position) > character.champion.attackRangeWith(state.statuses, itemTotals(state.items).attackRange ?? 0)) {
         state.movement = { target: { ...targetState.position } }
         continue
       }
@@ -1116,7 +1402,7 @@ export class Simulator {
         state.action = undefined
         return
       }
-      state.nextAttackTick = action.startTick + character.champion.attackCooldownTicksWith(state.statuses)
+      state.nextAttackTick = action.startTick + character.champion.attackCooldownTicksWith(state.statuses, levelOfState(state), itemTotals(state.items).attackSpeed ?? 0)
       // A blind attacker swings at nothing: the windup and cooldown are spent, but nothing lands
       // and no shot leaves. A shot already in the air is unaffected.
       if (state.statuses.some((status) => status.kind === 'blind')) return
@@ -1124,7 +1410,7 @@ export class Simulator {
       runEffects(character.champion.onAttackLaunch, context, {
         // One order makes many attacks, and what an attack places (a stack, a shot) is named by
         // this ID, so each attack has its own: otherwise the next would replace the last.
-        id: `a:${action.orderId}:t${action.startTick}`,
+        id: `${ATTACK_SOURCE_PREFIX}${action.orderId}:t${action.startTick}`,
         rootId: action.orderId,
         ownerId: character.id,
         tick,
@@ -1141,7 +1427,8 @@ export class Simulator {
       state.action = undefined
       return
     }
-    state.cooldowns[def.id] = tick + def.cooldownTicks
+    // The cooldown is shortened by the caster's haste.
+    state.cooldowns[def.id] = tick + hastedCooldownTicks(def.cooldownTicks, statsOfState(character, state)?.haste ?? 0)
     runEffects(def.apply, context, {
       id: `c:${action.orderId}`,
       rootId: action.orderId,
@@ -1349,15 +1636,25 @@ export class Simulator {
     return remaining
   }
 
+  // How long an ability's whole cooldown is for this character: the ability's own, shortened by its haste.
+  private cooldownOf(def: AbilityDef, characterId: number, state: GameFrameCharacter): number {
+    return hastedCooldownTicks(def.cooldownTicks, statsOfState(this.characters.get(characterId), state)?.haste ?? 0)
+  }
+
   private applyWrites(
     context: TickContext,
     states: ReadonlyMap<number, GameFrameCharacter>,
     entities: SimEntity[],
     tick: number,
   ): DeathRecord[] {
+    // A structure is hurt by attacks and nothing else: no status, marker, push, blink, heal or lost health lands on it, and while it is
+    // protected nothing at all does damage to it. Who is protected is worked out before anything lands, so a turret that falls this
+    // tick does not open the one it guards until the next.
+    const isStructure = (unitId: number): boolean => this.characters.get(unitId)?.structure === true
+    const shielded = this.shieldedBy((id) => { const state = states.get(id); return state !== undefined && isAlive(state) })
     for (const { unitId, status } of context.statusWrites) {
       const state = states.get(unitId)
-      if (!state || !isAlive(state)) continue
+      if (!state || !isAlive(state) || isStructure(unitId)) continue
       // Reapplying the same provenance ID refreshes the status instead of stacking it.
       state.statuses = [...state.statuses.filter((existing) => existing.id !== status.id), status]
       // A stun interrupts a windup that has not launched yet; nothing is spent.
@@ -1380,7 +1677,7 @@ export class Simulator {
     const markedStates = new Set<GameFrameCharacter>()
     for (const { unitId, marker } of context.markerWrites) {
       const state = states.get(unitId)
-      if (!state || !isAlive(state)) continue
+      if (!state || !isAlive(state) || isStructure(unitId)) continue
       state.markers = [...state.markers.filter((existing) => existing.id !== marker.id), marker]
       markedStates.add(state)
     }
@@ -1388,7 +1685,7 @@ export class Simulator {
     for (const { unitId, target, speed, through, contact } of context.dashWrites) {
       const state = states.get(unitId)
       const character = this.characters.get(unitId)
-      if (!state || !character || !isAlive(state)) continue
+      if (!state || !character || !isAlive(state) || character.structure) continue
       state.dash = {
         // A dash goes over walls, so it can end behind one, but not in one: it lands on the nearest
         // place the character can stand.
@@ -1403,9 +1700,12 @@ export class Simulator {
     for (const event of context.events) {
       if (event.type === 'damage') {
         const state = states.get(event.targetId)
+        // An ability's damage does nothing to a structure (an auto attack's id starts with `ATTACK_SOURCE_PREFIX`), and none does
+        // anything while it is protected.
+        if (isStructure(event.targetId) && (!event.id.startsWith(ATTACK_SOURCE_PREFIX) || shielded.has(event.targetId))) continue
         if (state) {
           const hadHealth = (state.health?.hp ?? 0) > 0
-          applyDamage(state, event.amount, tick)
+          applyDamage(state, event.amount, tick, statsOfState(this.characters.get(event.targetId), state)?.resistance ?? 0)
           if (hadHealth && state.health?.hp === 0) killers.set(event.targetId, event.ownerId)
           // A monster that is minding its own business and is hurt by an enemy knows who to go after.
           if (state.ai?.mode === 'idle' && event.amount > 0) {
@@ -1416,14 +1716,14 @@ export class Simulator {
         }
       } else if (event.type === 'lose-health') {
         const health = states.get(event.unitId)?.health
-        if (health && health.deathTick === undefined && health.hp > 1) {
+        if (health && health.deathTick === undefined && health.hp > 1 && !isStructure(event.unitId)) {
           health.hp = Math.max(1, health.hp - event.amount)
           health.hpSeq += 1
           health.finalizedTick = tick
         }
       } else if (event.type === 'heal') {
         const health = states.get(event.unitId)?.health
-        if (health && health.deathTick === undefined && health.hp > 0) {
+        if (health && health.deathTick === undefined && health.hp > 0 && !isStructure(event.unitId)) {
           health.hp = Math.min(health.maxHp, health.hp + event.amount)
         }
       } else if (event.type === 'interrupt') {
@@ -1438,7 +1738,7 @@ export class Simulator {
       } else if (event.type === 'start-cooldown') {
         const state = states.get(event.unitId)
         const def = abilityDefs.get(event.abilityId)
-        if (state && def) state.cooldowns[event.abilityId] = tick + def.cooldownTicks
+        if (state && def) state.cooldowns[event.abilityId] = tick + this.cooldownOf(def, event.unitId, state)
       } else if (event.type === 'refund-cooldown') {
         const state = states.get(event.unitId)
         const def = abilityDefs.get(event.abilityId)
@@ -1446,7 +1746,7 @@ export class Simulator {
         if (state && def && readyTick !== undefined && readyTick > tick) {
           state.cooldowns[event.abilityId] = Math.max(
             tick,
-            readyTick - Math.round(def.cooldownTicks * event.fraction) - event.ticks,
+            readyTick - Math.round(this.cooldownOf(def, event.unitId, state) * event.fraction) - event.ticks,
           )
         }
       } else {
@@ -1468,12 +1768,24 @@ export class Simulator {
         ...(killerId !== undefined && killerId !== state.characterId ? { killerId } : {}),
       })
     }
+    // A kill pays its experience and its gold on the tick it happens, in the frame, so a level and a purchase are the same tick on every peer and a
+    // death that a late order undoes takes them back with the rest of the frame. (The shards are credited when the kill can no longer
+    // be undone: see `confirmDeathsUpTo`.) Only a player is paid, whatever it killed.
+    for (const death of deaths) {
+      if (death.killerId === undefined || !this.hasEconomy) continue
+      const killer = this.characters.get(death.killerId)
+      const state = states.get(death.killerId)
+      if (!killer || killer.isNpc || !state) continue
+      const reward = killReward(this.characters.get(death.victimId), levelOfState(states.get(death.victimId)))
+      if (reward.xp > 0) gainExperience(killer, state, reward.xp)
+      if (reward.gold > 0) state.gold = (state.gold ?? 0) + reward.gold
+    }
     // A blink lands after the tick's damage and pushes but before anything else can move the unit,
     // so the next frame has it at the point.
     for (const { unitId, target } of context.blinkWrites) {
       const state = states.get(unitId)
       const character = this.characters.get(unitId)
-      if (!state || !character || !isAlive(state)) continue
+      if (!state || !character || !isAlive(state) || character.structure) continue
       // A blink goes over walls, and lands where the character can stand.
       state.position = this.ground.resolve(target, character.champion.radius)
     }
@@ -1524,6 +1836,8 @@ export class Simulator {
       statuses: [],
       markers: [],
       queuedOrders: [],
+      // After the rest, which is the order a frame read back from a snapshot has its fields in (see `GameFrameCharacterSchema`).
+      ...(character.player && this.hasEconomy ? { gold: GAME_STARTING_GOLD } : {}),
     }
   }
 
@@ -1581,15 +1895,65 @@ function compareCharacterOrders(
   return 0
 }
 
-function applyDamage(state: GameFrameCharacter, amount: number, tick: number): void {
+// The level a frame's character is, from the experience in it.
+function levelOfState(state: GameFrameCharacter | undefined): number {
+  return state?.level ?? levelForXp(state?.xp ?? 0)
+}
+
+// A character's stats at the level its frame has (see `Champion.statsAt`), with what the items it carries add to them (see items.ts).
+function statsOfState(character: SimCharacter | undefined, state: GameFrameCharacter | undefined): ChampionStats | undefined {
+  return character ? withItems(character.champion.statsAt(levelOfState(state)), state?.items) : undefined
+}
+
+// A copy of what a frame's character carries, to change.
+function copyItems(items: GameFrameCharacter['items']): Record<string, string> {
+  const copy: Record<string, string> = {}
+  for (const slot of ITEM_SLOTS) {
+    const id = items?.[slot]
+    if (id !== undefined) copy[slot] = id
+  }
+  return copy
+}
+
+// Sets the character's maximum health to what its stats say now, its level and its items, and moves the health it has by as much: more for what was
+// gained, and less for what was lost, though never to nothing for one that is alive. That is not damage or a heal, so the health's sequence is left as
+// it was. A character that is dead has none to move.
+function refitHealth(character: SimCharacter, state: GameFrameCharacter): void {
+  const health = state.health
+  const stats = statsOfState(character, state)
+  if (!health || !stats) return
+  const change = stats.maxHp - health.maxHp
+  health.maxHp = stats.maxHp
+  if (change === 0 || health.deathTick !== undefined || health.hp <= 0) return
+  health.hp = Math.min(stats.maxHp, Math.max(1, health.hp + change))
+}
+
+// What killing this character pays whoever does it: what a monster's, a turret's or a core's entry says it is worth, or a flat amount for a player. A
+// monster pays more experience for each level it has gained (`monsterXpAt`, at the level it died at) and the same gold and shards; the level is not
+// needed for the shards, which are credited later, so that one can be left out.
+function killReward(victim: SimCharacter | undefined, victimLevel = 1): Readonly<Resources> {
+  const monster = victim?.monster
+  if (monster) return { ...monster.reward, xp: monsterXpAt(monster.reward.xp, monster.xpGrowth, victimLevel) }
+  return victim?.turret?.reward ?? victim?.core?.reward ?? PLAYER_KILL_REWARD
+}
+
+// Gives the character experience. A level gained is more health: the maximum goes up to what the new level's stats say, and so does
+// the health it has, by as much, unless it is dead (`refitHealth`).
+function gainExperience(character: SimCharacter, state: GameFrameCharacter, amount: number): void {
+  state.xp = (state.xp ?? 0) + amount
+  refitHealth(character, state)
+}
+
+// Takes the damage off the health. What is taken is the damage less what the character's resistance takes off it (see `statReduction`)
+// and less what its resist statuses take, which add up to at most 90%, and both act before shields.
+function applyDamage(state: GameFrameCharacter, amount: number, tick: number, resistanceStat = 0): void {
   const health = state.health
   if (!health || health.deathTick !== undefined) return
-  // Resistances add up, to at most 90%, and act before shields.
   const resistance = Math.min(0.9, state.statuses.reduce(
     (total, status) => status.kind === 'resist' ? total + status.amount : total,
     0,
   ))
-  let remaining = Math.max(0, Math.round(amount * (1 - resistance)))
+  let remaining = Math.max(0, Math.round(amount * (1 - resistance) * statMultiplier(resistanceStat)))
   if (remaining === 0) return
   // Shield statuses absorb first, soonest-expiring first.
   const shields = state.statuses
@@ -1618,13 +1982,17 @@ function killCharacter(state: GameFrameCharacter, tick: number): void {
   if (state.ai) state.ai = { mode: 'idle' }
 }
 
-function respawnCharacter(character: SimCharacter, state: GameFrameCharacter, tick: number): void {
+function respawnCharacter(character: SimCharacter, state: GameFrameCharacter, tick: number, levelUp = false): void {
   const health = state.health
   if (!health) return
   state.position = { ...character.initialPosition }
+  // Whatever killed it has made it a level higher, which is more health to come back with (the level is read for the health just below).
+  if (levelUp) state.level = monsterLevelAfterKill(levelOfState(state))
+  // Back at the health its level and its items give it. The experience, the gold and the items are kept, as everything in the frame that is not cleared.
+  const maxHp = statsOfState(character, state)?.maxHp ?? character.champion.maxHp
   state.health = {
-    hp: character.champion.maxHp,
-    maxHp: character.champion.maxHp,
+    hp: maxHp,
+    maxHp,
     hpSeq: health.hpSeq + 1,
     finalizedTick: tick,
   }
@@ -1660,14 +2028,15 @@ function isSilenced(statuses: readonly Status[]): boolean {
 
 // Haste bonuses add together; only the strongest slow applies; the slow scales the hasted speed.
 // A fading haste counts for the share of its length still to run at `tick`.
-function getMoveSpeed(character: SimCharacter, statuses: readonly Status[], tick: number): number {
+// `itemSpeed` is what the character's items add to its speed (see items.ts).
+function getMoveSpeed(character: SimCharacter, statuses: readonly Status[], tick: number, itemSpeed = 0): number {
   let strongestSlow = 0
   let hasteBonus = 0
   for (const status of statuses) {
     if (status.kind === 'slow') strongestSlow = Math.max(strongestSlow, status.amount)
     else if (status.kind === 'haste') hasteBonus += status.fades ? status.amount * shareLeft(status, tick) : status.amount
   }
-  return character.champion.moveSpeed * (1 + hasteBonus) * (1 - Math.min(1, strongestSlow))
+  return (character.champion.moveSpeed + itemSpeed) * (1 + hasteBonus) * (1 - Math.min(1, strongestSlow))
 }
 
 // How much of a status's length is still ahead at `tick`: 1 as it starts, 0 as it ends.
@@ -1748,6 +2117,9 @@ function cloneOrder(order: CharacterOrder): CharacterOrder {
       return { ...order }
     case 'cast':
       return { ...order, origin: { ...order.origin }, target: cloneCastTarget(order.target) }
+    case 'buy':
+    case 'sell':
+      return { ...order }
   }
 }
 
@@ -1779,6 +2151,9 @@ function aiOrder(character: SimCharacter, order: AiOrder, position: Vector2, tic
 
 function cloneObjective(objective: ObjectiveState): ObjectiveState {
   if (objective.kind === 'koth' || objective.kind === 'deathmatch') return { ...objective, scores: { ...objective.scores } }
+  if (objective.kind === 'core') {
+    return { ...objective, broken: [...objective.broken], eliminated: [...objective.eliminated], scores: { ...objective.scores } }
+  }
   return {
     ...objective,
     flags: objective.flags.map((flag) => ({ ...flag, position: { ...flag.position } })),
@@ -1792,7 +2167,7 @@ function isPlainDeathmatch(setup: ModeSetup): boolean {
 }
 
 function cloneFrameCharacter(character: GameFrameCharacter): GameFrameCharacter {
-  return {
+  const clone: GameFrameCharacter = {
     ...character,
     position: { ...character.position },
     ...(character.health ? { health: { ...character.health } } : {}),
@@ -1825,6 +2200,18 @@ function cloneFrameCharacter(character: GameFrameCharacter): GameFrameCharacter 
     markers: character.markers.map((marker) => ({ ...marker })),
     queuedOrders: character.queuedOrders.map(cloneOrder),
   }
+  // The experience, the gold and the items come last, in the order the schema has them, whenever in a frame's life each was first set: a
+  // frame is the same data however it got there, and so it is the same text, which is what a frame computed and a frame read back from a
+  // snapshot are compared as.
+  delete clone.xp
+  delete clone.gold
+  delete clone.items
+  delete clone.level
+  if (character.xp !== undefined) clone.xp = character.xp
+  if (character.gold !== undefined) clone.gold = character.gold
+  if (character.items) clone.items = { ...character.items }
+  if (character.level !== undefined) clone.level = character.level
+  return clone
 }
 
 // Living characters are solid. For every pair whose bodies overlap, each is pushed away from the
@@ -1835,7 +2222,8 @@ function cloneFrameCharacter(character: GameFrameCharacter): GameFrameCharacter 
 // Every push is worked out from the positions as the tick found them and applied together, and
 // pairs are visited in ID order, so the result does not depend on who is looked at first. Two
 // characters on exactly the same spot have no line between them; the lower ID goes toward -x.
-// The dead are ghosts, and the arena's edge and the walls still hold whoever is pushed against them.
+// The dead are ghosts, and the arena's edge and the walls still hold whoever is pushed against them. A structure does not give way to
+// anyone: whoever is pushed against it takes the whole push, and two structures do not push each other.
 function pushCharactersApart(
   states: ReadonlyMap<number, GameFrameCharacter>,
   characters: ReadonlyMap<number, SimCharacter>,
@@ -1861,11 +2249,14 @@ function pushCharactersApart(
       const dy = right.position.y - left.position.y
       const distance = Math.sqrt(dx * dx + dy * dy)
       if (distance >= reach) continue
+      const leftFixed = characters.get(left.characterId)?.structure === true
+      const rightFixed = characters.get(right.characterId)?.structure === true
+      if (leftFixed && rightFixed) continue
       const push = (reach - distance) * GAME_COLLISION_STIFFNESS / 2
       const awayX = distance === 0 ? 1 : dx / distance
       const awayY = distance === 0 ? 0 : dy / distance
-      addPush(left.characterId, -awayX * push, -awayY * push)
-      addPush(right.characterId, awayX * push, awayY * push)
+      if (!leftFixed) addPush(left.characterId, -awayX * push * (rightFixed ? 2 : 1), -awayY * push * (rightFixed ? 2 : 1))
+      if (!rightFixed) addPush(right.characterId, awayX * push * (leftFixed ? 2 : 1), awayY * push * (leftFixed ? 2 : 1))
     }
   }
   for (const [id, push] of pushes) {

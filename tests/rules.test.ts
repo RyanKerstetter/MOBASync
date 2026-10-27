@@ -27,7 +27,7 @@ import { brawler } from './fixtures.ts'
 // What the lobby leader sets besides the mode: how long a champion stays dead, and the score each mode is won
 // at. The game ends when a team reaches the limit and is ahead.
 
-const killer = new Champion({ ...brawler, abilities: [...brawler.abilities], attackDamage: 5000 })
+const killer = new Champion({ ...brawler, abilities: [...brawler.abilities], base: { ...brawler.base, attackDamage: 5000 } })
 const move = (id: string, seq: number, tick: number, x: number, y: number) =>
   ({ id, seq, tick, type: 'move' as const, target: { x, y } })
 
@@ -50,14 +50,18 @@ test('every mode names its score, and has a label, a default and a most for the 
     ['deathmatch', 'kills', 'Kills to win'],
     ['koth', 'points', 'Points to win'],
     ['ctf', 'captures', 'Captures to win'],
+    ['core', 'cores', 'No limit'],
   ])
-  for (const mode of GAME_MODES) assert.ok(mode.defaultLimit > 0 && mode.defaultLimit <= mode.maxLimit, mode.id)
+  // Core destruction ends when a team is out, so it has no limit to set (a most of 0); each of the others has one.
+  for (const mode of GAME_MODES.filter((each) => each.id !== 'core')) assert.ok(mode.defaultLimit > 0 && mode.defaultLimit <= mode.maxLimit, mode.id)
+  const core = GAME_MODES.find((mode) => mode.id === 'core')
+  assert.deepEqual([core?.defaultLimit, core?.maxLimit], [0, 0])
 })
 
 test('the default rules are the old respawn time, and each mode\'s default limit', () => {
   const rules = defaultRules()
   assert.equal(rules.respawnSeconds, GAME_RESPAWN_TICKS / GAME_TPS)
-  assert.deepEqual(rules.scoreLimits, { deathmatch: 25, koth: 100, ctf: 3 })
+  assert.deepEqual(rules.scoreLimits, { deathmatch: 25, koth: 100, ctf: 3, core: 0 })
 })
 
 test('a change to the rules is read, and whatever is wrong with it is said', () => {
@@ -82,7 +86,7 @@ test('a change to the rules is read, and whatever is wrong with it is said', () 
 
 test('a change sets only what it names, and the limit of each mode is kept as it was left', () => {
   const rules = applyRulesChange(defaultRules(), { scoreLimits: { ctf: 7 } })
-  assert.deepEqual(rules.scoreLimits, { deathmatch: 25, koth: 100, ctf: 7 })
+  assert.deepEqual(rules.scoreLimits, { deathmatch: 25, koth: 100, ctf: 7, core: 0 })
   assert.equal(rules.respawnSeconds, 3)
   const next = applyRulesChange(rules, { respawnSeconds: 12 })
   assert.deepEqual([next.respawnSeconds, next.scoreLimits.ctf], [12, 7])

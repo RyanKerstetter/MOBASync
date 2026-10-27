@@ -23,7 +23,8 @@ test('a picked folder gives its pngs by key, and nothing else', () => {
 test('the keys of the game\'s own sheets are found in a copy of res/', () => {
   const keys = Object.values(championSprites).flatMap((set) => Object.values(set.clips).map((clip) => spriteFileKey(clip.url)))
   assert.ok(keys.length > 0)
-  assert.ok(keys.every((key) => /^champion_\w+\/[\w+]+\.png$/.test(key)), keys.join(', '))
+  // A champion's folder (champion_archer/idle.png), or a monster's (slime/slime1_idle_with_shadow.png).
+  assert.ok(keys.every((key) => /^\w+\/[\w+]+\.png$/.test(key)), keys.join(', '))
   const overrides = spriteOverridesFrom(keys.map((key) => ({ name: key.split('/')[1]!, webkitRelativePath: `res/${key}` })))
   assert.deepEqual([...overrides.keys()].sort(), [...new Set(keys)].sort())
 })

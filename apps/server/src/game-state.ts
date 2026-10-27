@@ -2,17 +2,21 @@ import {
   champions,
   createModeSetup,
   DEFAULT_CHAMPION_ID,
-  DEFAULT_GAME_MODE,
+  FALLBACK_GAME_MODE,
   FINALIZE_LAG,
   GAME_ORDER_VERDICT_RETENTION_MS,
   GameStatusSchema,
   getChampion,
+  getCore,
+  getItem,
   getMonster,
   assignSpawns,
   leadingTeam,
+  getTurret,
   mapDisplayName,
   NO_OBJECTIVES,
   objectiveScores,
+  rankTeams,
   Simulator,
   startProblem,
   teamSetupProblem,
@@ -27,6 +31,8 @@ import {
   type GameStatus,
   type MapMonster,
   type MapObjectives,
+  type MapShop,
+  type MapTurret,
   type ModeRules,
   type SpawnSlots,
 } from '../../../packages/shared/src/index.js'
@@ -47,11 +53,15 @@ export type GameMap = {
   terrain: Terrain
   // The monsters it starts with.
   monsters?: readonly MapMonster[]
+  // The turrets it starts with, each for the team that starts at its slot.
+  turrets?: readonly MapTurret[]
+  // The shops, each for the team that starts at its slot: where items can be bought and sold. None, and they can be anywhere.
+  shops?: readonly MapShop[]
 } & Partial<MapObjectives>
 export class ServerGameState {
   status: GameStatus = GameStatusSchema.enum.idle
   // How the game that is starting or running is played, set when its champion select opens.
-  mode: GameMode = DEFAULT_GAME_MODE
+  mode: GameMode = FALLBACK_GAME_MODE
   readonly simulator: Simulator
   // Champion select: one pick per player until the game begins.
   readonly selections = new Map<string, ChampionSelection>()
@@ -63,6 +73,8 @@ export class ServerGameState {
   private mapId: string | undefined
   private mapName = 'This map'
   private monsters: readonly MapMonster[] = []
+  private turrets: readonly MapTurret[] = []
+  private shops: readonly MapShop[] = []
   // How long a champion stays dead and what a team wins at, set with the mode when champion select opens.
   private rules: ModeRules = {}
   // The teams the game began with, and the players who went back to the lobby while it was running (with
@@ -99,12 +111,13 @@ export class ServerGameState {
   // in, since players can leave while champions are picked. With no map given, it is the map the game is on.
   modeProblem(players: Iterable<LobbyPlayer>, mode: GameMode = this.mode, map?: Partial<GameMap>): string | undefined {
     const spawns = map?.spawns ?? this.spawns
-    const objectives = map ? { hill: map.hill, flags: map.flags ?? [] } : this.objectives
+    const objectives = map ? { hill: map.hill, flags: map.flags ?? [], cores: map.cores ?? [] } : this.objectives
     return startProblem(mode, teamsOf([...players]), {
       name: map?.name ?? (map?.id ? mapDisplayName(map.id) : this.mapName),
       spawns: spawns.map((points) => points.length),
       hill: objectives.hill !== undefined,
       flags: Boolean(objectives.flags[0] && objectives.flags[1]),
+      cores: Boolean(objectives.cores?.[0] && objectives.cores?.[1]),
     })
   }
 
@@ -114,16 +127,18 @@ export class ServerGameState {
   beginSelection(
     players: Iterable<LobbyPlayer>,
     map?: GameMap,
-    mode: GameMode = DEFAULT_GAME_MODE,
+    mode: GameMode = FALLBACK_GAME_MODE,
     rules: ModeRules = {},
   ): boolean {
     if (this.status !== GameStatusSchema.enum.idle) return false
     if (map) {
       this.spawns = map.spawns
       this.terrain = map.terrain
-      this.objectives = { flags: map.flags ?? [], ...(map.hill ? { hill: map.hill } : {}) }
+      this.objectives = { flags: map.flags ?? [], cores: map.cores ?? [], ...(map.hill ? { hill: map.hill } : {}) }
       this.mapId = map.id
       this.monsters = map.monsters ?? []
+      this.turrets = map.turrets ?? []
+      this.shops = map.shops ?? []
       this.mapName = map.name ?? (map.id ? mapDisplayName(map.id) : 'This map')
     }
     this.mode = mode
@@ -175,7 +190,13 @@ export class ServerGameState {
 
     this.status = GameStatusSchema.enum.starting
     this.readyPlayers.clear()
-    this.simulator.reset(this.terrain, setup)
+    // Each shop is for the team that starts at its slot, as a turret is (the biggest team at the first slot): a slot nobody starts at has no shop in the game.
+    const shopTeams = rankTeams(teams)
+    const shops = this.shops.flatMap((shop) => {
+      const team = shopTeams[shop.slot - 1]
+      return team === undefined ? [] : [{ team, x: shop.x, y: shop.y, width: shop.width, height: shop.height }]
+    })
+    this.simulator.reset(this.terrain, setup, shops)
     this.characterIdsByPlayerId.clear()
     this.orderAcksByPlayerId.clear()
     this.departed.clear()
@@ -199,6 +220,26 @@ export class ServerGameState {
       const id = this.nextCharacterId
       this.nextCharacterId += 1
       this.simulator.addMonster(id, getMonster(camp.monster), camp.at)
+    }
+    // And its turrets, each on the team that starts at the slot it is for (the biggest team at slot 1, as for spawn points). A game with
+    // no team for a slot, a map for two teams played by one, has no turret there.
+    const slotTeams = rankTeams(teams)
+    for (const post of this.turrets) {
+      const team = slotTeams[post.slot - 1]
+      if (team === undefined) continue
+      const id = this.nextCharacterId
+      this.nextCharacterId += 1
+      this.simulator.addTurret(id, getTurret(post.tier), post.at, team)
+    }
+    // And, in Core Destruction, the core of each of the two teams, at the base of the slot it starts at: the heart of the base its turrets guard.
+    if (this.mode === 'core') {
+      slotTeams.slice(0, 2).forEach((team, slot) => {
+        const at = this.objectives.cores?.[slot]
+        if (!at) return
+        const id = this.nextCharacterId
+        this.nextCharacterId += 1
+        this.simulator.addCore(id, getCore(), at, team)
+      })
     }
     this.selections.clear()
   }
@@ -269,7 +310,7 @@ export class ServerGameState {
       .sort((left, right) => right.score - left.score || left.team - right.team)
     const winner = reason === 'limit' ? winningTeam(this.simulator.mode, objective) : leadingTeam(scores)
     const players = [
-      ...[...this.simulator.characters.values()].filter((character) => !character.monster).map((character) => ({
+      ...[...this.simulator.characters.values()].filter((character) => !character.isNpc).map((character) => ({
         name: character.player?.name ?? `Player ${character.id}`,
         team: character.team,
         kills: character.kills,
@@ -370,6 +411,8 @@ export class ServerGameState {
       reason = 'target_unavailable'
     } else if (order.type === 'cast' && !attacker.champion.hasAbility(order.abilityId)) {
       reason = 'unknown_ability'
+    } else if (order.type === 'buy' && !getItem(order.itemId)) {
+      reason = 'unknown_item'
     } else if (!this.simulator.addOrder(characterId, order)) {
       reason = 'duplicate'
     }

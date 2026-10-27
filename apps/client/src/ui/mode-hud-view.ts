@@ -1,10 +1,10 @@
 import { getTeam } from '../../../../packages/shared/src/index.ts'
-import { flagHint, flagReadout, hillReadout, modeTitle, type FlagView, type ModeView, type TeamScore } from './mode-hud.ts'
+import { coreHint, coreReadout, flagHint, flagReadout, hillReadout, modeTitle, type CoreView, type FlagView, type ModeView, type TeamScore } from './mode-hud.ts'
 
 const NEUTRAL_COLOR = '#c9d6e4'
 
 // What each kind of score is called, for the screen reader.
-const SCORE_NAME = { deathmatch: 'kills', koth: 'points', ctf: 'captures' } as const
+const SCORE_NAME = { deathmatch: 'kills', koth: 'points', ctf: 'captures', core: 'cores' } as const
 
 function scoreChip(row: TeamScore, localTeam: number | undefined): HTMLElement {
   const team = getTeam(row.team)
@@ -45,8 +45,30 @@ function flagItem(flag: FlagView): HTMLElement {
   return item
 }
 
+function coreItem(core: CoreView): HTMLElement {
+  const team = getTeam(core.team)
+  const readout = coreReadout(core)
+  const item = document.createElement('li')
+  item.className = `mode-core is-${core.status}`
+  item.style.setProperty('--team-color', team.color)
+  const name = document.createElement('span')
+  name.className = 'mode-core-name'
+  name.textContent = `${team.name} core`
+  const bar = document.createElement('span')
+  bar.className = 'mode-core-bar'
+  const fill = document.createElement('span')
+  fill.className = 'mode-core-fill'
+  fill.style.width = `${Math.round(readout.fraction * 100)}%`
+  bar.append(fill)
+  const state = document.createElement('span')
+  state.className = 'mode-core-state'
+  state.textContent = readout.text
+  item.append(name, bar, state)
+  return item
+}
+
 // The top middle: the mode, each team's score and, for the hill, its bar and, for the flags, where each
-// one is and who has it. Plain elements over the canvas, hidden until the first update, and rebuilt
+// one is and who has it, and for the cores how each stands. Plain elements over the canvas, hidden until the first update, and rebuilt
 // only when what they say changes (the hill's bar moves every frame).
 export function createModeHudView(container: HTMLElement) {
   const root = document.createElement('div')
@@ -72,12 +94,15 @@ export function createModeHudView(container: HTMLElement) {
   hill.append(hillBar, hillText)
   const flags = document.createElement('ul')
   flags.className = 'mode-flags'
+  const coreRows = document.createElement('ul')
+  coreRows.className = 'mode-cores'
   const hint = document.createElement('p')
   hint.className = 'mode-hint'
-  root.append(title, scores, hill, flags, hint)
+  root.append(title, scores, hill, flags, coreRows, hint)
   container.appendChild(root)
   let shownScores = ''
   let shownFlags = ''
+  let shownCores = ''
 
   return {
     // `local` is the controlled champion, whose team is marked in the scores and who the hint is for.
@@ -87,6 +112,8 @@ export function createModeHudView(container: HTMLElement) {
       title.textContent = modeTitle(view)
       scores.setAttribute('aria-label', `Team ${SCORE_NAME[view.kind]}`)
 
+      // In Core Destruction the cores say how it stands, and a team's score (how many cores it has broken) is only one or none.
+      scores.hidden = view.kind === 'core'
       const scoresKey = JSON.stringify([view.scores, local?.team])
       if (scoresKey !== shownScores) {
         shownScores = scoresKey
@@ -113,7 +140,15 @@ export function createModeHudView(container: HTMLElement) {
         flags.replaceChildren(...flagViews.map(flagItem))
       }
 
-      const text = view.kind === 'ctf' ? flagHint(view.flags, local) : undefined
+      coreRows.hidden = view.kind !== 'core'
+      const coreViews = view.kind === 'core' ? view.cores : []
+      const coresKey = JSON.stringify(coreViews)
+      if (coresKey !== shownCores) {
+        shownCores = coresKey
+        coreRows.replaceChildren(...coreViews.map(coreItem))
+      }
+
+      const text = view.kind === 'ctf' ? flagHint(view.flags, local) : view.kind === 'core' ? coreHint(view.cores, local) : undefined
       hint.hidden = text === undefined
       hint.textContent = text ?? ''
     },

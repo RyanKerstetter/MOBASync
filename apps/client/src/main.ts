@@ -42,6 +42,7 @@ const codeInput = requiredElement<HTMLInputElement>('#lobby-code')
 const message = requiredElement<HTMLParagraphElement>('#message')
 const activeCode = requiredElement<HTMLParagraphElement>('#active-code')
 const copyButton = requiredElement<HTMLButtonElement>('#copy-button')
+const copyStatus = requiredElement<HTMLSpanElement>('#copy-status')
 const renameForm = requiredElement<HTMLFormElement>('#rename-form')
 const lobbyUsernameInput = requiredElement<HTMLInputElement>('#lobby-username')
 const playerCount = requiredElement<HTMLSpanElement>('#player-count')
@@ -318,7 +319,8 @@ function renderRules(lobby: Lobby, isLeader: boolean, force = false): void {
   captureInput.disabled = !editable
   showNumber(captureInput, lobby.rules.captureSeconds, force)
   for (const [id, { row, input }] of limitRows) {
-    row.hidden = id !== lobby.mode
+    // A mode with no limit to set (Core Destruction, which ends when a team is out) shows none.
+    row.hidden = id !== lobby.mode || getGameMode(id).maxLimit === 0
     input.disabled = !editable
     showNumber(input, lobby.rules.scoreLimits[id], force)
   }
@@ -361,7 +363,7 @@ async function endGame(): Promise<void> {
   const finished = currentLobby.game.status === 'finished'
   const question = finished
     ? 'Close the game? Anyone still looking at its results goes back to the lobby.'
-    : 'End the game for everyone? The team that is ahead wins.'
+    : 'End the game for everyone? They go straight back to the lobby, and the team that is ahead wins.'
   if (!window.confirm(question)) return
   try {
     const result = await lobbyRequest(currentLobby, 'end')
@@ -695,11 +697,12 @@ function returnToEntry(): void {
 
 // A player goes back to the lobby, and the game goes on without them (if it is not over). They can see who is
 // still playing there, and the game shuts down when the last of them has gone.
-async function leaveGame(): Promise<void> {
+async function leaveGame(message?: string): Promise<void> {
   const lobby = currentLobby
   stopActiveGame()
   gamePanel.hidden = true
   lobbyPanel.hidden = false
+  if (message) setLobbyMessage(message)
   if (lobby) {
     try {
       const result = await lobbyRequest(lobby, 'leave-game')
@@ -765,7 +768,7 @@ async function enterGame(lobby: Lobby): Promise<void> {
         gameLoading.hidden = true
       },
       onDisconnected: () => showGameToast('Disconnected from the game server.', true),
-      onLeave: () => void leaveGame(),
+      onLeave: (message) => void leaveGame(message),
       onCancelled: (text) => {
         stopActiveGame()
         gamePanel.hidden = true
@@ -834,15 +837,40 @@ async function returnFromGame(): Promise<void> {
   if (currentLobby) renderLobby(currentLobby)
   beginPolling()
 }
+const COPY_SUCCESS_MS = 2000
+const COPY_FAILURE_MS = 8000
+let copyResetTimer: number | undefined
+
+// Says how copying went on the button itself and right beside it, since that is where the player is
+// looking (the lobby's own message is at the bottom of the page). A failure turns the button red and
+// stays up longer than a success, and says why.
+function showCopyResult(failure?: string): void {
+  window.clearTimeout(copyResetTimer)
+  copyButton.textContent = failure === undefined ? 'Copied!' : 'Copy failed'
+  copyButton.classList.toggle('is-error', failure !== undefined)
+  copyStatus.textContent = failure ?? ''
+  copyResetTimer = window.setTimeout(() => {
+    copyButton.textContent = 'Copy'
+    copyButton.classList.remove('is-error')
+    copyStatus.textContent = ''
+  }, failure === undefined ? COPY_SUCCESS_MS : COPY_FAILURE_MS)
+}
+
+// When the page cannot copy the code, it selects it, so copying it by hand is one Ctrl+C away.
+function failCopy(reason: string): void {
+  window.getSelection()?.selectAllChildren(activeCode)
+  showCopyResult(reason)
+}
+
 copyButton.addEventListener('click', () => {
   if (!currentLobby) return
   if (!navigator.clipboard) {
-    setLobbyMessage('Copying needs HTTPS; select the code and copy it instead.', true)
+    failCopy('Copying needs HTTPS, so the code is selected: press Ctrl+C to copy it yourself.')
     return
   }
   void navigator.clipboard.writeText(currentLobby.code)
-    .then(() => setLobbyMessage('Lobby code copied.'))
-    .catch((error: unknown) => setLobbyMessage(`Could not copy code: ${errorMessage(error)}`, true))
+    .then(() => showCopyResult())
+    .catch((error: unknown) => failCopy(`Could not copy (${errorMessage(error)}). The code is selected: press Ctrl+C.`))
 })
 
 window.addEventListener('beforeunload', () => {

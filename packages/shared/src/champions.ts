@@ -47,6 +47,7 @@ import {
   type SimContext,
   type SimReader,
 } from './effects.js'
+import { BASE_STAT_DEFAULTS, NO_GROWTH, StatBlock, type BaseStatsDef, type ChampionStats, type StatValues } from './stats.js'
 
 // A shot an auto attack fires instead of landing at once. It flies straight at its target, turning
 // with it, until it touches, and `onAttackHit` runs then. It has no timer of its own: it ends on
@@ -68,12 +69,13 @@ export interface ChampionDef {
   description?: string
   // The always-on ability, described for the select screen. Its effects live in onAttackHit.
   passive?: string
-  maxHp: number
+  // What it is at level 1 (see stats.ts): its health, its attack damage and its attack speed (attacks a second), which it has to say, and
+  // its resistance, haste and arcane (ability power), which it can leave out for none of each.
+  base: BaseStatsDef
+  // What each level after the first adds to each of the same six. A stat it leaves out (or all of them, by leaving this out) does not grow.
+  growth?: Partial<StatValues>
   moveSpeed: number
   radius: number
-  attackDamage: number
-  // Attacks per second.
-  attackSpeed: number
   attackRange: number
   attackWindupTicks: number
   // Leave it out for an instant attack, which lands the moment its windup finishes, however far
@@ -126,11 +128,11 @@ export class Champion {
   readonly name: string
   readonly description: string
   readonly passive: string
-  readonly maxHp: number
+  // What it is at level 1, and what each level after that adds: two blocks of the same six stats.
+  readonly base: StatBlock
+  readonly growth: StatBlock
   readonly moveSpeed: number
   readonly radius: number
-  readonly attackDamage: number
-  readonly attackSpeed: number
   readonly attackRange: number
   readonly attackWindupTicks: number
   readonly attackProjectile: AttackProjectileDef | undefined
@@ -162,15 +164,29 @@ export class Champion {
       && Number.isFinite(projectile.speed) && Number.isFinite(projectile.radius))) {
       throw new Error(`Champion "${def.id}" has an attack projectile that needs a positive speed and radius.`)
     }
+    // The stats moved into `base` and `growth`, so one left out on its own is refused, and not quietly ignored.
+    for (const stat of ['maxHp', 'attackDamage', 'attackSpeed', 'resistance', 'haste', 'arcane']) {
+      if (stat in def) throw new Error(`Champion "${def.id}" has ${stat} on its own: it goes in its base stats (and growth).`)
+    }
+    const block = (what: string, values: StatValues): StatBlock => {
+      try {
+        return new StatBlock(values)
+      } catch (error) {
+        throw new Error(`Champion "${def.id}" has ${what} stats that are wrong: it ${(error as Error).message}.`)
+      }
+    }
+    // Left out of the growth, a stat adds nothing; left out of the base, the resistance, the haste and the arcane are none.
+    // The health, the attack damage and the attack speed of a base are not left out (`undefined` is refused as not a number).
+    const base = block('base', { ...BASE_STAT_DEFAULTS, ...def.base } as StatValues)
+    const growth = block('growth', { ...NO_GROWTH, ...def.growth })
     this.id = def.id
     this.name = def.name
     this.description = def.description ?? ''
     this.passive = def.passive ?? ''
-    this.maxHp = def.maxHp
+    this.base = base
+    this.growth = growth
     this.moveSpeed = def.moveSpeed
     this.radius = def.radius
-    this.attackDamage = def.attackDamage
-    this.attackSpeed = def.attackSpeed
     this.attackRange = def.attackRange
     this.attackWindupTicks = def.attackWindupTicks
     this.attackProjectile = projectile ? { ...projectile } : undefined
@@ -201,17 +217,53 @@ export class Champion {
     this.onCast = def.onCast ?? []
   }
 
+  // Its stats at this level: the ones it is made with at level 1, and each level after that adds its growth. The health is a whole
+  // number, as health is; the rest are as they come out. What does not grow (the range, the speed) is the same at every level.
+  statsAt(level: number): ChampionStats {
+    const gained = Number.isFinite(level) ? Math.max(0, Math.floor(level) - 1) : 0
+    const grown = this.base.grownBy(this.growth, gained)
+    return { ...grown, maxHp: Math.round(grown.maxHp), attackRange: this.attackRange, moveSpeed: this.moveSpeed }
+  }
+
+  // Its base stats, read on their own: what it is at level 1.
+  get maxHp(): number {
+    return this.base.maxHp
+  }
+
+  get attackDamage(): number {
+    return this.base.attackDamage
+  }
+
+  get attackSpeed(): number {
+    return this.base.attackSpeed
+  }
+
+  get resistance(): number {
+    return this.base.resistance
+  }
+
+  get haste(): number {
+    return this.base.haste
+  }
+
+  get arcane(): number {
+    return this.base.arcane
+  }
+
+  // At level 1.
   get attackCooldownTicks(): number {
     return this.attackCooldownTicksWith([])
   }
 
-  // Attack range and cooldown with the owner's active attack-range and attack-speed statuses.
-  attackRangeWith(statuses: readonly StatusBonus[]): number {
-    return this.attackRange + sumBonus(statuses, 'attackrange')
+  // Attack range and cooldown with the owner's active attack-range and attack-speed statuses, and for the cooldown the attack speed
+  // of the owner's level.
+  // `itemRange` and `itemSpeed` are what the champion's items add to its attack range and its attacks a second (see items.ts).
+  attackRangeWith(statuses: readonly StatusBonus[], itemRange = 0): number {
+    return this.attackRange + itemRange + sumBonus(statuses, 'attackrange')
   }
 
-  attackCooldownTicksWith(statuses: readonly StatusBonus[]): number {
-    const speed = this.attackSpeed * (1 + sumBonus(statuses, 'attackspeed'))
+  attackCooldownTicksWith(statuses: readonly StatusBonus[], level = 1, itemSpeed = 0): number {
+    const speed = (this.statsAt(level).attackSpeed + itemSpeed) * (1 + sumBonus(statuses, 'attackspeed'))
     return Math.max(1, Math.ceil(GAME_TPS / speed))
   }
 
@@ -242,11 +294,10 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     name: 'Cursebearer',
     description: 'A ranged hexer that stacks curses on its prey, then cashes them in.',
     passive: `Auto attacks apply a curse stack to the target, up to ${CURSE_MAX_STACKS}. Each stack lasts ${CURSE_DURATION_TICKS / GAME_TPS} seconds.`,
-    maxHp: 800,
+    base: { maxHp: 800, attackDamage: 40, attackSpeed: 1, resistance: 0, haste: 0, arcane: 0 },
+    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
     moveSpeed: 140,
     radius: 20,
-    attackDamage: 40,
-    attackSpeed: 1.3,
     attackRange: 190,
     attackWindupTicks: 12,
     attackProjectile: { speed: 550, radius: 6, color: '#b07cf2' },
@@ -261,11 +312,10 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     name: 'Archer',
     description: 'A mobile marksman that leaps in and out of fights and kites with a long reach.',
     passive: 'Every auto attack reduces the cooldown of Leap by 1 second.',
-    maxHp: 700,
+    base: { maxHp: 700, attackDamage: 75, attackSpeed: 1, resistance: 0, haste: 0, arcane: 0 },
+    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
     moveSpeed: 150,
     radius: 19,
-    attackDamage: 70,
-    attackSpeed: 1.3,
     attackRange: 240,
     attackWindupTicks: 14,
     attackProjectile: { speed: 900, radius: 5, color: '#6dd39b' },
@@ -277,11 +327,10 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     name: 'Swordsman',
     description: 'A melee duelist that builds sword stacks with every blow and spends them on bursts, roots and stuns.',
     passive: `Auto attacks give you a sword stack, up to ${SWORD_MAX_STACKS}, lasting ${SWORD_DURATION_TICKS / GAME_TPS} seconds. Each stack adds ${SWORD_DAMAGE_PER_STACK} damage to your autos and to Slash.`,
-    maxHp: 1000,
+    base: { maxHp: 1000, attackDamage: 80, attackSpeed: .9, resistance: 0, haste: 0, arcane: 0 },
+    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
     moveSpeed: 145,
     radius: 22,
-    attackDamage: 80,
-    attackSpeed: 1.1,
     attackRange: 90,
     attackWindupTicks: 13,
     abilities: ['slash', 'radiance', 'shackle'],
@@ -296,11 +345,10 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     name: 'Capricorn',
     description: 'A water mage that weaves its spells into empowered attacks.',
     passive: `Your next auto attack after casting a spell deals ${EMPOWER_BONUS_DAMAGE} bonus damage.`,
-    maxHp: 850,
+    base: { maxHp: 850, attackDamage: 40, attackSpeed: .8, resistance: 0, haste: 0, arcane: 0 },
+    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
     moveSpeed: 145,
     radius: 21,
-    attackDamage: 40,
-    attackSpeed: 1.0,
     attackRange: 250,
     attackWindupTicks: 16,
     attackProjectile: { speed: 500, radius: 7, color: '#a8e0ff' },
@@ -316,11 +364,10 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     id: 'soldier',
     name: 'Soldier',
     description: 'Shoots from range. Trades health for speed and brings a medic.',
-    maxHp: 750,
+    base: { maxHp: 750, attackDamage: 55, attackSpeed: 1, resistance: 0, haste: 0, arcane: 0 },
+    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
     moveSpeed: 150,
     radius: 21,
-    attackDamage: 50,
-    attackSpeed: 1.3,
     attackRange: 220,
     attackWindupTicks: 12,
     attackProjectile: { speed: 800, radius: 5, color: '#ffb347' },
@@ -331,11 +378,10 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     name: 'Grenadier',
     description: 'A ranged bomber that bounces off its own grenades, burns the ground, and stuns or blinds with flashbangs.',
     passive: `After ${SIGHTED_AUTOS} auto attacks on the same enemy within ${SIGHTED_WINDOW_TICKS / GAME_TPS} seconds, gain ${SIGHTED_HASTE * 100}% move speed that fades away over ${SIGHTED_HASTE_TICKS / GAME_TPS} seconds.`,
-    maxHp: 800,
+    base: { maxHp: 800, attackDamage: 60, attackSpeed: .9, resistance: 0, haste: 0, arcane: 0 },
+    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
     moveSpeed: 145,
     radius: 20,
-    attackDamage: 55,
-    attackSpeed: 1.1,
     attackRange: 220,
     attackWindupTicks: 15,
     attackProjectile: { speed: 650, radius: 6, color: '#d4b13a' },
@@ -358,11 +404,10 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     name: 'Trinketmaster',
     description: 'A melee trickster that throws a stick, calls it back through enemies, and warps to it.',
     passive: `After ${TRICK_HITS - 1} ability hits on the same enemy within ${TRICK_WINDOW_TICKS / GAME_TPS} seconds of each other, the next one deals ${TRICK_BONUS_DAMAGE} bonus damage and gives you ${TRICK_HASTE * 100}% move speed for ${TRICK_HASTE_TICKS / GAME_TPS} seconds. Your stick, going out and coming back, and the auto that Hush readies are ability hits; your plain autos are not.`,
-    maxHp: 900,
+    base: { maxHp: 900, attackDamage: 80, attackSpeed: .9, resistance: 0, haste: 0, arcane: 0 },
+    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
     moveSpeed: 150,
     radius: 21,
-    attackDamage: 80,
-    attackSpeed: 1.1,
     attackRange: 90,
     attackWindupTicks: 12,
     // Q is the stick, and becomes the recall while the stick is out.
@@ -373,11 +418,10 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     name: 'Ninja',
     description: 'A melee skirmisher that dashes through enemies, leaves shadows to dash back to, and dodges autos.',
     passive: `Dashing through an enemy with Shadow Step gives you a shadow stack, up to ${SHADOW_MAX_STACKS} for ${SHADOW_STACK_TICKS / GAME_TPS} seconds. Each auto attack spends one for ${SHADOW_AUTO_BONUS_DAMAGE} bonus damage, and so does Shuriken, which then roots.`,
-    maxHp: 800,
+    base: { maxHp: 800, attackDamage: 70, attackSpeed: 1, resistance: 0, haste: 0, arcane: 0 },
+    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
     moveSpeed: 155,
     radius: 20,
-    attackDamage: 70,
-    attackSpeed: 1.2,
     attackRange: 85,
     attackWindupTicks: 10,
     // Q dashes, then dashes back to the shadow it left; W is the kunai; E dodges.

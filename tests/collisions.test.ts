@@ -38,11 +38,9 @@ const hopper = (() => {
   return defineChampion({
     id: 't-hopper',
     name: 'Test Hopper',
-    maxHp: 500,
+    base: { maxHp: 500, attackDamage: 10, attackSpeed: 1 },
     moveSpeed: 220,
     radius: 18,
-    attackDamage: 10,
-    attackSpeed: 1,
     attackRange: 100,
     attackWindupTicks: 0,
     abilities: ['t-hop'],
@@ -179,6 +177,46 @@ test('a blink goes over a wall, and one aimed into a wall lands outside it', () 
   into.addPlayer(1, 'player-1', 'One', { x: 330, y: 300 }, hopper)
   into.addOrder(1, castAt(1, 1, 't-hop', { x: 330, y: 300 }, { x: 450, y: 300 }))
   assert.deepEqual(into.at(3).get(1)?.getPosition(), { x: 400 - hopper.radius, y: 300 })
+})
+
+// Two walls that meet along x = 400: a seam, which a champion put on it cannot leave one wall for without going into the other.
+const SEAM: Rect[] = [{ x: 300, y: 200, width: 100, height: 200 }, { x: 400, y: 200, width: 100, height: 200 }]
+const clearOfWalls = (point: Vector2, radius: number, walls: Rect[]): boolean => walls.every((wall) => !touchesWall(point, radius, wall))
+
+test('a dash that ends on a seam between two walls lands clear of both, and the champion can walk away', () => {
+  const simulator = playOn(SEAM)
+  simulator.addPlayer(1, 'player-1', 'One', { x: 100, y: 300 }, ninja)
+  simulator.addOrder(1, castAt(1, 1, 't-shadowstep', { x: 100, y: 300 }, { x: 400, y: 300 }))
+  const landed = simulator.at(30).get(1)?.getPosition() ?? SEAM[0]
+  assert.equal(simulator.at(30).get(1)?.isDashing(), false)
+  assert.ok(clearOfWalls(landed, ninja.radius, SEAM), `landed at ${JSON.stringify(landed)}, in a wall`)
+  assert.deepEqual(simulator.at(60).get(1)?.getPosition(), landed, 'and stays there, and is not pushed back and forth')
+  // It is not stuck: an order to walk somewhere gets it there.
+  simulator.addOrder(1, moveTo(2, 61, { x: 150, y: 500 }))
+  assert.deepEqual(simulator.at(400).get(1)?.getPosition(), { x: 150, y: 500 })
+})
+
+test('a blink that lands on a seam between two walls lands clear of both', () => {
+  const simulator = playOn(SEAM)
+  simulator.addPlayer(1, 'player-1', 'One', { x: 150, y: 300 }, hopper)
+  simulator.addOrder(1, castAt(1, 1, 't-hop', { x: 150, y: 300 }, { x: 400, y: 300 }))
+  const landed = simulator.at(5).get(1)?.getPosition() ?? SEAM[0]
+  assert.ok(clearOfWalls(landed, hopper.radius, SEAM), `landed at ${JSON.stringify(landed)}, in a wall`)
+  simulator.addOrder(1, moveTo(2, 10, { x: 150, y: 500 }))
+  assert.deepEqual(simulator.at(400).get(1)?.getPosition(), { x: 150, y: 500 }, 'and it can walk away')
+})
+
+test('a click on a seam between two walls is not lost: the champion walks to the nearest place it can stand', () => {
+  for (const from of [{ x: 150, y: 300 }, { x: 700, y: 300 }]) {
+    const simulator = playOn(SEAM)
+    simulator.addPlayer(1, 'player-1', 'One', from, brawler)
+    simulator.addOrder(1, moveTo(1, 1, { x: 400, y: 300 }))
+    const there = simulator.at(600).get(1)
+    assert.ok(there, 'it is in the game')
+    assert.ok(Math.hypot(there.getPosition().x - from.x, there.getPosition().y - from.y) > 100, `it went somewhere from ${JSON.stringify(from)}`)
+    assert.ok(clearOfWalls(there.getPosition(), brawler.radius, SEAM), 'clear of both walls')
+    assert.equal(there.getMoveTarget(), undefined, 'and it has arrived')
+  }
 })
 
 test('characters pushed against a wall by each other are held out of it', () => {

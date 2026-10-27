@@ -11,16 +11,20 @@ import type { Monster } from './monsters.js'
 //
 // A monster is in one of three modes:
 //
-//   idle     at home, waiting. It goes after the nearest player within its aggro range, or whoever hurt it
-//            (if it is that kind of monster), and walks home if something has pushed it away.
+//   idle     at home, waiting. It goes after the nearest player within its aggro range (the walk to them, the way round
+//            walls: see `WalkDistance`), or whoever hurt it (if it is that kind of monster) from wherever they did, if
+//            there is any way to them. It walks home if something has pushed it away.
 //   chase    after someone. The simulator's own attack lock does the chasing and the auto attacks (an `attack` order
 //            makes the monster walk up to its target and strike it again and again, as it does for a player), and
-//            this adds the abilities. It keeps the same target for as long as it can: it gives it up if they die, if
-//            they get further than its deaggro range, or if the monster itself is further from home than its leash,
-//            and then it takes the nearest player in its aggro range instead, if there is one, and goes home if
-//            not (a monster past its leash goes home whoever is close).
+//            this adds the abilities. It keeps the same target for as long as it can. Its deaggro range is round its
+//            home, which does not move, and is the walk home (the way round walls, not the line): while the monster is
+//            outside it, its deaggro bar fills a tick at a time (and it does too while there is no way to its target,
+//            which is a chase that is going nowhere), and while it is inside, the bar empties. When the bar is full it
+//            ignores everyone and goes home. It gives up its target at once if they die, and then it takes the nearest
+//            player in its aggro range instead, if there is one, and goes home if not.
 //   return   walking home. It pays no attention to anyone on the way, so it cannot be kited back and forth. On
-//            getting home it is healed to full (if it is that kind of monster) and is idle again.
+//            getting home it is healed to full (if it is that kind of monster) and is idle again. A monster whose bar
+//            filled is shown with it full till it is there.
 
 export type AiBody = {
   id: number
@@ -64,7 +68,18 @@ const distance = (left: Vector2, right: Vector2): number => {
   return Math.sqrt(dx * dx + dy * dy)
 }
 
-export function think(monster: Monster, body: AiBody, state: AiState, others: readonly AiOther[]): AiDecision {
+// How far a monster has to walk to get from one place to another: the way round the walls, which is what a range means
+// to something that has to go there (Infinity if there is no way). It has to be a function of the walls, which never change
+// in a game, and nothing else, as the rest of `think` is. The straight line, which is the default, is the same with no walls.
+export type WalkDistance = (from: Vector2, to: Vector2) => number
+
+export function think(
+  monster: Monster,
+  body: AiBody,
+  state: AiState,
+  others: readonly AiOther[],
+  walk: WalkDistance = distance,
+): AiDecision {
   const profile = monster.ai
   const enemies = others
     .filter((other) => other.alive && other.team !== body.team && other.id !== body.id)
@@ -72,12 +87,29 @@ export function think(monster: Monster, body: AiBody, state: AiState, others: re
   const fromHome = distance(body.position, body.home)
   const atHome = fromHome <= profile.homeRadius
 
-  // The nearest of the enemies within `range` of the monster, the lowest ID if two are as near.
+  // How far it has to walk to someone, if that is within `range` (Infinity if it is not, and for a range that is nothing, which
+  // notices no one; Infinity is a range of everyone). A walk is never shorter than the straight line, so someone further than
+  // the range in a straight line is out of it without working the walk out, which is the work, and it is only worked out once
+  // for each.
+  const walked = new Map<number, number>()
+  const walkTo = (enemy: AiOther, range: number): number => {
+    if (!(range > 0) || distance(body.position, enemy.position) > range) return Infinity
+    let far = walked.get(enemy.id)
+    if (far === undefined) {
+      far = walk(body.position, enemy.position)
+      walked.set(enemy.id, far)
+    }
+    return far
+  }
+  // Whether there is any way to them, however far.
+  const reachable = (enemy: AiOther): boolean => walkTo(enemy, Infinity) < Infinity
+
+  // The nearest of the enemies within `range` of the monster, by the walk, the lowest ID if two are as near.
   const nearest = (range: number): AiOther | undefined => {
     let found: AiOther | undefined
     let best = Infinity
     for (const enemy of enemies) {
-      const away = distance(body.position, enemy.position)
+      const away = walkTo(enemy, range)
       if (away <= range && away < best) {
         found = enemy
         best = away
@@ -85,38 +117,45 @@ export function think(monster: Monster, body: AiBody, state: AiState, others: re
     }
     return found
   }
-  // Gives up and goes home, or is home already and so is done.
-  const giveUp = (): AiDecision => atHome
+  // Gives up and goes home, or is home already and so is done. `deaggro` is the bar it has filled, kept while it walks.
+  const giveUp = (deaggro = 0): AiDecision => atHome
     ? { state: { mode: 'idle' }, orders: [], reset: profile.resetOnReturn }
-    : { state: { mode: 'return' }, orders: [{ type: 'move', target: { ...body.home } }], reset: false }
+    : {
+      state: { mode: 'return', ...(deaggro > 0 ? { deaggro } : {}) },
+      orders: [{ type: 'move', target: { ...body.home } }],
+      reset: false,
+    }
 
   if (state.mode === 'return') {
     if (atHome) return { state: { mode: 'idle' }, orders: [], reset: profile.resetOnReturn }
     // Kept walking, in case something stopped it on the way.
     const orders: AiOrder[] = !body.moving && !body.busy ? [{ type: 'move', target: { ...body.home } }] : []
-    return { state: { mode: 'return' }, orders, reset: false }
+    return { state: { mode: 'return', ...(state.deaggro !== undefined ? { deaggro: state.deaggro } : {}) }, orders, reset: false }
   }
 
   let target: AiOther | undefined
+  // The deaggro bar, as it is after this tick.
+  let deaggro = 0
   if (state.mode === 'idle') {
-    // Whoever hurt it, if they are still within reach of its attention, or else whoever is nearest.
+    // Whoever hurt it, from wherever they did, if there is a way to them, or else whoever is nearest in its aggro range.
     const provoker = profile.aggroOnHit ? enemies.find((enemy) => enemy.id === state.provokedBy) : undefined
-    target = provoker && distance(body.position, provoker.position) <= profile.deaggroRange
-      ? provoker
-      : nearest(profile.aggroRange)
+    target = provoker && reachable(provoker) ? provoker : nearest(profile.aggroRange)
     if (!target) {
       // Something pushed it off its post.
       return atHome ? { state: { mode: 'idle' }, orders: [], reset: false } : giveUp()
     }
-    if (fromHome > profile.leashRange) return giveUp()
   } else {
-    if (fromHome > profile.leashRange) return giveUp()
-    // The same target for as long as it is there and in reach of the monster's attention.
-    const current = enemies.find((enemy) => enemy.id === state.targetId)
-    target = current && distance(body.position, current.position) <= profile.deaggroRange
-      ? current
-      : nearest(profile.aggroRange)
+    // The same target for as long as it is there, and if they are dead or gone, whoever is nearest in its aggro range, or home.
+    target = enemies.find((enemy) => enemy.id === state.targetId) ?? nearest(profile.aggroRange)
     if (!target) return giveUp()
+    // The bar fills a tick at a time while the monster is outside its deaggro range of home, wherever its target is, and while
+    // there is no way to them. It empties while it is inside. When it is full the monster gives up on everyone. The range is the
+    // walk home, the way round the walls, and not the line: it can be a wall away from home and a long way to walk. The walk is
+    // never shorter than the line, so past the range in a line is out of it without working the walk out.
+    const outOfRange = fromHome > profile.deaggroRange || walk(body.position, body.home) > profile.deaggroRange
+    const losing = outOfRange || !reachable(target)
+    deaggro = losing ? (state.deaggro ?? 0) + 1 : Math.max(0, (state.deaggro ?? 0) - profile.deaggroRecovery)
+    if (deaggro >= profile.deaggroTicks) return giveUp(profile.deaggroTicks)
   }
 
   const orders: AiOrder[] = []
@@ -125,7 +164,7 @@ export function think(monster: Monster, body: AiBody, state: AiState, others: re
     if (cast) orders.push(cast)
     else if (body.attacking !== target.id) orders.push({ type: 'attack', targetId: target.id })
   }
-  return { state: { mode: 'chase', targetId: target.id }, orders, reset: false }
+  return { state: { mode: 'chase', targetId: target.id, ...(deaggro > 0 ? { deaggro } : {}) }, orders, reset: false }
 }
 
 // The first of the monster's ability rules that can be cast at this target now.

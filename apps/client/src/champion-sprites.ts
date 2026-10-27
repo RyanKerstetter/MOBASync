@@ -1,11 +1,12 @@
-import type { AnimationClip, AnimationKey, Facing } from './animation.ts'
+import type { AnimationClip, AnimationKey, Direction, Facing } from './animation.ts'
 
-// A clip's frames, side by side in one row of a sheet image, left to right.
+// A clip's frames, side by side in a row of a sheet image, left to right: one row, or for art drawn facing four
+// ways, a row for each way.
 export type SpriteClip = AnimationClip & {
   url: string
 }
 
-// How a champion is drawn from sprite sheets instead of as a plain circle. Everything about the art
+// How a champion (or a monster) is drawn from sprite sheets instead of as a plain circle. Everything about the art
 // is here as data: adding an animation is adding a clip, and drawing another champion is adding a set.
 export type SpriteSet = {
   // Every frame in the set's sheets is this size, in the art's own pixels.
@@ -16,9 +17,22 @@ export type SpriteSet = {
   anchor: { x: number; y: number }
   // How big one of the art's pixels is drawn, in world units.
   scale: number
-  // The way the art faces. It is flipped to face the other way.
-  facing: Facing
+  // How far above the anchor the top of the figure reaches, in the art's pixels, for a figure that stands taller than
+  // its body is wide: the name and health bar are put over it, not over the body's radius, which would be on the
+  // figure. Without it they are over the radius.
+  top?: number
   clips: Partial<Record<AnimationKey, SpriteClip>>
+} & (
+  // Art drawn facing one way, a sheet one row high: the way it faces. It is flipped to face the other way.
+  | { facing: Facing; directions?: undefined }
+  // Art drawn facing four ways, every sheet a row for each: which row (from 0 at the top) is which way. It turns
+  // to the way the character is going, and is never flipped.
+  | { directions: Readonly<Record<Direction, number>>; facing?: undefined }
+)
+
+// How many rows each of a set's sheets has.
+export function spriteRows(set: SpriteSet): number {
+  return set.directions ? Math.max(...Object.values(set.directions)) + 1 : 1
 }
 
 // The art lives in res/ at the top of the repository. `new URL(..., import.meta.url)` with a fixed
@@ -161,7 +175,45 @@ const grenadier: SpriteSet = {
   },
 }
 
-// By champion ID. A champion with no set here is drawn as a circle.
+// The slime: a blob about 17 px across in the middle of each 64 px frame, drawn facing four ways, a row of each sheet
+// for each (toward the player, away, left, right). At the champions' 3 world units a pixel it is about as big as
+// one. It sways while it waits, and squashes and stretches as it hops along. Its bump rises up on the windup and
+// splashes as it lands, and it dies by fading to a puddle, which stays until it comes back.
+const slime: SpriteSet = {
+  frameWidth: 64,
+  frameHeight: 64,
+  anchor: { x: 32, y: 33 },
+  scale: 3,
+  directions: { down: 0, up: 1, left: 2, right: 3 },
+  clips: {
+    idle: { url: new URL('../../../res/monsters/slime/Slime1_Idle_with_shadow.png', import.meta.url).href, frames: 6, fps: 8, loop: true },
+    walk: { url: new URL('../../../res/monsters/slime/Slime1_Walk_with_shadow.png', import.meta.url).href, frames: 8, fps: 12, loop: true },
+    attack: { url: new URL('../../../res/monsters/slime/Slime1_Attack_with_shadow.png', import.meta.url).href, frames: 10, fps: 14, loop: false, syncToAction: true, syncFrames: 5 },
+    dead: { url: new URL('../../../res/monsters/slime/Slime1_Death_with_shadow.png', import.meta.url).href, frames: 10, fps: 12, loop: false },
+  },
+}
+
+// The golem: a lump of rock about 50 px across and 40 tall in the middle of each 128 px frame, drawn facing four ways
+// like the slime, a row of each sheet for each. At 3 world units a pixel it is some 150 across, three champions wide.
+// It rises up and leaps in its windup and comes down in a burst of pale shards as the blow lands, and it dies by going
+// red and crumbling into a heap of rocks, which stays until it comes back.
+const golem: SpriteSet = {
+  frameWidth: 128,
+  frameHeight: 128,
+  anchor: { x: 64, y: 72 },
+  scale: 3,
+  top: 32,
+  directions: { down: 0, up: 1, left: 2, right: 3 },
+  clips: {
+    idle: { url: new URL('../../../res/monsters/golem/Golem1_Idle_full.png', import.meta.url).href, frames: 4, fps: 5, loop: true },
+    walk: { url: new URL('../../../res/monsters/golem/Golem1_Walk_full.png', import.meta.url).href, frames: 8, fps: 8, loop: true },
+    // Its first five frames are the rise and the leap, spread over the windup so the shards frames after them are the blow.
+    attack: { url: new URL('../../../res/monsters/golem/Golem1_Attack_full.png', import.meta.url).href, frames: 9, fps: 12, loop: false, syncToAction: true, syncFrames: 5 },
+    dead: { url: new URL('../../../res/monsters/golem/Golem1_Death_full.png', import.meta.url).href, frames: 8, fps: 8, loop: false },
+  },
+}
+
+// By champion or monster ID. One with no set here is drawn as a circle.
 export const championSprites: Readonly<Record<string, SpriteSet>> = {
   swordsman: swordAndShield,
   archer: crossbow,
@@ -171,4 +223,6 @@ export const championSprites: Readonly<Record<string, SpriteSet>> = {
   capricorn,
   soldier,
   grenadier,
+  slime,
+  golem,
 }

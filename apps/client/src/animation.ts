@@ -25,6 +25,10 @@ export type AnimationClip = {
 // Which way a champion is facing on screen: 1 to the right, -1 to the left.
 export type Facing = 1 | -1
 
+// Which of four ways a character is facing on screen, for art drawn facing each of them (see `SpriteSet`). Down is
+// toward the player, and is the way a character faces until it first moves.
+export type Direction = 'down' | 'up' | 'left' | 'right'
+
 // An action in progress: what it is, how far through it (0 just started, 1 done), and where it is
 // aimed, which is the way the champion turns to face while it does it.
 export type ActionView = {
@@ -41,11 +45,13 @@ export type AnimationIntent = {
   action?: 'attack' | 'cast'
 }
 
-// What to draw: a clip, a frame of it, and which way.
+// What to draw: a clip, a frame of it, and which way: across the screen for art drawn facing one way, which is
+// flipped, and one of four for art drawn facing all four.
 export type AnimationFrame = {
   key: AnimationKey
   frame: number
   facing: Facing
+  direction: Direction
 }
 
 // What the animator is told each frame: where the champion is drawn, and what it is doing.
@@ -99,6 +105,21 @@ const JUMP_DISTANCE = 80
 // position wobbles a little backwards now and then (a correction from the server, a push from
 // someone beside it, the camera and the smoothing catching up), and that must not flip it.
 export const TURN_DISTANCE = 4
+// Going corner-wise, a character facing one of four ways keeps facing it until the other way is this many times as
+// much of where it is going, so a walk along a diagonal does not flicker between the two.
+export const DIAGONAL_BIAS = 1.25
+
+// Which of four ways a step (or an aim) goes: whichever of across and up-and-down it goes further along, except that
+// near a diagonal it is the way already faced (see `DIAGONAL_BIAS`). Down the screen is y growing.
+export function directionOf(dx: number, dy: number, current: Direction): Direction {
+  const across: Direction = dx > 0 ? 'right' : 'left'
+  const upOrDown: Direction = dy > 0 ? 'down' : 'up'
+  const alongX = Math.abs(dx)
+  const alongY = Math.abs(dy)
+  if (current === across && alongX * DIAGONAL_BIAS >= alongY) return across
+  if (current === upOrDown && alongY * DIAGONAL_BIAS >= alongX) return upOrDown
+  return alongX >= alongY ? across : upOrDown
+}
 
 // Keeps track of one champion's animation from frame to frame. It works out whether the champion is
 // walking, and which way it faces, from where it is drawn, so what plays always matches what is on
@@ -108,9 +129,13 @@ export class CharacterAnimator {
   private key: AnimationKey | undefined
   private startedAt = 0
   private facing: Facing
+  private direction: Direction = 'down'
   private lastPosition: Vector2 | undefined
   // How far across the screen it has gone in one direction since it last went the other, and which.
   private run = 0
+  // How far it has gone toward a way of the four it is not facing, in a row: like `run`, it only turns once that is
+  // TURN_DISTANCE, so a wobble does not turn it.
+  private turning: { way: Direction; distance: number } | undefined
   // The follow-through of a synced clip that has just ended, for as long as it lasts.
   private followThrough: { key: AnimationKey; startedAt: number } | undefined
   // The clip that was showing for an action last frame, to know when the action ends.
@@ -138,6 +163,7 @@ export class CharacterAnimator {
           if (way !== this.facing && Math.abs(this.run) >= TURN_DISTANCE) this.facing = way
           else if (way === this.facing) this.run = 0
         }
+        this.stepToward(directionOf(dx, dy, this.direction), distance)
       }
     }
     this.lastPosition = { x: position.x, y: position.y }
@@ -148,6 +174,11 @@ export class CharacterAnimator {
       if (Math.abs(toward) > MOVE_EPSILON) {
         this.facing = toward > 0 ? 1 : -1
         this.run = 0
+      }
+      const towardY = input.action.aimAt.y - position.y
+      if (Math.hypot(toward, towardY) > MOVE_EPSILON) {
+        this.direction = directionOf(toward, towardY, this.direction)
+        this.turning = undefined
       }
     }
 
@@ -171,7 +202,7 @@ export class CharacterAnimator {
         this.followThrough = undefined
       } else {
         this.key = tail.key
-        return { key: tail.key, frame, facing: this.facing }
+        return { key: tail.key, frame, facing: this.facing, direction: this.direction }
       }
     }
     const clip = key === undefined ? undefined : clips[key]
@@ -186,6 +217,22 @@ export class CharacterAnimator {
     const frame = synced
       ? Math.min(lead - 1, Math.floor(Math.max(0, input.action!.progress) * lead))
       : frameAt(clip, now - this.startedAt)
-    return { key, frame, facing: this.facing }
+    return { key, frame, facing: this.facing, direction: this.direction }
+  }
+
+  // A step of this length that goes this way of the four. Steps toward a way it is not facing add up while they keep
+  // going that way, and it turns once they have come to TURN_DISTANCE; a step the way it faces starts them again.
+  private stepToward(way: Direction, distance: number): void {
+    if (way === this.direction) {
+      this.turning = undefined
+      return
+    }
+    const gone = (this.turning?.way === way ? this.turning.distance : 0) + distance
+    if (gone >= TURN_DISTANCE) {
+      this.direction = way
+      this.turning = undefined
+    } else {
+      this.turning = { way, distance: gone }
+    }
   }
 }

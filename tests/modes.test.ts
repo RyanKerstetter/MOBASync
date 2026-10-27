@@ -4,6 +4,8 @@ import {
   advanceObjective,
   Champion,
   createModeSetup,
+  DEFAULT_GAME_MODE,
+  FALLBACK_GAME_MODE,
   GAME_FLAG_RADIUS,
   GAME_HILL_CAPTURE_TICKS,
   GAME_HILL_POINT_TICKS,
@@ -16,8 +18,10 @@ import {
   initialObjective,
   isGameMode,
   modeStartProblem,
+  modeSupportProblem,
   NO_OBJECTIVES,
   Simulator,
+  startingMode,
   teamCountProblem,
   Terrain,
   type HillArea,
@@ -37,9 +41,9 @@ type Ctf = Extract<ObjectiveState, { kind: 'ctf' }>
 
 // ---------------------------------------------------------------------------- choosing a mode
 
-test('the modes a lobby can pick are team deathmatch, king of the hill and capture the flag', () => {
-  assert.deepEqual(GAME_MODES.map((mode) => mode.id), ['deathmatch', 'koth', 'ctf'])
-  assert.deepEqual(GAME_MODES.map((mode) => mode.name), ['Team Deathmatch', 'King of the Hill', 'Capture the Flag'])
+test('the modes a lobby can pick are team deathmatch, king of the hill, capture the flag and core destruction', () => {
+  assert.deepEqual(GAME_MODES.map((mode) => mode.id), ['deathmatch', 'koth', 'ctf', 'core'])
+  assert.deepEqual(GAME_MODES.map((mode) => mode.name), ['Team Deathmatch', 'King of the Hill', 'Capture the Flag', 'Core Destruction'])
   assert.equal(isGameMode('koth'), true)
   assert.equal(isGameMode('battle-royale'), false)
   assert.equal(isGameMode(undefined), false)
@@ -298,7 +302,7 @@ test('a carrier cannot take a second flag, and a state of the other mode starts 
 
 // ---------------------------------------------------------------------------- in the simulator
 
-const killer = new Champion({ ...brawler, abilities: [...brawler.abilities], attackDamage: 5000 })
+const killer = new Champion({ ...brawler, abilities: [...brawler.abilities], base: { ...brawler.base, attackDamage: 5000 } })
 const move = (id: string, seq: number, tick: number, x: number, y: number) =>
   ({ id, seq, tick, type: 'move' as const, target: { x, y } })
 
@@ -428,4 +432,17 @@ test('a carrier who is killed drops the flag, and the flag\'s own team walking o
   const home = after.findIndex((state) => flagOf(state, 2).position.x === HOME_2.x && flagOf(state, 2).position.y === HOME_2.y)
   assert.ok(home >= 0, 'it went home')
   assert.equal(flagOf(after[home], 2).carrierId, undefined)
+})
+
+test('a new lobby starts in core destruction if its map can be played in it, and in team deathmatch if not or if there is no map', () => {
+  assert.equal(DEFAULT_GAME_MODE, 'core')
+  assert.equal(FALLBACK_GAME_MODE, 'deathmatch')
+  const map = { name: 'Both', hill: true, flags: true, cores: true }
+  assert.equal(startingMode(map), 'core')
+  assert.equal(startingMode({ ...map, cores: false }), 'deathmatch', 'a map with no cores cannot be played in it')
+  assert.equal(startingMode({ name: 'Bare', hill: false, flags: false, cores: false }), 'deathmatch')
+  assert.equal(startingMode(undefined), 'deathmatch', 'and with no map there is nothing to play in it on')
+  // The fallback is a mode every map can be played in, which is the point of it.
+  assert.equal(modeSupportProblem(FALLBACK_GAME_MODE, { hill: false, flags: false, cores: false }), undefined)
+  assert.equal(teamCountProblem(FALLBACK_GAME_MODE, 1), undefined)
 })

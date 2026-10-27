@@ -10,6 +10,75 @@ input {
   max-width: 12rem;
 }
 
+/* The look is flat: square corners, solid colours, and no shadows, glows or gradients. The dark screens (champion select, the
+   game and its menus) share this palette, so a colour is changed in one place. */
+:root {
+  --ui-bg: #121c2c;
+  --ui-bg-raised: #1c2a40;
+  --ui-bg-hover: #26395a;
+  --ui-bg-row: #18263a;
+  --ui-bg-mark: #22324a;
+  --ui-track: #0b1220;
+  --ui-line: #3a4d68;
+  --ui-line-soft: #24344c;
+  --ui-text: #e8f4ff;
+  --ui-muted: #8ea4bd;
+  --ui-accent: #79dfb1;
+  --ui-danger: #e5535b;
+}
+
+/* The browser's own controls are square and flat too. */
+button,
+input,
+select,
+textarea {
+  border-radius: 0;
+}
+
+/* These are for the light pages (the lobby). The dark screens style their own buttons, below and further on. */
+button {
+  color: #202820;
+  background: #e9ede9;
+  border: 1px solid #7c887c;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: #dbe1db;
+}
+
+button:disabled {
+  color: #8a948a;
+  cursor: default;
+}
+
+input,
+select,
+textarea {
+  color: inherit;
+  background: #fff;
+  border: 1px solid #7c887c;
+}
+
+/* A focus ring is a square outline of the page's own, since the browser's is rounded (a field it keeps after a choice, such as the
+   map, would show it). A button shows one only to the keyboard, a field whenever it has focus. */
+button:focus-visible {
+  outline: 2px solid #202820;
+  outline-offset: 2px;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: 2px solid #202820;
+  outline-offset: 0;
+}
+
+#select-panel :focus-visible,
+#game-panel :focus-visible {
+  outline-color: var(--ui-accent);
+}
+
 #player-list {
   margin: 0;
   padding: 0;
@@ -43,13 +112,12 @@ input {
   color: #a66b00;
 }
 
-/* A player's team: a dot in its colour, and its name beside the player's. */
+/* A player's team: a square in its colour, and its name beside the player's. */
 .team-swatch {
   flex: 0 0 0.8rem;
   width: 0.8rem;
   height: 0.8rem;
-  border: 1px solid rgb(0 0 0 / 35%);
-  border-radius: 50%;
+  border: 1px solid #55605a;
 }
 
 .team-name {
@@ -57,24 +125,24 @@ input {
   font-size: 0.75rem;
 }
 
-/* One round button in each team's colour; the player's own is ringed. */
+/* One square button in each team's colour; the player's own is outlined. */
 .team-picker {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 0.6rem;
 }
 
 .team-picker button {
   width: 1.8rem;
   height: 1.8rem;
   padding: 0;
-  border: 2px solid rgb(0 0 0 / 35%);
-  border-radius: 50%;
+  border: 2px solid #55605a;
   cursor: pointer;
 }
 
 .team-picker button[aria-pressed='true'] {
-  box-shadow: 0 0 0 2px #fff, 0 0 0 4px #202820;
+  outline: 2px solid #202820;
+  outline-offset: 2px;
 }
 
 .team-picker button:disabled {
@@ -143,6 +211,19 @@ body:has(#lobby-panel:not([hidden])) > main > h1 {
   letter-spacing: 0.1em;
 }
 
+/* Beside the Copy button. A failed copy turns the button red and puts the reason, in bold, next to it. */
+#copy-button.is-error {
+  color: #fff;
+  background: #c0392b;
+  border: 1px solid #8e2a20;
+  font-weight: 700;
+}
+
+.copy-status.is-error {
+  color: #a02828;
+  font-weight: 700;
+}
+
 .lobby-grid {
   display: grid;
   flex: 1;
@@ -163,7 +244,6 @@ body:has(#lobby-panel:not([hidden])) > main > h1 {
   overflow-y: auto;
   background: #f8faf8;
   border: 1px solid #cfd6cf;
-  border-radius: 0.5rem;
 }
 
 .lobby-card h2,
@@ -247,7 +327,6 @@ body:has(#lobby-panel:not([hidden])) > main > h1 {
   list-style: none;
   background: #fff;
   border: 1px solid #d5dad5;
-  border-radius: 0.35rem;
 }
 
 #chat-messages li {
@@ -379,9 +458,8 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   height: 100%;
   padding: 0.75rem;
   color: inherit;
-  background: #18263a;
+  background: var(--ui-bg-row);
   border: 2px solid #314862;
-  border-radius: 0.5rem;
   font: inherit;
   text-align: left;
   cursor: pointer;
@@ -398,6 +476,50 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   opacity: 1;
 }
 
+/* Under the pointer a card is a shade lighter, and still dark enough for its text; the picked one stays as it is. */
+.champion-card:hover:not(:disabled) {
+  background: var(--ui-bg-hover);
+  border-color: #4b6485;
+}
+
+.champion-card.is-selected:hover:not(:disabled) {
+  background: #1d3a3a;
+  border-color: var(--ui-accent);
+}
+
+/* The other buttons on the dark screens (back, lock in, return to the lobby): light text on a dark button, and the main one in
+   the accent colour with dark text, as the results screen's is. */
+#select-panel button:not(.champion-card),
+#game-loading button {
+  padding: 0.45rem 1rem;
+  color: var(--ui-text);
+  background: var(--ui-bg-raised);
+  border: 1px solid var(--ui-line);
+}
+
+#select-panel button:not(.champion-card):hover:not(:disabled),
+#game-loading button:hover:not(:disabled) {
+  background: var(--ui-bg-hover);
+}
+
+#select-panel button:not(.champion-card):disabled,
+#game-loading button:disabled {
+  color: var(--ui-muted);
+  background: var(--ui-bg-row);
+  cursor: default;
+}
+
+#select-panel #lock-button:not(:disabled) {
+  color: var(--ui-track);
+  font-weight: 700;
+  background: var(--ui-accent);
+  border-color: var(--ui-accent);
+}
+
+#select-panel #lock-button:hover:not(:disabled) {
+  background: #96ebc6;
+}
+
 .champion-card span {
   font-size: 0.8rem;
   line-height: 1.3;
@@ -409,9 +531,8 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 
 .champion-details {
   padding: 0.75rem 1rem;
-  background: #18263a;
+  background: var(--ui-bg-row);
   border: 1px solid #314862;
-  border-radius: 0.5rem;
 }
 
 .champion-details h3,
@@ -521,14 +642,15 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 #game-toast {
   position: absolute;
   z-index: 3;
-  bottom: 9rem;
+  /* Above the HUD, which stands on the bottom edge and is about eleven rems tall. */
+  bottom: 11.5rem;
   left: 50%;
   margin: 0;
   padding: 0.4rem 0.8rem;
   transform: translateX(-50%);
-  color: #d9e6f2;
-  background: rgb(8 14 24 / 82%);
-  border-radius: 0.35rem;
+  color: var(--ui-text);
+  background: var(--ui-bg);
+  border: 1px solid var(--ui-line);
   font-size: 0.9rem;
   pointer-events: none;
 }
@@ -546,31 +668,28 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   left: 0.5rem;
   margin: 0;
   padding: 0.5rem 0.65rem;
-  color: #d9e6f2;
-  background: rgb(8 14 24 / 82%);
-  border: 1px solid rgb(190 215 240 / 24%);
-  border-radius: 0.35rem;
+  color: var(--ui-text);
+  background: var(--ui-bg);
+  border: 1px solid var(--ui-line);
   font: 0.72rem/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
   white-space: pre-wrap;
   pointer-events: none;
 }
 
-/* The bottom of the screen: exact health, and a slot for each ability that is grey when cast and fills up with colour as it cools down. */
+/* The bottom of the screen: three panels in a row, each standing on the bottom edge with nothing under it. On the left the level, the
+   experience bar and the stats; in the middle the abilities over the health; on the right the items and the shops. */
 .game-hud {
   position: absolute;
   z-index: 2;
-  bottom: 0.75rem;
+  bottom: 0;
   left: 50%;
   box-sizing: border-box;
-  display: grid;
-  gap: 0.55rem;
-  width: min(30rem, calc(100% - 1.5rem));
-  padding: 0.6rem 0.7rem 0.7rem;
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+  max-width: 100%;
   transform: translateX(-50%);
-  color: #e8f4ff;
-  background: rgb(8 14 24 / 82%);
-  border: 1px solid rgb(190 215 240 / 24%);
-  border-radius: 0.5rem;
+  color: var(--ui-text);
   font: 0.8rem/1.2 system-ui, sans-serif;
   pointer-events: none;
 }
@@ -579,13 +698,253 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   opacity: 0.55;
 }
 
+.hud-panel {
+  box-sizing: border-box;
+  background: var(--ui-bg);
+  border: 1px solid var(--ui-line);
+  border-bottom: 0;
+}
+
+.hud-main {
+  display: grid;
+  gap: 0.55rem;
+  width: 24rem;
+  padding: 0.6rem 0.7rem 0.7rem;
+}
+
+/* The two side panels are the same height as each other, and taller than the middle one: tall enough for the eight stats. */
+.hud-side {
+  height: 10.8rem;
+}
+
+/* Left out in a mode with no economy (the panels are `hidden`), whatever else says how they are shown. */
+.hud-side[hidden] {
+  display: none;
+}
+
+.hud-stats-panel {
+  display: flex;
+  gap: 0.6rem;
+  width: 14rem;
+  padding: 0.6rem 0.7rem 0.7rem 0.5rem;
+}
+
+/* The experience: a bar that fills upward from the level at its foot. The column is as wide as the level's circle, and is pulled out
+   over the panel's left padding, so the circle stands a little way past the panel's edge. The bar is in the middle of the column and
+   runs down to the middle of the circle, which is over the end of it. No numbers, only how full it is. */
+.hud-xp-column {
+  position: relative;
+  flex: none;
+  width: 2.6rem;
+  margin-left: -1rem;
+}
+
+.hud-xp {
+  position: absolute;
+  top: 0;
+  bottom: 1.3rem;
+  left: 50%;
+  width: 0.9rem;
+  margin-left: -0.45rem;
+  overflow: hidden;
+  background: var(--ui-track);
+  border: 1px solid var(--ui-line);
+}
+
+.hud-xp-fill {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 0;
+  background: #7650d1;
+}
+
+/* The one round thing in the UI. */
+.hud-level {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  background: var(--ui-bg-mark);
+  border: 2px solid #8a63e6;
+  border-radius: 50%;
+  font-size: 1.1rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-stats {
+  display: grid;
+  flex: 1;
+  align-content: center;
+  gap: 0.25rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.hud-stat {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.76rem;
+}
+
+.hud-stat-label,
+.hud-stat-value {
+  margin: 0;
+}
+
+.hud-stat-label {
+  color: var(--ui-muted);
+}
+
+.hud-stat-value {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The items, three across and two down, and under them the buttons of the two shops with what there is to spend in each. */
+.hud-shop-panel {
+  --hud-item-size: 3.1rem;
+  --hud-item-gap: 0.3rem;
+  display: grid;
+  align-content: start;
+  gap: 0.45rem;
+  /* As wide as the columns of the grid, the gaps between them, and the padding: the number of columns is set on the panel by the HUD. */
+  width: calc(var(--hud-columns, 4) * var(--hud-item-size) + (var(--hud-columns, 4) - 1) * var(--hud-item-gap) + 1.2rem);
+  padding: 0.6rem 0.6rem 0.7rem;
+}
+
+.hud-items {
+  display: grid;
+  grid-template-columns: repeat(var(--hud-columns, 4), var(--hud-item-size));
+  gap: var(--hud-item-gap);
+}
+
+/* The panel takes clicks (the HUD round it does not): the slots open the shop, and the gold does too. */
+.hud-shop-panel {
+  pointer-events: auto;
+}
+
+/* Room for a slot that is not there yet: an empty outline, which does nothing. */
+.hud-item.is-spare {
+  background: transparent;
+  border: 2px dashed var(--ui-line-soft);
+  cursor: default;
+}
+
+/* A slot for a kind of item: its picture when there is an item in it, and else the name of the kind, dim. */
+.hud-item {
+  position: relative;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  width: var(--hud-item-size);
+  height: var(--hud-item-size);
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  color: var(--ui-muted);
+  background: var(--ui-track);
+  border: 2px solid var(--ui-line);
+  font: inherit;
+  cursor: pointer;
+}
+
+button.hud-item:hover {
+  background: var(--ui-bg-hover);
+  border-color: var(--ui-accent);
+}
+
+.hud-item.is-filled {
+  border-color: var(--ui-muted);
+}
+
+.hud-item-icon,
+.hud-item-icon > .ability-icon {
+  position: absolute;
+  inset: 0;
+}
+
+/* The name of the kind, which has to fit the cell whatever it is: "Accessory" is the longest (it is in capitals too wide, so it is not), and anything
+   longer is cut short, not let out. */
+.hud-item-empty {
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 0 0.1rem;
+  overflow: hidden;
+  font-size: 0.56rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-shop-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+}
+
+.hud-shop-button {
+  box-sizing: border-box;
+  display: grid;
+  gap: 0.15rem;
+  justify-items: start;
+  min-width: 0;
+  padding: 0.3rem 0.4rem;
+  color: var(--ui-text);
+  background: var(--ui-bg-raised);
+  border: 1px solid var(--ui-line);
+  font: inherit;
+  text-align: left;
+}
+
+.hud-shop-button {
+  cursor: pointer;
+}
+
+.hud-shop-button:hover:not(:disabled) {
+  background: var(--ui-bg-hover);
+}
+
+.hud-shop-label {
+  color: var(--ui-muted);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.hud-shop-have {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The little pictures of the gold and the shard are 16 px art, drawn with hard edges. */
+.hud-currency-icon {
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  image-rendering: pixelated;
+}
+
+.hud-currency-icon[hidden] {
+  display: none;
+}
+
 .hud-health {
   position: relative;
   height: 1.6rem;
   overflow: hidden;
-  background: #0b1220;
-  border: 1px solid rgb(0 0 0 / 55%);
-  border-radius: 0.3rem;
+  background: var(--ui-track);
+  border: 1px solid var(--ui-line);
 }
 
 .hud-health-fill,
@@ -597,11 +956,11 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 
 .hud-health-fill {
   left: 0;
-  background: linear-gradient(#7be3a4, #43b777);
+  background: #2f9a65;
 }
 
 .hud-health-shield {
-  background: linear-gradient(#a9c8ea, #7ea4cf);
+  background: #6c93c2;
 }
 
 .hud-health-text {
@@ -612,7 +971,6 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   font-size: 0.9rem;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  text-shadow: 0 1px 2px #000, 0 0 3px #000;
   white-space: pre;
 }
 
@@ -629,9 +987,8 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   width: 4.2rem;
   height: 4.2rem;
   overflow: hidden;
-  background: #0b1220;
-  border: 2px solid rgb(190 215 240 / 28%);
-  border-radius: 0.4rem;
+  background: var(--ui-track);
+  border: 2px solid var(--ui-line);
 }
 
 .hud-slot[hidden] {
@@ -639,14 +996,17 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 }
 
 .hud-slot.is-ready {
-  border-color: #79dfb1;
+  border-color: var(--ui-accent);
 }
 
+/* The key, the cooldown and the name are plain text on the picture, with nothing behind them, so the art shows through. A hard
+   one-pixel edge in the slot's colour (not a blur, not a shadow) is what makes them read over it. */
 .hud-slot-key,
 .hud-slot-name,
 .hud-slot-time {
   position: absolute;
-  text-shadow: 0 1px 2px #000, 0 0 3px #000;
+  -webkit-text-stroke: 2px var(--ui-track);
+  paint-order: stroke fill;
 }
 
 .hud-slot-key {
@@ -699,8 +1059,7 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   color: #8493a8;
   font-size: 0.65rem;
   font-weight: 700;
-  border: 1px dashed rgb(190 215 240 / 30%);
-  border-radius: 0.25rem;
+  border: 1px dashed var(--ui-line);
 }
 
 /* In a slot the icon is drawn twice, under the key, the name and the time: grey and dimmed, and over
@@ -784,10 +1143,9 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   gap: 0.9rem;
   width: min(24rem, calc(100% - 2rem));
   padding: 1.1rem 1.2rem 1rem;
-  color: #e8f4ff;
-  background: #121c2c;
-  border: 1px solid rgb(190 215 240 / 28%);
-  border-radius: 0.6rem;
+  color: var(--ui-text);
+  background: var(--ui-bg);
+  border: 1px solid var(--ui-line);
 }
 
 .game-menu-panel h3 {
@@ -809,26 +1167,25 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 
 .game-menu-panel button {
   padding: 0.45rem 0.8rem;
-  color: #e8f4ff;
-  background: #1c2a40;
-  border: 1px solid rgb(190 215 240 / 28%);
-  border-radius: 0.35rem;
+  color: var(--ui-text);
+  background: var(--ui-bg-raised);
+  border: 1px solid var(--ui-line);
   font: inherit;
   cursor: pointer;
 }
 
 .game-menu-panel button:hover {
-  background: #26395a;
+  background: var(--ui-bg-hover);
 }
 
 .game-menu-panel button.is-selected {
-  color: #0b1220;
-  background: #79dfb1;
-  border-color: #79dfb1;
+  color: var(--ui-track);
+  background: var(--ui-accent);
+  border-color: var(--ui-accent);
 }
 
 .game-menu-panel button.is-danger {
-  border-color: #e5535b;
+  border-color: var(--ui-danger);
   color: #ffb3b7;
 }
 
@@ -870,9 +1227,8 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   gap: 0.15rem;
   min-width: 10rem;
   padding: 0.4rem 0.55rem;
-  background: rgb(8 14 24 / 82%);
-  border: 1px solid rgb(190 215 240 / 24%);
-  border-radius: 0.4rem;
+  background: var(--ui-bg);
+  border: 1px solid var(--ui-line);
 }
 
 .leaderboard li {
@@ -880,11 +1236,10 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   justify-content: space-between;
   gap: 0.75rem;
   padding: 0.1rem 0.25rem;
-  border-radius: 0.2rem;
 }
 
 .leaderboard li.is-local {
-  background: rgb(190 215 240 / 14%);
+  background: var(--ui-bg-mark);
 }
 
 .scoreboard-name {
@@ -909,13 +1264,13 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   align-items: baseline;
   gap: 0.4rem;
   padding: 0.2rem 0.5rem;
-  background: rgb(8 14 24 / 72%);
-  border-radius: 0.3rem;
+  background: var(--ui-bg);
+  border: 1px solid var(--ui-line);
   animation: kill-feed-in 160ms ease-out;
 }
 
 .kill-feed-verb {
-  color: rgb(232 244 255 / 65%);
+  color: var(--ui-muted);
 }
 
 @keyframes kill-feed-in {
@@ -943,7 +1298,7 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   line-height: 1.3;
 }
 
-/* The top middle of the game: the mode, each team's score, the hill's bar, and the flags. */
+/* The top middle of the game: the mode, each team's score, the hill's bar, the flags, and the cores. */
 .game-mode-hud {
   position: absolute;
   z-index: 2;
@@ -957,16 +1312,15 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   max-width: min(30rem, calc(100% - 2rem));
   padding: 0.45rem 0.7rem 0.5rem;
   transform: translateX(-50%);
-  color: #e8f4ff;
-  background: rgb(8 14 24 / 82%);
-  border: 1px solid rgb(190 215 240 / 24%);
-  border-radius: 0.5rem;
+  color: var(--ui-text);
+  background: var(--ui-bg);
+  border: 1px solid var(--ui-line);
   font: 0.8rem/1.2 system-ui, sans-serif;
   pointer-events: none;
 }
 
 .mode-title {
-  color: rgb(232 244 255 / 65%);
+  color: var(--ui-muted);
   font-size: 0.68rem;
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -990,9 +1344,8 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   align-items: center;
   gap: 0.4rem;
   padding: 0.2rem 0.55rem;
-  background: rgb(190 215 240 / 8%);
+  background: var(--ui-bg-row);
   border: 2px solid transparent;
-  border-radius: 0.35rem;
 }
 
 .mode-scores li {
@@ -1000,7 +1353,7 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 }
 
 .mode-scores li.is-local {
-  background: rgb(190 215 240 / 18%);
+  background: var(--ui-bg-mark);
 }
 
 .mode-swatch {
@@ -1008,8 +1361,7 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   width: 0.7rem;
   height: 0.7rem;
   background: var(--team-color);
-  border: 1px solid rgb(0 0 0 / 45%);
-  border-radius: 50%;
+  border: 1px solid var(--ui-track);
 }
 
 .mode-score {
@@ -1028,6 +1380,8 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 
 .mode-hill[hidden],
 .mode-flags[hidden],
+.mode-scores[hidden],
+.mode-cores[hidden],
 .mode-hint[hidden] {
   display: none;
 }
@@ -1035,9 +1389,8 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 .mode-hill-bar {
   height: 0.9rem;
   overflow: hidden;
-  background: #0b1220;
-  border: 1px solid rgb(0 0 0 / 55%);
-  border-radius: 0.3rem;
+  background: var(--ui-track);
+  border: 1px solid var(--ui-line);
 }
 
 .mode-hill-fill {
@@ -1046,7 +1399,7 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 }
 
 .mode-hill.is-held .mode-hill-bar {
-  box-shadow: 0 0 0 2px rgb(255 255 255 / 70%);
+  outline: 2px solid var(--ui-text);
 }
 
 .mode-hill.is-contested .mode-hill-bar {
@@ -1058,25 +1411,25 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   font-weight: 600;
 }
 
-/* A flag at its base is calm; one that is carried or on the ground is lit in its team's colour. */
+/* A flag at its base is calm; one that is carried or on the ground has its team's colour round it, and the one on the ground
+   a thicker one, since it is up for grabs. */
 .mode-flags li {
-  border-color: rgb(190 215 240 / 12%);
+  border-color: var(--ui-line-soft);
 }
 
 .mode-flags li.is-carried,
 .mode-flags li.is-dropped {
   border-color: var(--team-color);
-  background: rgb(190 215 240 / 16%);
+  background: var(--ui-bg-mark);
 }
 
 .mode-flags li.is-dropped {
-  animation: mode-flag-pulse 0.7s ease-in-out infinite alternate;
+  outline: 2px solid var(--team-color);
 }
 
 .mode-flag-icon {
   color: var(--team-color);
   font-size: 1.1rem;
-  text-shadow: 0 0 2px #000;
 }
 
 .mode-flag-name {
@@ -1084,12 +1437,72 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 }
 
 .mode-flag-state {
-  color: rgb(232 244 255 / 78%);
+  color: var(--ui-text);
 }
 
 .mode-flags li.is-carried .mode-flag-state {
-  color: var(--carrier-color, #e8f4ff);
+  color: var(--carrier-color, var(--ui-text));
   font-weight: 700;
+}
+
+/* Core Destruction: a row for each team's core, with its health in the team's colour, and how it stands in words. A core that is
+   protected is dim (nothing can hurt it yet), and one that is down is struck out. */
+.mode-cores {
+  display: grid;
+  gap: 0.3rem;
+  width: min(24rem, 100%);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mode-cores li {
+  display: grid;
+  grid-template-columns: 6.5rem 1fr 9.5rem;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.2rem 0.55rem;
+  background: var(--ui-bg-row);
+  border-bottom: 2px solid var(--team-color);
+}
+
+.mode-core-name {
+  font-weight: 600;
+}
+
+.mode-core-bar {
+  height: 0.7rem;
+  overflow: hidden;
+  background: var(--ui-track);
+  border: 1px solid var(--ui-line);
+}
+
+.mode-core-fill {
+  display: block;
+  height: 100%;
+  background: var(--team-color);
+}
+
+.mode-core-state {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.mode-cores li.is-protected .mode-core-fill {
+  opacity: 0.45;
+}
+
+.mode-cores li.is-protected .mode-core-state {
+  color: var(--ui-muted);
+}
+
+.mode-cores li.is-broken .mode-core-name,
+.mode-cores li.is-eliminated .mode-core-name {
+  text-decoration: line-through;
+}
+
+.mode-cores li.is-eliminated {
+  opacity: 0.6;
 }
 
 .mode-hint {
@@ -1097,15 +1510,6 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   color: #f2e8a0;
   font-weight: 600;
   text-align: center;
-}
-
-@keyframes mode-flag-pulse {
-  from {
-    box-shadow: 0 0 0 0 transparent;
-  }
-  to {
-    box-shadow: 0 0 10px 1px var(--team-color);
-  }
 }
 
 @keyframes mode-contested {
@@ -1167,7 +1571,6 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   padding: 0.05rem 0.4rem;
   color: #fff;
   background: #3a7d5a;
-  border-radius: 0.6rem;
   font-size: 0.7rem;
 }
 
@@ -1194,20 +1597,19 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   max-height: calc(100% - 2rem);
   padding: 1.2rem 1.4rem 1.3rem;
   overflow-y: auto;
-  color: #e8f4ff;
-  background: #121c2c;
-  border: 2px solid rgb(190 215 240 / 28%);
-  border-radius: 0.7rem;
+  color: var(--ui-text);
+  background: var(--ui-bg);
+  border: 2px solid var(--ui-line);
   font: 0.9rem/1.3 system-ui, sans-serif;
   text-align: center;
 }
 
 .results-panel[data-tone='win'] {
-  border-color: #79dfb1;
+  border-color: var(--ui-accent);
 }
 
 .results-panel[data-tone='loss'] {
-  border-color: #e5535b;
+  border-color: var(--ui-danger);
 }
 
 .results-title {
@@ -1227,7 +1629,7 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 
 .results-subtitle {
   margin: 0;
-  color: rgb(232 244 255 / 75%);
+  color: var(--ui-muted);
 }
 
 .results-teams {
@@ -1245,20 +1647,19 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   align-items: center;
   gap: 0.45rem;
   padding: 0.3rem 0.7rem;
-  background: rgb(190 215 240 / 8%);
+  background: var(--ui-bg-row);
   border: 2px solid transparent;
   border-bottom-color: var(--team-color);
-  border-radius: 0.4rem;
 }
 
 .results-teams li.is-winner {
-  background: rgb(190 215 240 / 18%);
+  background: var(--ui-bg-mark);
   border-color: var(--team-color);
 }
 
 .results-teams li.is-local .results-team::after {
   content: ' (you)';
-  color: rgb(232 244 255 / 60%);
+  color: var(--ui-muted);
   font-weight: 400;
 }
 
@@ -1267,8 +1668,7 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   width: 0.75rem;
   height: 0.75rem;
   background: var(--team-color);
-  border: 1px solid rgb(0 0 0 / 45%);
-  border-radius: 50%;
+  border: 1px solid var(--ui-track);
 }
 
 .results-team {
@@ -1289,7 +1689,7 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 
 .results-players th {
   padding: 0.2rem 0.4rem;
-  color: rgb(232 244 255 / 60%);
+  color: var(--ui-muted);
   font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0.06em;
@@ -1305,7 +1705,7 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 .results-players td {
   padding: 0.2rem 0.4rem;
   font-weight: 600;
-  border-top: 1px solid rgb(190 215 240 / 10%);
+  border-top: 1px solid var(--ui-line-soft);
 }
 
 .results-players tr.has-left td {
@@ -1315,15 +1715,323 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
 .results-return {
   justify-self: center;
   padding: 0.5rem 1.2rem;
-  color: #0b1220;
-  background: #79dfb1;
+  color: var(--ui-track);
+  background: var(--ui-accent);
   border: 0;
-  border-radius: 0.4rem;
   font: inherit;
   font-weight: 700;
   cursor: pointer;
 }
 
-.results-return:hover {
+.results-return:hover:not(:disabled) {
   background: #96ebc6;
+}
+
+/* The shop: a panel over the game, above the HUD, with a tab for each kind of item and a grid of the items there. The game goes on behind it. */
+.shop {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: 12rem;
+  box-sizing: border-box;
+  display: grid;
+  gap: 0.5rem;
+  width: min(41rem, calc(100% - 2rem));
+  max-height: calc(100% - 14rem);
+  padding: 0.7rem 0.8rem 0.8rem;
+  transform: translateX(-50%);
+  color: var(--ui-text);
+  background: var(--ui-bg);
+  border: 1px solid var(--ui-line);
+  font: 0.8rem/1.2 system-ui, sans-serif;
+}
+
+.shop[hidden] {
+  display: none;
+}
+
+.shop-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.shop-title {
+  flex: 1;
+  margin: 0;
+  font-size: 0.95rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.shop-gold {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 1rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.shop-gold-icon {
+  width: 1.4rem;
+  height: 1.4rem;
+  image-rendering: pixelated;
+}
+
+.shop-gold-icon[hidden] {
+  display: none;
+}
+
+.shop-close {
+  width: 1.7rem;
+  height: 1.7rem;
+  padding: 0;
+  color: var(--ui-text);
+  background: var(--ui-bg-raised);
+  border: 1px solid var(--ui-line);
+  font: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.shop-close:hover,
+.shop-tab:hover {
+  background: var(--ui-bg-hover);
+}
+
+.shop-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.shop-tab {
+  padding: 0.3rem 0.65rem;
+  color: var(--ui-text);
+  background: var(--ui-bg-raised);
+  border: 1px solid var(--ui-line);
+  font: inherit;
+  cursor: pointer;
+}
+
+.shop-tab[aria-pressed='true'] {
+  color: var(--ui-track);
+  background: var(--ui-accent);
+  border-color: var(--ui-accent);
+  font-weight: 700;
+}
+
+/* Said while away from the shop: it can be looked at from anywhere, but items are bought and sold in it. */
+.shop-away {
+  margin: 0;
+  padding: 0.3rem 0.5rem;
+  color: #f2e8a0;
+  background: var(--ui-bg-row);
+  border-left: 3px solid #f2e8a0;
+}
+
+.shop-away[hidden] {
+  display: none;
+}
+
+.shop-notice {
+  min-height: 1.1rem;
+  margin: 0;
+  color: var(--ui-muted);
+  font-weight: 600;
+}
+
+.shop-notice[data-tone='good'] {
+  color: var(--ui-accent);
+}
+
+.shop-notice[data-tone='bad'] {
+  color: var(--ui-danger);
+}
+
+.shop-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 5rem);
+  align-content: start;
+  gap: 0.45rem;
+  max-height: 17rem;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.shop-cell {
+  display: block;
+}
+
+.shop-item {
+  position: relative;
+  box-sizing: border-box;
+  display: grid;
+  justify-items: center;
+  gap: 0.2rem;
+  width: 5rem;
+  padding: 0.45rem 0.2rem 0.35rem;
+  color: var(--ui-text);
+  background: var(--ui-track);
+  border: 2px solid var(--ui-line);
+  font: inherit;
+  cursor: pointer;
+}
+
+.shop-item:hover {
+  background: var(--ui-bg-hover);
+  border-color: var(--ui-accent);
+}
+
+.shop-item-icon {
+  display: block;
+  width: 3rem;
+  height: 3rem;
+}
+
+.shop-item-icon > .ability-icon {
+  width: 100%;
+  height: 100%;
+}
+
+.shop-item-cost {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.shop-item-gold {
+  width: 1rem;
+  height: 1rem;
+  image-rendering: pixelated;
+}
+
+.shop-item-gold[hidden] {
+  display: none;
+}
+
+/* What cannot be bought now is grey, and can still be pointed at to read why. */
+.shop-item.is-grey .shop-item-icon,
+.shop-item.is-grey .shop-item-cost {
+  filter: grayscale(1);
+  opacity: 0.45;
+}
+
+.shop-item.is-grey {
+  border-color: var(--ui-line-soft);
+}
+
+.shop-item.is-owned {
+  border-color: var(--ui-accent);
+}
+
+.shop-item-tag {
+  position: absolute;
+  top: 0.15rem;
+  right: 0.25rem;
+  color: var(--ui-accent);
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.shop-item-tag[hidden] {
+  display: none;
+}
+
+/* The box that says what an item is, beside the pointer. It takes no clicks. */
+.item-tooltip {
+  position: absolute;
+  z-index: 6;
+  box-sizing: border-box;
+  display: grid;
+  gap: 0.35rem;
+  width: 15rem;
+  padding: 0.55rem 0.65rem;
+  color: var(--ui-text);
+  background: var(--ui-bg-raised);
+  border: 1px solid var(--ui-line);
+  font: 0.78rem/1.3 system-ui, sans-serif;
+  pointer-events: none;
+}
+
+.item-tooltip[hidden],
+.item-tooltip [hidden] {
+  display: none;
+}
+
+.item-tooltip-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.item-tooltip-name {
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.item-tooltip-slot {
+  color: var(--ui-muted);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.item-tooltip-cost {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.item-tooltip-gold {
+  width: 1rem;
+  height: 1rem;
+  image-rendering: pixelated;
+}
+
+.item-tooltip-stats {
+  display: grid;
+  gap: 0.1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.item-tooltip-stat {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.item-tooltip-stat-value {
+  min-width: 3.2ch;
+  color: var(--ui-accent);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.item-tooltip-note {
+  margin: 0;
+}
+
+.item-tooltip-note[data-tone='good'] {
+  color: var(--ui-accent);
+}
+
+.item-tooltip-note[data-tone='bad'] {
+  color: var(--ui-danger);
+}
+
+.item-tooltip-note[data-tone='muted'] {
+  color: var(--ui-muted);
 }
