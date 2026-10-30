@@ -32,7 +32,7 @@ const grunt = defineMonster({
   moveSpeed: 200,
   radius: 20,
   attackRange: 60,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: ['t-shockwave'],
   ai: { aggroRange: 300, deaggroRange: 450, respawnTicks: 300, abilities: [{ abilityId: 't-shockwave', withinRange: 100 }] },
 })
@@ -44,7 +44,7 @@ const slug = defineMonster({
   moveSpeed: 100,
   radius: 20,
   attackRange: 60,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
   ai: { aggroRange: 100, deaggroRange: 400 },
 })
@@ -56,7 +56,7 @@ const mule = defineMonster({
   moveSpeed: 200,
   radius: 20,
   attackRange: 60,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
   ai: { aggroRange: 400, deaggroRange: 400 },
 })
@@ -67,7 +67,7 @@ const slayer = defineChampion({
   moveSpeed: 220,
   radius: 18,
   attackRange: 150,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [...brawler.abilities],
 })
 // Slower than any monster, and hard to kill.
@@ -78,7 +78,7 @@ const slowpoke = defineChampion({
   moveSpeed: 100,
   radius: 18,
   attackRange: 150,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [...brawler.abilities],
 })
 const fragile = defineChampion({
@@ -88,7 +88,7 @@ const fragile = defineChampion({
   moveSpeed: 150,
   radius: 18,
   attackRange: 150,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [...brawler.abilities],
 })
 
@@ -136,7 +136,7 @@ test('a monster is a character on its own team with a mind of its own, and a pla
 test('a monster\'s body is found by its id, and the shipped monsters are well-formed', () => {
   assert.equal(getCharacterChampion('t-grunt'), grunt.champion)
   assert.equal(getCharacterChampion('cursebearer').id, 'cursebearer', 'and a champion by its')
-  assert.throws(() => getCharacterChampion('nobody'), /Unknown champion, monster, turret or core "nobody"/)
+  assert.throws(() => getCharacterChampion('nobody'), /Unknown champion, monster or turret "nobody"/)
   assert.throws(() => getMonster('nobody'), /Unknown monster "nobody"/)
   for (const monster of monsters.values()) assert.equal(getMonster(monster.id), monster)
   assert.ok(getMonster('wolf').ai.aggroRange > 0, 'a placeholder wolf to build on, which notices someone near')
@@ -170,7 +170,7 @@ test('an attack every so many seconds comes round again on that very tick, howev
       moveSpeed: 100,
       radius: 20,
       attackRange: 60,
-      attackWindupTicks: 0,
+      attackWindup: 0,
       abilities: [],
     })
     assert.equal(body.attackCooldownTicks, ticks, `every ${ticks} ticks`)
@@ -181,18 +181,20 @@ for (const id of ['slime', 'golem']) {
   test(`a ${id} lets a player be until it is hurt, and then goes after them and hits them for its damage, once a cooldown`, () => {
     const monster = getMonster(id)
     const { attackDamage, attackCooldownTicks, attackRange } = monster.champion
+    // It is not in the game until its spawn offset is up, so everything here, what is done to it and what it does, is counted from then.
+    const spawned = monster.ai.spawnOffsetTicks
     // A player right beside it, who does nothing, is not noticed however long they stand there.
     const beside = withPlayer(camp(monster), home(attackRange - 10), slowpoke)
-    play(beside, 300)
-    assert.deepEqual(at(beside, 300, MONSTER)?.getAi(), { mode: 'idle' })
-    assert.deepEqual(at(beside, 300, MONSTER)?.getPosition(), home())
-    assert.equal(at(beside, 300, PLAYER)?.getHealth(), slowpoke.maxHp)
+    play(beside, spawned + 300)
+    assert.deepEqual(at(beside, spawned + 300, MONSTER)?.getAi(), { mode: 'idle' })
+    assert.deepEqual(at(beside, spawned + 300, MONSTER)?.getPosition(), home())
+    assert.equal(at(beside, spawned + 300, PLAYER)?.getHealth(), slowpoke.maxHp)
 
     // One who hits it from 140 away, which is within the player's reach and beyond its own, is gone after.
     const hit = withPlayer(camp(monster), home(140), slowpoke)
-    hit.addOrder(PLAYER, { id: 'hit', seq: 1, tick: 1, type: 'attack', targetId: MONSTER })
+    hit.addOrder(PLAYER, { id: 'hit', seq: 1, tick: spawned + 1, type: 'attack', targetId: MONSTER })
     // Long enough to walk up to them, wind up, and hit them four times.
-    const last = Math.ceil(140 / monster.champion.moveSpeed * GAME_TPS) + monster.champion.attackWindupTicks + 4 * attackCooldownTicks + 30
+    const last = spawned + Math.ceil(140 / monster.champion.moveSpeed * GAME_TPS) + monster.champion.attackWindupTicks + 4 * attackCooldownTicks + 30
     const hits: number[] = []
     let health = slowpoke.maxHp
     play(hit, last, (tick) => {
@@ -303,10 +305,12 @@ test('a shipped monster that is hit and left behind goes home through a full dea
     const simulator = camp(monster)
     withPlayer(simulator, home(230), archer)
     // It is hit from 230, and the archer, faster than it, runs away.
-    simulator.addOrder(PLAYER, { id: 'hit', seq: 1, tick: 1, type: 'attack', targetId: MONSTER })
-    simulator.addOrder(PLAYER, { id: 'run', seq: 2, tick: 60, type: 'move', target: { x: 2300, y: HOME.y } })
+    // (It is not in the game until its spawn offset is up, so it is hit from then.)
+    const spawned = monster.ai.spawnOffsetTicks
+    simulator.addOrder(PLAYER, { id: 'hit', seq: 1, tick: spawned + 1, type: 'attack', targetId: MONSTER })
+    simulator.addOrder(PLAYER, { id: 'run', seq: 2, tick: spawned + 60, type: 'move', target: { x: 2300, y: HOME.y } })
     let gaveUp = false
-    play(simulator, 1500, (tick) => {
+    play(simulator, spawned + 1500, (tick) => {
       const ai = at(simulator, tick, MONSTER)?.getAi()
       if (!gaveUp && ai?.mode === 'return') {
         gaveUp = true
@@ -314,8 +318,8 @@ test('a shipped monster that is hit and left behind goes home through a full dea
       }
     })
     assert.ok(gaveUp, `the ${id} gave up`)
-    assert.deepEqual(at(simulator, 1500, MONSTER)?.getAi(), { mode: 'idle' }, `the ${id} is home, with nothing in the bar`)
-    assert.equal(at(simulator, 1500, MONSTER)?.getHealth(), monster.champion.maxHp, `and healed`)
+    assert.deepEqual(at(simulator, spawned + 1500, MONSTER)?.getAi(), { mode: 'idle' }, `the ${id} is home, with nothing in the bar`)
+    assert.equal(at(simulator, spawned + 1500, MONSTER)?.getHealth(), monster.champion.maxHp, `and healed`)
   }
 })
 
@@ -440,7 +444,7 @@ const sniper = defineChampion({
   moveSpeed: 400,
   radius: 18,
   attackRange: 500,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [...brawler.abilities],
 })
 // Notices someone 300 away (by the walk), loses interest once it is 450 from where it started, and its bar takes a second to fill.
@@ -451,7 +455,7 @@ const walker = defineMonster({
   moveSpeed: 200,
   radius: 20,
   attackRange: 60,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
   ai: { aggroRange: 300, deaggroRange: 450, deaggroTicks: 60 },
 })

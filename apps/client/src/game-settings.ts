@@ -1,12 +1,17 @@
 import { DEFAULT_CAST_MODE, type CastMode } from './cast-control.ts'
+import { DEFAULT_EFFECTS, readEffects, type EffectSettings } from './render/effect-settings.ts'
 
 // What a player chooses for themselves, kept in the browser so it is there next time. Every setting
 // has a default and is checked on the way in, so a missing or odd stored value is just the default.
 export type GameSettings = {
   castMode: CastMode
+  // Which of the effects drawn over the ground are on (the graphics menu).
+  effects: EffectSettings
+  // Whether the frame rate and network diagnostics are shown at the top left (the dev menu).
+  diagnostics: boolean
 }
 
-export const DEFAULT_SETTINGS: GameSettings = { castMode: DEFAULT_CAST_MODE }
+export const DEFAULT_SETTINGS: GameSettings = { castMode: DEFAULT_CAST_MODE, effects: { ...DEFAULT_EFFECTS }, diagnostics: true }
 
 const STORAGE_KEY = 'moba-settings'
 const CAST_MODES: readonly CastMode[] = ['quick', 'quick-with-indicator']
@@ -22,15 +27,18 @@ function defaultStorage(): SettingsStorage | undefined {
   }
 }
 
+// The settings that were stored, with the default for each one that is missing or odd. What comes back is a copy: changing it never changes the defaults.
 export function loadSettings(storage: SettingsStorage | undefined = defaultStorage()): GameSettings {
   try {
     const stored: unknown = JSON.parse(storage?.getItem(STORAGE_KEY) ?? 'null')
-    const castMode = typeof stored === 'object' && stored !== null ? (stored as Record<string, unknown>).castMode : undefined
+    const fields = typeof stored === 'object' && stored !== null ? stored as Record<string, unknown> : {}
     return {
-      castMode: CAST_MODES.find((mode) => mode === castMode) ?? DEFAULT_SETTINGS.castMode,
+      castMode: CAST_MODES.find((mode) => mode === fields.castMode) ?? DEFAULT_SETTINGS.castMode,
+      effects: readEffects(fields.effects),
+      diagnostics: typeof fields.diagnostics === 'boolean' ? fields.diagnostics : DEFAULT_SETTINGS.diagnostics,
     }
   } catch {
-    return { ...DEFAULT_SETTINGS }
+    return { ...DEFAULT_SETTINGS, effects: { ...DEFAULT_SETTINGS.effects } }
   }
 }
 

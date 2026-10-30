@@ -29,7 +29,7 @@ const def = (ai: Partial<MonsterDef['ai']> = {}, extra: Partial<MonsterDef> = {}
   moveSpeed: 200,
   radius: 20,
   attackRange: 60,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: ['t-shockwave', 't-lash', 't-bolt', 't-meteor'],
   ai: { aggroRange: 300, deaggroRange: 450, abilities: [], ...ai },
   ...extra,

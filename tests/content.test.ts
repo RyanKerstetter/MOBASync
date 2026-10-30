@@ -15,6 +15,7 @@ import {
   type Champion,
   type Vector2,
 } from '../packages/shared/src/index.ts'
+import { SHADOW_AUTO_BONUS, SHADOW_KEY } from '../packages/shared/src/abilities.ts'
 import { testSpawns } from './test-spawns.ts'
 
 // These check the real roster is well-formed and that every ability and auto attack actually
@@ -320,6 +321,34 @@ test('the ninja cannot dash back the moment its dash forward is over', () => {
   assert.ok((duel.at(tick).get(2)?.getHealth() ?? opponent.maxHp) < opponent.maxHp, 'the dash hurt what it passed through')
 
   assert.equal(duel.at(tick).get(1)?.getAbilityCooldown('shadowreturn').ready, false)
+})
+
+// The bonus is a share of the attack damage, read from its constant and not a number written here: an auto that spends a shadow stack hits for
+// its attack damage times one plus the bonus, and one with none is plain, so the two are in that proportion whatever else is tuned.
+test('the ninja auto spends a shadow stack for its attack damage times one plus the shadow bonus, and one with none is plain', () => {
+  const ninja = champions.get('ninja')
+  assert.ok(ninja)
+  const duel = duelWithCast(ninja, 'shadowstep', 1, 1)
+  let tick = 1
+  while (duel.at(tick).get(1)?.isDashing()) tick += 1
+  const stacks = duel.at(tick).get(1)?.getMarkers().filter((marker) => marker.key === SHADOW_KEY).length ?? 0
+  assert.equal(stacks, 1, 'the dash through the enemy gave one shadow stack')
+
+  // It walks back to the enemy it dashed through and autos it until the end, the first with the stack and the rest with none.
+  duel.addOrder(1, { id: 'player-1:2', seq: 2, tick: tick + 1, type: 'attack', targetId: 2 })
+  const dealt: number[] = []
+  let before = duel.at(tick).get(2)?.getHealth() ?? 0
+  for (let at = tick + 1; at <= tick + 1 + 300; at += 1) {
+    const health = duel.at(at).get(2)?.getHealth() ?? before
+    if (health < before) dealt.push(before - health)
+    before = health
+  }
+  assert.ok(dealt.length >= 2, `it autoed twice or more: ${dealt}`)
+  const [spent, plain] = dealt
+  assert.ok(plain > 0, 'an auto with no stack deals damage')
+  // Health is whole numbers, so each hit is rounded: allow the hit point.
+  assert.ok(Math.abs(spent - plain * (1 + SHADOW_AUTO_BONUS)) <= 1, `${spent} is ${plain} and ${SHADOW_AUTO_BONUS * 100}% more`)
+  assert.deepEqual(dealt.slice(1).every((amount) => amount === plain), true, 'and every auto after it is plain')
 })
 
 test('every champion\'s auto attack lands and deals damage', () => {

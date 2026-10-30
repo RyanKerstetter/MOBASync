@@ -15,7 +15,8 @@ export type TurretRing = {
   color: string
 }
 
-// The ring of every turret that is standing: its middle, its reach as it is now, and its team's colour. A destroyed turret has none.
+// The ring of every turret that is standing: its middle, its reach as it is now, and its team's colour. A destroyed turret has none. The core of a
+// base is a turret, so it has one.
 export function layoutTurretRings(characters: readonly RenderedCharacter[]): TurretRing[] {
   return characters
     .filter((character) => character.turret !== undefined && !character.dead && character.attackRange > 0)
@@ -28,7 +29,8 @@ export function layoutTurretRings(characters: readonly RenderedCharacter[]): Tur
 }
 
 // The rings on the ground, under the champions and the ring that shows the controlled champion's own reach. They are made from the
-// characters that are drawn, so a turret the team cannot see has none.
+// characters that are drawn, so a turret the team cannot see has none. A player can turn them off (the graphics menu): they are then not drawn
+// at all, and drawn again from the next frame when they are turned back on.
 export class TurretRangeLayer {
   readonly view = new Container()
   private readonly rings = new Graphics()
@@ -37,7 +39,9 @@ export class TurretRangeLayer {
     this.view.addChild(this.rings)
   }
 
-  update(characters: readonly RenderedCharacter[]): void {
+  update(characters: readonly RenderedCharacter[], visible = true): void {
+    this.view.visible = visible
+    if (!visible) return
     this.rings.clear()
     for (const ring of layoutTurretRings(characters)) {
       this.rings

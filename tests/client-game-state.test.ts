@@ -6,13 +6,15 @@ import {
   GAME_TPS,
   getAbilityDef,
   getChampion,
+  GameSnapshotSchema,
   Simulator,
+  statBuff,
   Terrain,
   type CastTarget,
   type ChampionDef,
   type Vector2,
 } from '../packages/shared/src/index.ts'
-import { brawler, grenadier, gunner, ninja, spouter, trinketmaster } from './fixtures.ts'
+import { brawler, defineAbility, defineChampion, grenadier, gunner, ninja, spouter, trinketmaster } from './fixtures.ts'
 
 function championDef(champion: Champion): ChampionDef {
   return { ...champion, abilities: [...champion.abilities] }
@@ -615,4 +617,134 @@ test('Space skips the dead and has no one to attack when there is no enemy, and 
   alone.simulator.at(3)
   assert.equal(alone.getClosestEnemy({ x: 100, y: 100 }, 0), undefined)
   assert.equal(new ClientGameState().getClosestEnemy({ x: 0, y: 0 }, 0), undefined, 'and nothing without a champion')
+})
+
+// ---------------------------------------------------------------------------- the attack bar
+
+// The bar under the controlled champion is empty while a swing is under way and fills from the moment the hit lands to the moment the next
+// swing can start: it must not start from how far through the whole attack the hit is. The swinger here is the test's own, and it winds up for
+// 40 % of its attack, so a bar that started at the windup's share would start at 0.4.
+const SWING_SHARE = 0.4
+const BAR_AT = { x: 100, y: 100 }
+const quickening = defineAbility({ id: 't-cgs-quicken', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 1200, apply: [statBuff('attackSpeed', 1, 1200)] })
+const swinger = defineChampion({
+  id: 't-cgs-swinger',
+  name: 'Swinger',
+  base: { maxHp: 1000, attackDamage: 10, attackSpeed: 1 },
+  moveSpeed: 100,
+  radius: 20,
+  attackRange: 150,
+  attackWindup: SWING_SHARE,
+  abilities: [quickening.id],
+})
+
+type BarRow = { tick: number; bar: number; swinging: boolean; ready: number }
+type Swing = { start: number; launch: number; ready: number }
+
+// The local swinger (1) attacks a dummy (2) from tick 1 and keeps on. Each tick, the bar as the page would draw it just into that tick, and
+// what the simulator says of the swing.
+function barDuel(orders: ReadonlyArray<Parameters<ClientGameState['simulator']['addOrder']>[1]> = []): ClientGameState {
+  const gameState = new ClientGameState()
+  gameState.simulator.addPlayer(1, 'player-1', 'Player 1', BAR_AT, swinger, 1)
+  gameState.simulator.addPlayer(2, 'player-2', 'Player 2', { x: 200, y: 100 }, brawler, 2)
+  gameState.setLocalCharacterId(1)
+  gameState.resetServerTickAnchor(0, 0)
+  gameState.simulator.addOrder(1, { id: 'attack', seq: 1, tick: 1, type: 'attack', targetId: 2 })
+  for (const order of orders) gameState.simulator.addOrder(1, order)
+  return gameState
+}
+function barRows(gameState: ClientGameState, last: number): BarRow[] {
+  const rows: BarRow[] = []
+  for (let tick = 1; tick <= last; tick += 1) {
+    gameState.simulator.advanceTo(tick)
+    const frame = gameState.simulator.at(tick).get(1)
+    rows.push({
+      tick,
+      bar: gameState.getAttackCooldownProgress((tick + 1e-6) * 1000 / GAME_TPS),
+      swinging: frame?.getAction()?.kind === 'attack',
+      ready: frame?.getNextAttackTick() ?? 0,
+    })
+  }
+  return rows
+}
+// The swings in the rows: when each began, when its hit landed (the first tick it is no longer under way), and when the next could begin.
+function swingsIn(rows: readonly BarRow[]): Swing[] {
+  const swings: Swing[] = []
+  let begun: number | undefined
+  for (const row of rows) {
+    if (row.swinging && begun === undefined) begun = row.tick
+    if (!row.swinging && begun !== undefined) {
+      swings.push({ start: begun, launch: row.tick, ready: row.ready })
+      begun = undefined
+    }
+  }
+  return swings
+}
+function assertBarFollows(rows: readonly BarRow[], swing: Swing): void {
+  const at = (tick: number): BarRow => rows.find((row) => row.tick === tick) as BarRow
+  // The swing has to be one the old bar would have got wrong: its hit comes a good way into the attack.
+  assert.ok((swing.launch - swing.start) / (swing.ready - swing.start) > SWING_SHARE - 0.1, 'the windup is a good share of the attack')
+  for (let tick = swing.start; tick < swing.launch; tick += 1) assert.equal(at(tick).bar, 0, `empty while it winds up (tick ${tick})`)
+  assert.ok(at(swing.launch).bar < 0.01, `empty as the hit lands: ${at(swing.launch).bar}`)
+  let last = 0
+  for (let tick = swing.launch; tick < swing.ready; tick += 1) {
+    const expected = (tick - swing.launch) / (swing.ready - swing.launch)
+    assert.ok(Math.abs(at(tick).bar - expected) < 0.01, `tick ${tick}: ${at(tick).bar} against ${expected}`)
+    assert.ok(at(tick).bar >= last, 'it only fills')
+    last = at(tick).bar
+  }
+  assert.ok(last > 0.9, 'and is nearly full when the next swing can begin')
+}
+
+test('the attack bar is empty while a swing winds up, and empty again as the hit lands, and then fills until the next swing can begin', () => {
+  const rows = barRows(barDuel(), 2 * swinger.attackCooldownTicks + 10)
+  const swings = swingsIn(rows)
+  assert.ok(swings.length >= 2, 'it keeps swinging')
+  assert.equal(swings[0].launch - swings[0].start, swinger.attackWindupTicks)
+  assert.equal(swings[0].ready - swings[0].start, swinger.attackCooldownTicks)
+  for (const swing of swings.slice(0, 2)) assertBarFollows(rows, swing)
+})
+
+test('the attack bar starts from empty at a hit however fast the attack is, though the windup is a bigger share of the swing', () => {
+  // A quickening cast between the first hit and the next swing: the swings after it are of a faster attack.
+  const castAt = 1 + swinger.attackWindupTicks + 5
+  const rows = barRows(barDuel([{ id: 'quicken', seq: 2, tick: castAt, type: 'cast', abilityId: quickening.id, target: { mode: 'none' }, origin: BAR_AT }]), 3 * swinger.attackCooldownTicks)
+  const swings = swingsIn(rows)
+  assert.ok(swings.length >= 3)
+  assert.ok(swings[1].ready - swings[1].start < swings[0].ready - swings[0].start, 'the second swing is of a faster attack')
+  for (const swing of swings.slice(0, 3)) assertBarFollows(rows, swing)
+})
+
+test('a swing that is cut short spends nothing, so the bar is full again', () => {
+  // It is told to walk half way through the windup.
+  const walkAt = 1 + Math.floor(swinger.attackWindupTicks / 2)
+  const last = walkAt + swinger.attackCooldownTicks
+  const rows = barRows(barDuel([{ id: 'walk', seq: 2, tick: walkAt, type: 'move', target: BAR_AT }]), last)
+  const at = (tick: number): BarRow => rows.find((row) => row.tick === tick) as BarRow
+  assert.equal(at(walkAt - 1).swinging, true)
+  assert.equal(at(walkAt - 1).bar, 0, 'empty while it winds up')
+  assert.equal(at(walkAt + 2).swinging, false)
+  assert.equal(at(walkAt + 2).bar, 1, 'and full when it was stopped before the hit')
+  assert.equal(at(last).bar, 1)
+})
+
+test('the wait the bar fills over travels in a checkpoint, so a client that joins in the middle of it draws the same bar', () => {
+  const original = barDuel()
+  // A quarter of the way through the wait after the first hit.
+  const middle = 1 + swinger.attackWindupTicks + Math.floor((swinger.attackCooldownTicks - swinger.attackWindupTicks) / 4)
+  original.simulator.advanceTo(middle)
+  original.simulator.setCommitTick(middle)
+  const launched = original.simulator.at(middle).get(1)?.getAttackLaunchTick()
+  assert.ok(launched !== undefined && launched > 1, 'the frame says when the swing landed')
+  // A client reads snapshots through the schema, which would drop a field it does not list.
+  const received = GameSnapshotSchema.parse(JSON.parse(JSON.stringify(original.simulator.snapshot())))
+  assert.equal(received.checkpoint.characters.find((character) => character.characterId === 1)?.attackLaunchTick, launched)
+
+  const joined = new ClientGameState()
+  joined.simulator.replaceFromSnapshot(received)
+  joined.setLocalCharacterId(1)
+  joined.resetServerTickAnchor(middle, 0)
+  const bar = original.getAttackCooldownProgress((middle + 1e-6) * 1000 / GAME_TPS)
+  assert.ok(bar > 0 && bar < 1, `it is part of the way through the wait: ${bar}`)
+  assert.ok(Math.abs(joined.getAttackCooldownProgress(1e-6 * 1000 / GAME_TPS) - bar) < 1e-6, 'and the client that joined draws the same')
 })

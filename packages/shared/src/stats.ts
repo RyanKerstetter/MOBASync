@@ -89,6 +89,22 @@ export class StatBlock implements StatValues {
   }
 }
 
+// The stats a 'stat' status can add to (see `statBuff` in effects.ts).
+export type BuffableStat = 'attackDamage' | 'attackSpeed' | 'resistance' | 'haste' | 'arcane'
+
+// These stats with what the 'stat' statuses on a unit add to them.
+export function withStatBuffs(
+  stats: ChampionStats,
+  statuses: readonly { kind: string; stat?: BuffableStat; amount: number }[] | undefined,
+): ChampionStats {
+  if (!statuses) return stats
+  const buffed = { ...stats }
+  for (const status of statuses) {
+    if (status.kind === 'stat' && status.stat) buffed[status.stat] += status.amount
+  }
+  return buffed
+}
+
 // A stat of `stat` takes this share off, by League's formula: x / (100 + x). 100 takes half, and no amount takes all.
 export function statReduction(stat: number): number {
   return stat > 0 ? stat / (100 + stat) : 0

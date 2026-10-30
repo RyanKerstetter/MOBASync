@@ -14,7 +14,7 @@ import type { RenderedCharacter, RenderedEntity } from './game-state.ts'
 // What the local player's team sees, and so what the page shows: from where its living champions are drawn, a vision
 // system (see vision.ts in shared) works out what they see together, and what is not seen is darkened (`FogLayer`) and
 // what stands in it is left out: an enemy, a monster or a shot is only drawn where the team can see it. The team's own
-// champions and turrets, and what they have put out, are always drawn. Anyone is seen where they are touching the light: a body counts
+// champions, turrets and core, and what they have put out, are always drawn. Anyone is seen where they are touching the light: a body counts
 // as seen if its middle, or any furthest point of it, is.
 //
 // There is no darkness, and everything is drawn, when there is no system (`?vision=off`), when the debug view is on, and
@@ -41,10 +41,10 @@ export class TeamVision {
     this.teamOf.clear()
     for (const character of characters) this.teamOf.set(character.id, character.team)
     if (!this.system || options.reveal || localTeam === undefined) return
-    // The team looks from its living champions, and from its standing turrets, each as far as its own range: a champion's is
-    // `GAME_VISION_RANGE` and a turret's is its tier's. A team with no champion alive still sees the whole game, until one is back,
-    // whatever turrets it has: the turrets add to what a team sees, and are not what keeps it from seeing nothing.
-    const alive = characters.filter((character) => character.team === localTeam && !character.dead && !character.core)
+    // The team looks from its living champions and from its standing turrets (its core is one), each as far as its own range: a champion's is
+    // `GAME_VISION_RANGE`, a turret's is its tier's. A team with no champion alive still sees the whole game, until one is back, whatever turrets it has:
+    // they add to what a team sees, and are not what keeps it from seeing nothing.
+    const alive = characters.filter((character) => character.team === localTeam && !character.dead)
     if (!alive.some((character) => !character.turret)) return
     this.view = this.system.see(alive.map((character) => ({
       position: character.position,

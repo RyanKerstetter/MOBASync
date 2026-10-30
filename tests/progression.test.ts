@@ -4,6 +4,7 @@ import { ClientGameState } from '../apps/client/src/game-state.ts'
 import {
   DEFAULT_MONSTER_REWARD,
   GAME_MAX_LEVEL,
+  GAME_RESPAWN_TICKS,
   GAME_STARTING_GOLD,
   GAME_XP_FIRST_LEVEL,
   GAME_XP_STEP,
@@ -34,7 +35,7 @@ const slayer = defineChampion({
   moveSpeed: 220,
   radius: 18,
   attackRange: 150,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [...brawler.abilities],
 })
 const fragile = defineChampion({
@@ -44,7 +45,7 @@ const fragile = defineChampion({
   moveSpeed: 100,
   radius: 18,
   attackRange: 150,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [...brawler.abilities],
 })
 // Dies to one blow, and pays what it is told to.
@@ -55,7 +56,7 @@ const bounty = defineMonster({
   moveSpeed: 100,
   radius: 20,
   attackRange: 60,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
   ai: { aggroRange: 0, deaggroRange: 300 },
   reward: { gold: 7, xp: 11, shards: 2 },
@@ -68,7 +69,7 @@ const unpriced = defineMonster({
   moveSpeed: 100,
   radius: 20,
   attackRange: 60,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
   ai: { aggroRange: 0, deaggroRange: 300 },
 })
@@ -80,7 +81,7 @@ const big = defineMonster({
   moveSpeed: 100,
   radius: 20,
   attackRange: 60,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
   ai: { aggroRange: 0, deaggroRange: 300 },
   reward: { gold: 0, xp: xpToReachLevel(3), shards: 0 },
@@ -93,7 +94,7 @@ const grunt = defineMonster({
   moveSpeed: 200,
   radius: 20,
   attackRange: 60,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
   ai: { aggroRange: 300 },
   reward: { gold: 99, xp: 99, shards: 9 },
@@ -236,8 +237,8 @@ test('killing a player pays a flat amount, and counts as a kill, and killing the
   assert.equal(simulator.characters.get(1)?.kills, 1)
   assert.deepEqual(held(simulator, 2), { gold: 0, xp: 0, shards: 0 }, 'the one killed is paid nothing')
   // They come back, and are killed again: the same again, whatever level or kills either has.
-  attack(simulator, 220, 2, 2)
-  play(simulator, 300)
+  attack(simulator, GAME_RESPAWN_TICKS + 40, 2, 2)
+  play(simulator, GAME_RESPAWN_TICKS + 120)
   assert.equal(simulator.characters.get(1)?.kills, 2)
   assert.deepEqual(held(simulator, 1), {
     gold: PLAYER_KILL_REWARD.gold * 2,

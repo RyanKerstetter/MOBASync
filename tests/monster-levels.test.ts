@@ -24,7 +24,7 @@ const wolf = defineMonster({
   moveSpeed: 0,
   radius: 20,
   attackRange: 10,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
   ai: { aggroRange: 0, deaggroRange: 300, respawnTicks: RESPAWN },
   reward: { gold: 40, xp: 70, shards: 3 },
@@ -84,7 +84,7 @@ test('what a monster in the game pays more for each level is its own, with a def
 
 function wolfDef(id: string) {
   return {
-    id, name: 'Bad', base: { maxHp: 100, attackDamage: 1, attackSpeed: 1 }, moveSpeed: 0, radius: 20, attackRange: 10, attackWindupTicks: 0,
+    id, name: 'Bad', base: { maxHp: 100, attackDamage: 1, attackSpeed: 1 }, moveSpeed: 0, radius: 20, attackRange: 10, attackWindup: 0,
     abilities: [], ai: { aggroRange: 0, deaggroRange: 300 },
   }
 }

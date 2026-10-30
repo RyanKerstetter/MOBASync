@@ -5,7 +5,6 @@ import {
   alliesInRadius,
   alongAim,
   attackRangeBonus,
-  attackSpeedBonus,
   blind,
   blink,
   burn,
@@ -28,7 +27,7 @@ import {
   refundCooldown,
   removeEntities,
   resetAutoTimer,
-  resist,
+  statBuff,
   root,
   scaled,
   self,
@@ -46,6 +45,7 @@ import {
   type DashDef,
   type Effect,
   type EntityDef,
+  type Scaling,
   type Selector,
   type SimContext,
 } from './effects.js'
@@ -162,10 +162,8 @@ export const abilityOnKey = (def: AbilityDef, entityOut: (defId: string) => bool
 export const CURSE_KEY = 'curse'
 export const CURSE_MAX_STACKS = 5
 export const CURSE_DURATION_TICKS = seconds(10)
-
 const curseStacksOnTarget = stacks(CURSE_KEY, targetUnit())
 const curseStacksOnHit = stacks(CURSE_KEY, subject())
-
 ability({
   id: 'feast',
   description: 'Pops the curse stacks on the target. Each stack adds damage and haste, and refunds a fifth of this cooldown.',
@@ -174,15 +172,13 @@ ability({
   windUpTicks: 6,
   backswingTicks: 4,
   cooldownTicks: seconds(10),
-  // Every amount below reads the stacks as they were before this cast pops them.
   apply: [
-    damage(scaled(linear(75, 25, curseStacksOnTarget), { arcane: 0.4 }), targetUnit()),
+    damage(scaled(linear(75, 25, curseStacksOnTarget), { arcane: 0.4, level: .1 }), targetUnit()),
     haste(linear(0, .15, curseStacksOnTarget), seconds(2.5), self()),
     refundCooldown('feast', linear(0, .8 / CURSE_MAX_STACKS, curseStacksOnTarget), self()),
     popMarkers(CURSE_KEY, targetUnit()),
   ],
 })
-
 ability({
   id: 'miasma',
   description: 'Leaves a field where you stand. Inside it you and your teammates move faster and enemies move slower.',
@@ -215,7 +211,7 @@ const hexShot = {
   lifetimeTicks: seconds(0.75),
   onHit: [
     slow(0.3, seconds(1)),
-    damage(scaled(50, { arcane: 0.3 })),
+    damage(scaled(50, { arcane: 0.8 })),
     when<SimContext>(
       (sim, src) => curseStacksOnHit(sim, src) >= CURSE_MAX_STACKS,
       [
@@ -225,7 +221,7 @@ const hexShot = {
       ],
       [mark(CURSE_KEY, CURSE_DURATION_TICKS, subject(), { count: 2, cap: CURSE_MAX_STACKS })],
     ),
-    refundCooldown('hex',.5,self()),
+    refundCooldown('hex',.4,self()),
   ],
 } satisfies EntityDef
 
@@ -255,7 +251,6 @@ ability({
   indicator: { line: true },
   apply: [dash(600, 120)],
 })
-
 ability({
   id: 'focus',
   description: 'For a few seconds your auto attacks are faster and reach farther.',
@@ -265,15 +260,10 @@ ability({
   backswingTicks: 0,
   cooldownTicks: seconds(12),
   apply: [
-    attackSpeedBonus(0.4, seconds(4)),
+    statBuff('attackSpeed', 0.4, seconds(4)),
     attackRangeBonus(80, seconds(4)),
   ],
 })
-
-// Archer's Snare: a lob that flies to the aimed point, then leaves this trap where it lands. It
-// stays for a second and roots each enemy once, for a set time, the moment its body touches it:
-// whoever it lands on, and whoever walks in while it is out. Piercing is what keeps it on the
-// ground after the first catch, and it never hits the same unit twice.
 const SNARE_ROOT_TICKS = seconds(1.5)
 const snareField = {
   id: 'snare-field',
@@ -285,7 +275,6 @@ const snareField = {
   color: '#6dd39b',
   onHit: [root(SNARE_ROOT_TICKS)],
 } satisfies EntityDef
-
 ability({
   id: 'snare',
   description: 'Lobs a canister to the target point. It takes longer the farther it goes, then leaves a small trap for a second that roots every enemy it lands on or that walks into it.',
@@ -309,16 +298,14 @@ ability({
 })
 
 // ---------------------------------------------------------------------------- Capricorn
-
 // Capricorn's passive: casting any spell empowers the next auto attack.
 export const EMPOWER_KEY = 'empowered'
 export const EMPOWER_DURATION_TICKS = seconds(6)
 export const EMPOWER_BONUS_DAMAGE = 30
-
-// How long the Tsunami stuns what it hits (which also interrupts a windup that has not launched).
 const TSUNAMI_STUN_TICKS = seconds(0.6)
-
-// Capricorn's Tsunami: the wave is a rectangle, 70 wide across its path and 20 deep along it.
+// What the wave does to each enemy it passes through: the base damage, plus the caster's stats times these ratios (`scaled`).
+export const TSUNAMI_DAMAGE = 100
+export const TSUNAMI_SCALING = { arcane: 0.8 } satisfies Scaling
 const tsunamiWave = {
   id: 'tsunami-wave',
   speed: 400,
@@ -327,9 +314,8 @@ const tsunamiWave = {
   pierce: true,
   color: '#4fa8ff',
   // The push is at most 140, and no farther than 50 past where the wave stops.
-  onHit: [damage(scaled(100, { maxHealth: 0.08, arcane: 0.3 })), knockback(140, 700, subject(), { pastEnd: 50 }), stun(TSUNAMI_STUN_TICKS)],
+  onHit: [damage(scaled(TSUNAMI_DAMAGE, TSUNAMI_SCALING)), knockback(140, 700, subject(), { pastEnd: 50 }), stun(TSUNAMI_STUN_TICKS)],
 } satisfies EntityDef
-
 ability({
   id: 'tsunami',
   description: `Sends a wave of water forward. It damages enemies, knocks them back and stuns them for ${TSUNAMI_STUN_TICKS / GAME_TPS} seconds.`,
@@ -341,14 +327,10 @@ ability({
   indicator: { width: tsunamiWave.box.halfWidth * 2 },
   apply: [spawnEntity(tsunamiWave)],
 })
-
-// Capricorn's Bubbles: a stream of bubbles. For each target the first to hit does full damage
-// and the rest do half. A short marker on the target remembers who was hit.
 const BUBBLE_KEY = 'bubbled'
 const BUBBLE_DAMAGE = 80
 const BUBBLE_MARK_TICKS = seconds(1.5)
 const bubbleStacksOnHit = stacks(BUBBLE_KEY, subject())
-
 const bubble = {
   id: 'bubble',
   speed: 600,
@@ -358,12 +340,11 @@ const bubble = {
   onHit: [
     when<SimContext>(
       (sim, src) => bubbleStacksOnHit(sim, src) > 0,
-      [damage(scaled(BUBBLE_DAMAGE / 2, { arcane: 0.25 }))],
-      [damage(scaled(BUBBLE_DAMAGE, { arcane: 0.5 })), mark(BUBBLE_KEY, BUBBLE_MARK_TICKS, subject(), { cap: 1 })],
+      [damage(scaled(BUBBLE_DAMAGE / 2, { arcane: 0.3 }))],
+      [damage(scaled(BUBBLE_DAMAGE, { arcane: 0.6 })), mark(BUBBLE_KEY, BUBBLE_MARK_TICKS, subject(), { cap: 1 })],
     ),
   ],
 } satisfies EntityDef
-
 ability({
   id: 'bubbles',
   description: 'Fires a stream of three bubbles. On each target the first bubble to hit does full damage and the rest do half.',
@@ -377,11 +358,10 @@ ability({
     spawnEntity(bubble, { volley: { count: 3, intervalTicks: 8 } }),
   ],
 })
-
-// Capricorn's Spout: a marked circle that erupts after a short warning. Whatever is still standing
-// in it when it goes is hurt and slowed, so the warning is the whole chance to step out.
 const SPOUT_RADIUS = 65
-
+// What the eruption does to each enemy standing in it: the base damage, plus the caster's stats times these ratios (`scaled`).
+export const SPOUT_DAMAGE = 120
+export const SPOUT_SCALING = { arcane: 0.9 } satisfies Scaling
 const spoutBurst: EntityDef = {
   id: 'spout-burst',
   speed: 0,
@@ -390,7 +370,6 @@ const spoutBurst: EntityDef = {
   visual: 'field',
   color: '#4fa8ff',
 }
-
 const spoutWarning: EntityDef = {
   id: 'spout-warning',
   speed: 0,
@@ -400,12 +379,11 @@ const spoutWarning: EntityDef = {
   color: '#ff6b4a',
   // The eruption: it hits whoever is inside on the tick the warning runs out.
   onExpire: [
-    damage(scaled(120, { arcane: 0.7 }), enemiesInRadius(SPOUT_RADIUS)),
+    damage(scaled(SPOUT_DAMAGE, SPOUT_SCALING), enemiesInRadius(SPOUT_RADIUS)),
     slow(0.4, seconds(.6), enemiesInRadius(SPOUT_RADIUS)),
     spawnEntity(spoutBurst),
   ],
 }
-
 ability({
   id: 'spout',
   description: 'Marks a small circle at the target point. After a brief warning it erupts, damaging and slowing enemies still standing in it.',
@@ -417,9 +395,7 @@ ability({
   indicator: { radius: SPOUT_RADIUS },
   apply: [spawnEntity(spoutWarning, { at: aimPoint() })],
 })
-
 // ---------------------------------------------------------------------------- Soldier
-
 ability({
   id: 'stim',
   description: 'Costs you a chunk of health. For a few seconds you attack faster, move faster, and take less damage.',
@@ -430,13 +406,11 @@ ability({
   cooldownTicks: seconds(18),
   apply: [
     loseHealth(100),
-    attackSpeedBonus(0.5, seconds(5)),
+    statBuff('attackSpeed', 0.5, seconds(5)),
     haste(0.4, seconds(5)),
-    resist(0.3, seconds(5)),
+    statBuff('resistance', 40, seconds(5)),
   ],
 })
-
-// Soldier's Bolt: pierces everything in its line.
 const soldierBolt = {
   id: 'bolt',
   speed: 720,
@@ -445,11 +419,10 @@ const soldierBolt = {
   pierce: true,
   color: '#ffb347',
   onHit: [
-    damage(scaled(linear(100, 0.06, missingHealth()), { attackDamage: 0.3 })),
+    damage(scaled(linear(40, 0.06, missingHealth()), { attackDamage: 0.5 })),
     slow(0.5, seconds(1.5)),
   ],
 } satisfies EntityDef
-
 ability({
   id: 'bolt',
   description: 'A bolt that pierces every enemy in a line and slows them. It hurts more the less health they have left.',
@@ -461,10 +434,6 @@ ability({
   indicator: { width: soldierBolt.radius * 2 },
   apply: [spawnEntity(soldierBolt)],
 })
-
-// Soldier's Medic: a bot that shields its owner and heals them over time. It has no timer: it
-// stays out until its shield is broken, which is how it is killed. It hangs just above its owner
-// on a loose spring, so it lags behind when they move and drifts back in when they stop.
 const medicBot: EntityDef = {
   id: 'medic-bot',
   speed: 0,
@@ -475,9 +444,8 @@ const medicBot: EntityDef = {
     (status) => status.id === `${src.ownerId}:shield:medic` && status.amount > 0,
   ),
   pulseEveryTicks: 30,
-  onPulse: [heal(8, self())],
+  onPulse: [heal(scaled(8, {arcane: .1}), self())],
 }
-
 ability({
   id: 'medic',
   description: 'Summons a medical bot that hovers by you. Its shield lasts until it is broken, and the bot heals you over time until then. Casting again replaces it.',
@@ -603,7 +571,6 @@ export const SIGHTED_HASTE_TICKS = seconds(3)
 // thrown straight away from its centre: enemies are hurt and bounced, and the Grenadier is bounced
 // too if it is standing in it. A blast that catches an enemy hands back half of the cooldown.
 const GRENADE_RADIUS = 45
-const GRENADE_REFUND = 0.5
 const grenadeBurst: EntityDef = {
   id: 'grenade-burst',
   speed: 0,
@@ -619,12 +586,12 @@ const grenade = {
   landAtAim: true,
   color: '#9fb85a',
   onExpire: [
-    damage(scaled(50, { arcane: 0.4 }), enemiesInRadius(GRENADE_RADIUS)),
+    damage(scaled(50, { arcane: 0.8 }), enemiesInRadius(GRENADE_RADIUS)),
     knockback(150, 400, enemiesInRadius(GRENADE_RADIUS)),
     knockback(110, 400, selfInRadius(GRENADE_RADIUS)),
     when<SimContext>(
       (sim, src) => enemiesInRadius(GRENADE_RADIUS)(sim, src).length > 0,
-      [refundCooldown('grenade', GRENADE_REFUND)],
+      [refundCooldown('grenade', .3)],
     ),
     spawnEntity(grenadeBurst),
   ],
@@ -655,7 +622,7 @@ const molotovFire = {
   // Refreshed every tick, so both wear off only after the enemy has been out of the fire a while.
   onTick: [
     slow(0.3, 2, enemiesInRadius(MOLOTOV_RADIUS)),
-    burn(scaled(30, { arcane: 0.2 }), seconds(3), enemiesInRadius(MOLOTOV_RADIUS)),
+    burn(scaled(30, { arcane: 0.3 }), seconds(3), enemiesInRadius(MOLOTOV_RADIUS)),
   ],
 } satisfies EntityDef
 
@@ -679,13 +646,8 @@ ability({
     }),
   ],
 })
-
-// Grenadier's Flashbang: a lob that goes off where it lands. An enemy it lands right on, in the
-// core of the flash, is stunned. One that only gets the edge of it, in the ring around the core,
-// is blinded for a short while instead, so a near miss still costs them.
 const FLASH_CORE_RADIUS = 35
 const FLASH_RADIUS = 70
-// Who is caught by the flash but not by its core: they get the blind and not the stun.
 const enemiesInFlashRing: Selector = (sim, src) => {
   const core = new Set(enemiesInRadius(FLASH_CORE_RADIUS)(sim, src))
   return enemiesInRadius(FLASH_RADIUS)(sim, src).filter((unitId) => !core.has(unitId))
@@ -710,7 +672,6 @@ const flashbang = {
     spawnEntity(flashBurst),
   ],
 } satisfies EntityDef
-
 ability({
   id: 'flashbang',
   description: 'Lobs a flashbang to the target point. It takes longer the farther it goes, then goes off: an enemy right under it is stunned, and one caught by the edge of the flash is briefly blinded, so their auto attacks miss.',
@@ -736,6 +697,7 @@ export const TRICK_KEY = 'trick'
 export const TRICK_HITS = 3
 export const TRICK_WINDOW_TICKS = seconds(5)
 export const TRICK_BONUS_DAMAGE = 50
+export const TRICK_BONUS_DAMAGE_ARCANE = 0.5
 export const TRICK_HASTE = 0.6
 export const TRICK_HASTE_TICKS = seconds(1.5)
 const tricksOnTarget = stacks(TRICK_KEY, subject())
@@ -751,14 +713,8 @@ const trickEffects: readonly Effect[] = [
     [mark(TRICK_KEY, TRICK_WINDOW_TICKS, subject(), { cap: TRICK_HITS - 1 })],
   ),
 ]
-
-// Trinketmaster's stick. Q throws it in a straight line, hurting each enemy it passes through, and
-// it lands in the ground where its flight ends (against the wall, if it meets one) and stays there.
-// Walking over it picks it up and leaves Q no more than a second to wait. Calling it back with Q
-// again does not: the stick hurts and slows what it passes on the way home, and Q carries on as it
-// was. Warp blinks onto the stick, which is walking over it as far as the stick can tell, so the
-// pickup that follows does refund Q.
 const STICK_DAMAGE = 80
+const STICK_ARCANE = 0.5
 const STICK_RESET_TICKS = seconds(.5)
 const stick = {
   id: 'stick',
@@ -769,11 +725,6 @@ const stick = {
   stayWhile: (sim, src) => sim.isAlive(src.ownerId),
   pickup: [capCooldown('stick', STICK_RESET_TICKS)],
 } satisfies EntityDef
-
-// The stick on its way out: a shot that flies to the point it was thrown at, at 540 px a second, hurts
-// every enemy it passes through once and comes down there. The player chooses how far, from the
-// least to the most. The point is held inside the arena's wall, so it never lands where its owner
-// could not walk to it.
 const STICK_MIN_RANGE = 150
 const STICK_RANGE = 360
 const stickShot = {
@@ -784,10 +735,9 @@ const stickShot = {
   pierce: true,
   stopsAtWalls: true,
   color: '#a9794a',
-  onHit: [damage(scaled(STICK_DAMAGE, { arcane: 0.5 })), ...trickEffects],
+  onHit: [damage(scaled(STICK_DAMAGE, { arcane: STICK_ARCANE })), ...trickEffects],
   onExpire: [spawnEntity(stick, { onePerOwner: true })],
 } satisfies EntityDef
-
 ability({
   id: 'stick',
   description: 'Throws a stick to the point you aim at, anywhere from 150 to 360 away. It hurts enemies it passes through, then lands in the ground there, or against a wall, and stays. Walk over it to pick it up, which leaves this no more than a second to wait, or press this again to call it back, which hurts and slows enemies it passes on the way.',
@@ -800,14 +750,9 @@ ability({
   // Only one stick at a time. While it is out, this key calls it back instead.
   requires: { entity: 'stick', out: false },
   recast: 'recall',
-  // A band as wide as the stick, from the thrower to where it will land.
   indicator: { line: true, width: stickShot.radius * 2 },
   apply: [spawnEntity(stickShot)],
 })
-
-// The stick called back: it flies home from where it lay, turning to follow its owner, and slows and
-// hurts each enemy it passes through once. It ends on arrival, and that is all: its pickup has no
-// effects, so unlike walking over the stick on the ground it does nothing for Q's cooldown.
 const stickRecall = {
   id: 'stick-recall',
   speed: 800,
@@ -815,10 +760,9 @@ const stickRecall = {
   homing: 'owner',
   pierce: true,
   color: '#a9794a',
-  onHit: [damage(scaled(STICK_DAMAGE, { arcane: 0.5 })), slow(0.75, seconds(1.5)), ...trickEffects],
+  onHit: [damage(scaled(STICK_DAMAGE, { arcane: STICK_ARCANE })), slow(0.75, seconds(1.5)), ...trickEffects],
   pickup: [],
 } satisfies EntityDef
-
 ability({
   id: 'recall',
   description: 'Calls the stick back to you. It hurts and slows each enemy it passes through on the way. Calling it back does not refund the throw: only walking over the stick does.',
@@ -833,7 +777,8 @@ ability({
     removeEntities('stick'),
   ],
 })
-
+const HUSH_DAMAGE = 40
+const HUSH_ARCANE = 0.8
 ability({
   id: 'hush',
   description: 'Readies your next auto attack to silence its target, so they cannot cast. That auto counts as an ability hit for your passive. Resets your auto attack, and can be used between autos.',
@@ -842,10 +787,9 @@ ability({
   windUpTicks: 0,
   backswingTicks: 0,
   cooldownTicks: seconds(8),
-  empowerAttack: { ticks: seconds(5), effects: [silence(seconds(1.5)), ...trickEffects] },
+  empowerAttack: { ticks: seconds(5), effects: [silence(seconds(1.5)),damage(scaled(HUSH_DAMAGE, { arcane: HUSH_ARCANE })), ...trickEffects] },
   apply: [resetAutoTimer()],
 })
-
 // Warp's blink is only the two ends of it: a flash where the Trinketmaster leaves and where it lands.
 const warpFlashOut: EntityDef = {
   id: 'warp-out',
@@ -856,7 +800,6 @@ const warpFlashOut: EntityDef = {
   color: '#7fe0d0',
 }
 const warpFlashIn: EntityDef = { ...warpFlashOut, id: 'warp-in' }
-
 ability({
   id: 'warp',
   description: 'Blinks you to your stick, wherever it is, which picks it up and leaves your throw no more than a second to wait. With no stick on the ground, out or flying, but your throw on cooldown, it gives you the throw back instead.',
@@ -882,7 +825,6 @@ ability({
     ),
   ],
 })
-
 // ---------------------------------------------------------------------------- Ninja
 
 // Ninja's shadow stacks sit on the Ninja, and each is an enhanced auto ready. Only Shadow Step (and
@@ -894,7 +836,7 @@ export const SHADOW_STACK_TICKS = seconds(6)
 // How long a shadow stays out if the Ninja does not dash back to it, for Shadow Step and Shadow Return
 // alike (both leave the same shadow). Change this one number to retune it.
 export const SHADOW_LIFETIME_TICKS = seconds(4)
-export const SHADOW_AUTO_BONUS_DAMAGE = 60
+export const SHADOW_AUTO_BONUS = .5
 const shadowStacks = stacks(SHADOW_KEY, self())
 const spendShadowStack = popMarkers(SHADOW_KEY, self(), { count: 1 })
 
@@ -913,6 +855,7 @@ const SHADOW_STEP_RANGE = 300
 const SHADOW_STEP_SPEED = 1200
 const SHADOW_STEP_REFUND = 0.75
 const SHADOW_STEP_DAMAGE = 60
+const SHADOW_STEP_ATTACK_DAMAGE = 0.4
 const shadow = {
   id: 'shadow',
   speed: 0,
@@ -925,7 +868,7 @@ const shadow = {
 
 // What each enemy the dash passes through takes, as the Ninja's body reaches it.
 const shadowDashHit: readonly Effect[] = [
-  damage(scaled(SHADOW_STEP_DAMAGE, { attackDamage: 0.4 })),
+  damage(scaled(SHADOW_STEP_DAMAGE, { attackDamage: SHADOW_STEP_ATTACK_DAMAGE })),
   slow(0.4, seconds(.75)),
 ]
 // What the first enemy it passes through sets off, once for the dash. The dash back is not ready the
@@ -944,7 +887,6 @@ const shadowReturnDash: DashDef = {
   onConnect: shadowDashConnect,
   onMiss: [removeEntities('shadow'), startCooldown('shadowstep')],
 }
-
 ability({
   id: 'shadowstep',
   description: `Dashes to the target point. Each enemy you pass through is hurt and slowed as you pass, and the first also gives you a shadow stack (up to two) for an enhanced auto, gets most of this cooldown back and leaves a shadow where you cast it, which fades after ${SHADOW_LIFETIME_TICKS / GAME_TPS} seconds. With a shadow out, this key dashes back to it instead.`,
@@ -960,7 +902,6 @@ ability({
   recast: 'shadowreturn',
   apply: [dash(SHADOW_STEP_SPEED, SHADOW_STEP_RANGE, self(), { through: true, on: shadowStepDash })],
 })
-
 ability({
   id: 'shadowreturn',
   description: `Dashes back to your shadow from any distance. Passing through an enemy does the same as Shadow Step and leaves a new shadow where you cast this; passing through none loses the shadow and puts Shadow Step on its whole cooldown. The shadow fades after ${SHADOW_LIFETIME_TICKS / GAME_TPS} seconds, and then the key is Shadow Step again.`,
@@ -979,6 +920,9 @@ ability({
 
 // Ninja's Kunai: a line shot. It hurts and slows what it passes through, or, if the Ninja has a
 // shadow stack, which it spends, it hurts more and roots instead.
+// What the shuriken does to each enemy it passes through: the base damage, plus the Ninja's stats times these ratios (`scaled`).
+export const SHURIKEN_DAMAGE = 60
+export const SHURIKEN_SCALING = { attackDamage: 0.5 } satisfies Scaling
 const shuriken = {
   id: 'shuriken',
   speed: 750,
@@ -986,7 +930,7 @@ const shuriken = {
   lifetimeTicks: seconds(0.2),
   pierce: true,
   color: '#c9c9ff',
-  onHit: [damage(scaled(60, { attackDamage: 0.3 })), slow(0.4, seconds(1.5))],
+  onHit: [damage(scaled(SHURIKEN_DAMAGE, SHURIKEN_SCALING)), slow(0.4, seconds(1.5))],
 } satisfies EntityDef
 const shurikenEnhanced = {
   id: 'shuriken-enhanced',
@@ -995,9 +939,8 @@ const shurikenEnhanced = {
   lifetimeTicks: seconds(0.2),
   pierce: true,
   color: '#ff6bd6',
-  onHit: [damage(scaled(110, { attackDamage: 0.5 })), root(seconds(1))],
+  onHit: [damage(scaled(110, { attackDamage: 0.7 })), root(seconds(1))],
 } satisfies EntityDef
-
 ability({
   id: 'shuriken',
   description: 'Throws a shuriken in a line. It hurts and slows every enemy it passes through. With a shadow stack it spends one to hurt more and root instead.',
@@ -1015,7 +958,6 @@ ability({
     ),
   ],
 })
-
 ability({
   id: 'dodge',
   description: 'For a short time you move faster and dodge every auto attack aimed at you.',

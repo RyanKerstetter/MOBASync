@@ -20,13 +20,13 @@ const post = defineTurret(81, {
   radius: 30,
   attackRange: 400,
   visionRange: 450,
-  attackWindupTicks: 0,
+  attackWindup: 0,
 })
 const soft = defineTurret(82, {
   base: { maxHp: 100, attackDamage: 1, attackSpeed: 1 },
   radius: 30,
   attackRange: 400,
-  attackWindupTicks: 0,
+  attackWindup: 0,
 })
 const slayer = defineChampion({ ...brawler, id: 't-tr-slayer', base: { ...brawler.base, attackDamage: 5000 }, abilities: [] })
 
@@ -49,7 +49,7 @@ test('a turret has its tier, how far it sees and its reach, and is neither a pla
   const characters = game().getCharacters(0)
   const turret = characters.find((character) => character.id === 10)
   assert.equal(turret?.name, 'Tier 81 Turret', 'it is called by its tier, for the killfeed')
-  assert.deepEqual(turret?.turret, { tier: 81, visionRange: 450 })
+  assert.deepEqual(turret?.turret, { tier: 81, core: false, visionRange: 450 })
   assert.equal(turret?.player, undefined)
   assert.equal(turret?.monster, undefined)
   assert.equal(turret?.attackRange, 400)

@@ -7,6 +7,7 @@ import {
   DEFAULT_TURRET_REWARD,
   enemiesInRadius,
   flattenLayers,
+  GAME_ART_SCALE,
   GAME_MAX_PLAYERS,
   GAME_STARTING_GOLD,
   GAME_VISION_RANGE,
@@ -45,7 +46,7 @@ const gun = defineTurret(91, {
   base: { maxHp: 2000, attackDamage: 50, attackSpeed: 1 },
   radius: 30,
   attackRange: 400,
-  attackWindupTicks: 6,
+  attackWindup: 0.1,
   reward: { gold: 70, xp: 30, shards: 2 },
 })
 // Hits for little and hurts a hit by a half: a target that can be hit six times before it is down, and that does not kill a player.
@@ -53,14 +54,14 @@ const bag = defineTurret(93, {
   base: { maxHp: 300, attackDamage: 10, attackSpeed: 1, resistance: 100 },
   radius: 30,
   attackRange: 400,
-  attackWindupTicks: 0,
+  attackWindup: 0,
 })
 // Goes down in one hit.
 const brittle = defineTurret(94, {
   base: { maxHp: 100, attackDamage: 10, attackSpeed: 1 },
   radius: 30,
   attackRange: 400,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   reward: { gold: 70, xp: 30, shards: 2 },
 })
 // Fires a shot, which takes time to arrive.
@@ -68,7 +69,7 @@ const bolter = defineTurret(92, {
   base: { maxHp: 2000, attackDamage: 50, attackSpeed: 1 },
   radius: 30,
   attackRange: 400,
-  attackWindupTicks: 6,
+  attackWindup: 0.1,
   attackProjectile: { speed: 300, radius: 8, color: '#ffd166' },
 })
 
@@ -132,8 +133,8 @@ test('every tier in the table is a turret of its own: an immobile body that is n
     }
     assert.ok(body.attackRange > body.radius, `tier ${tier} reaches out of its own body`)
     assert.ok(turret.visionRange > 0, `tier ${tier} sees`)
-    // A tier has no name or description to set: it is called by its tier, which is only for the killfeed, and none is drawn over it.
-    assert.equal(turret.name, `Tier ${tier} Turret`)
+    // A tier has no name or description to set: it is called by its tier (or `Core`, for the core), which is only for the killfeed, and none is drawn over it.
+    assert.equal(turret.name, turret.core ? 'Core' : `Tier ${tier} Turret`)
     assert.equal(body.description, '')
     assert.ok(!('name' in TURRET_TIERS[tier]) && !('description' in TURRET_TIERS[tier]), `tier ${tier} has neither in its entry`)
     for (const amount of Object.values(turret.reward)) assert.ok(Number.isInteger(amount) && amount >= 0)
@@ -141,9 +142,11 @@ test('every tier in the table is a turret of its own: an immobile body that is n
     assert.equal(champions.has(turret.id), false)
     assert.equal(getCharacterChampion(turret.id), body)
   }
-  assert.deepEqual(turretTiers().filter((tier) => tiers.includes(tier)), [...tiers].sort((left, right) => left - right), 'lowest first')
+  // The tiers a map's turret points can name are these without the core's, lowest first.
+  const mapTiers = tiers.filter((tier) => !TURRET_TIERS[tier].core)
+  assert.deepEqual(turretTiers().filter((tier) => tiers.includes(tier)), [...mapTiers].sort((left, right) => left - right), 'lowest first, and not the core\'s')
   assert.throws(() => getTurret(1000), /Unknown turret tier 1000/)
-  assert.throws(() => getCharacterChampion('turret-1000'), /Unknown champion, monster, turret or core "turret-1000"/)
+  assert.throws(() => getCharacterChampion('turret-1000'), /Unknown champion, monster or turret "turret-1000"/)
 })
 
 test('a tier is tuned by its entry: its health, damage, speed, resistance, range, size, windup and reward are what it says', () => {
@@ -152,7 +155,7 @@ test('a tier is tuned by its entry: its health, damage, speed, resistance, range
     radius: 33,
     attackRange: 444,
     visionRange: 480,
-    attackWindupTicks: 9,
+    attackWindup: 0.075,
     attackProjectile: { speed: 500, radius: 7, color: '#123456' },
     reward: { gold: 11, xp: 22, shards: 3 },
   })
@@ -163,7 +166,8 @@ test('a tier is tuned by its entry: its health, damage, speed, resistance, range
     maxHp: 1234, attackDamage: 77, attackSpeed: 0.5, resistance: 40, haste: 0, arcane: 0, attackRange: 444, moveSpeed: 0,
   })
   assert.equal(tuned.champion.radius, 33)
-  assert.equal(tuned.champion.attackWindupTicks, 9)
+  assert.equal(tuned.champion.attackWindup, 0.075, 'its windup is a share of the attack')
+  assert.equal(tuned.champion.attackWindupTicks, 9, 'and is that share of an attack that takes 120 ticks')
   assert.deepEqual(tuned.champion.attackProjectile, { speed: 500, radius: 7, color: '#123456' })
   assert.equal(tuned.champion.attackCooldownTicks, 120, 'half an attack a second is one every two')
   assert.deepEqual({ ...tuned.reward }, { gold: 11, xp: 22, shards: 3 })
@@ -182,7 +186,7 @@ function tierOf(turret: Turret): TurretTierDef {
     base: { maxHp: champion.maxHp, attackDamage: champion.attackDamage, attackSpeed: champion.attackSpeed },
     radius: champion.radius,
     attackRange: champion.attackRange,
-    attackWindupTicks: champion.attackWindupTicks,
+    attackWindup: champion.attackWindup,
   }
 }
 
@@ -195,7 +199,9 @@ test('a tier that is not right says what is wrong', () => {
   for (const visionRange of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
     assert.throws(() => new Turret(98, { ...fine, visionRange }), /Turret tier 98 needs a vision range that is more than 0/, String(visionRange))
   }
-  assert.throws(() => new Turret(98, { ...fine, attackWindupTicks: 1.5 }), /needs a windup that is a whole number of ticks, 0 or more/)
+  for (const attackWindup of [1.5, -0.1, Number.NaN]) {
+    assert.throws(() => new Turret(98, { ...fine, attackWindup }), /needs a windup that is a share of the attack, from 0 to 1/, String(attackWindup))
+  }
   assert.throws(() => new Turret(98, { ...fine, reward: { gold: -1 } }), /needs a reward of gold that is a whole number, 0 or more/)
   assert.throws(() => new Turret(98, { ...fine, reward: { xp: 2.5 } }), /needs a reward of xp that is a whole number/)
   assert.throws(() => new Turret(98, { ...fine, base: { maxHp: -1, attackDamage: 1, attackSpeed: 1 } }), /Champion "turret-98" has base stats that are wrong: it needs a maxHp that is a number, 0 or more/)
@@ -317,7 +323,7 @@ test('a turret does not shoot a monster, a monster does not go after a turret, a
     moveSpeed: 200,
     radius: 20,
     attackRange: 60,
-    attackWindupTicks: 0,
+    attackWindup: 0,
     abilities: [],
     ai: { aggroRange: 700 },
   })
@@ -592,8 +598,8 @@ test('a turret point that is not right says which, and what is wrong', () => {
   assert.match(problemsOf([post(undefined, 1, 300, 300)]), /post-undefined needs a turret-tier of 1 or more \(the game has tiers 1, 2/)
   for (const tier of [0, -1, 1.5, 'big']) assert.match(problemsOf([post(tier, 1, 300, 300)]), /needs a turret-tier of 1 or more/, String(tier))
   assert.match(problemsOf([post(1, 1, -5, 300)]), /post-1 is outside the arena/)
-  // A turret needs its radius clear of the arena's edge, which is `radius / 3` map pixels: a pixel less has no room, and a pixel more has.
-  const pixels = getTurret(1).champion.radius / 3
+  // A turret needs its radius clear of the arena's edge, which is `radius / GAME_ART_SCALE` map pixels: a pixel less has no room, and a pixel more has.
+  const pixels = getTurret(1).champion.radius / GAME_ART_SCALE
   assert.match(problemsOf([post(1, 1, Math.floor(pixels) - 1, 300)]), /post-1 is too close to a wall or the arena's edge: a Tier 1 Turret would stand in it/)
   // And it says where it would fit: the nearest place with the whole turret inside the arena, in the map's own pixels.
   assert.match(

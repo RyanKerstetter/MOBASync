@@ -9,7 +9,7 @@ import type {
 import { GAME_BURN_PULSE_TICKS, GAME_TPS } from './constants.js'
 import { boxTouchesCircle, type BoxShape } from './geometry.js'
 import type { SimCharacter } from './simulator.js'
-import type { ChampionStats } from './stats.js'
+import type { BuffableStat, ChampionStats } from './stats.js'
 import type { Terrain } from './terrain.js'
 
 // 1. Capabilities: effects read through SimReader and write through SimWriter.
@@ -564,6 +564,31 @@ export const resist = (
   }
 }
 
+// Adds `amount` to one of the stats a unit has (the same points an item adds) while the status lasts: attack damage, attack speed (attacks a
+// second), resistance, haste (ability haste, not move speed; see `haste` above for that) or arcane. Buffs to the same stat from different
+// sources add together; one from the same source refreshes.
+export const statBuff = (
+  stat: BuffableStat,
+  amount: Amount,
+  durationTicks: number,
+  to: Selector = self(),
+): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
+  const value = Math.max(0, resolveAmount(amount, sim, src))
+  if (value === 0) return
+  for (const unitId of to(sim, src)) {
+    sim.addStatus(unitId, {
+      id: `${src.id}:stat:${stat}`,
+      kind: 'stat',
+      stat,
+      rootId: src.rootId,
+      ownerId: src.ownerId,
+      startTick: src.tick,
+      endTick: src.tick + durationTicks,
+      amount: value,
+    })
+  }
+}
+
 // A health cost: it ignores shields and resistance and can bring a unit down to 1, never to 0.
 export const loseHealth = (
   amount: Amount,
@@ -712,27 +737,6 @@ export const interrupt = (
       rootId: src.rootId,
       ownerId: src.ownerId,
       unitId,
-    })
-  }
-}
-
-// Attack speed bonus as a fraction (0.4 = 40% faster autos).
-export const attackSpeedBonus = (
-  fraction: Amount,
-  durationTicks: number,
-  to: Selector = self(),
-): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
-  const amount = Math.max(0, resolveAmount(fraction, sim, src))
-  if (amount === 0) return
-  for (const unitId of to(sim, src)) {
-    sim.addStatus(unitId, {
-      id: `${src.id}:attackspeed`,
-      kind: 'attackspeed',
-      rootId: src.rootId,
-      ownerId: src.ownerId,
-      startTick: src.tick,
-      endTick: src.tick + durationTicks,
-      amount,
     })
   }
 }

@@ -39,12 +39,12 @@ export function xpToReachLevel(level: number): number {
 }
 
 // What killing a player is worth to whoever did it, the same whoever is killed.
-export const PLAYER_KILL_REWARD: Readonly<Resources> = { gold: 300, xp: 60, shards: 0 }
+export const PLAYER_KILL_REWARD: Readonly<Resources> = { gold: 50, xp: 80, shards: 0 }
 // What killing a monster is worth when its entry in monsters.ts does not say (`MonsterDef.reward`).
 export const DEFAULT_MONSTER_REWARD: Readonly<Resources> = { gold: 25, xp: 25, shards: 0 }
 // What destroying a turret is worth when its tier in turrets.ts does not say (`TurretTierDef.reward`).
 export const DEFAULT_TURRET_REWARD: Readonly<Resources> = { gold: 100, xp: 50, shards: 0 }
-// What breaking a core is worth when its entry in cores.ts does not say (`CoreDef.reward`): nothing, as it is the end of the game for a team.
+// What breaking a core is worth when its entry in turrets.ts does not say (`TurretTierDef.reward`, of a tier that is a `core`): nothing, as it is the end of the game for a team.
 export const DEFAULT_CORE_REWARD: Readonly<Resources> = { gold: 0, xp: 0, shards: 0 }
 
 // The level this much experience is: 1 to start with, and one more each time it covers what the level it is at takes (`xpToNextLevel`), up to

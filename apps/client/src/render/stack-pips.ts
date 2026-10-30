@@ -1,3 +1,5 @@
+import { TURRET_RAMP_KEY } from '../../../../packages/shared/src/index.ts'
+
 export type StackPip = {
   // Where the pip's centre is, relative to the champion's centre.
   x: number
@@ -23,6 +25,8 @@ const MARKS: Array<[key: string, color: string]> = [
   ['gale', '#bfe6ff'],
   ['sighted', '#ff5a5f'],
   ['trick', '#3fc8c0'],
+  // The turrets' ramp: one for each shot a turret or a core has landed on it without a pause, in a colour no other mark has.
+  [TURRET_RAMP_KEY, '#ffe14d'],
 ]
 
 const PIP_SPACING = 9

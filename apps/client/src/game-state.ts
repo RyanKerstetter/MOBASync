@@ -1,4 +1,5 @@
 import type { ActionView } from './animation.ts'
+import type { KillRewardView } from './render/kill-reward.ts'
 import { hillFraction, rankScores, type CoreView, type FlagView, type ModeView } from './ui/mode-hud.ts'
 import {
   leaderboardRows,
@@ -34,6 +35,7 @@ import {
   Simulator,
   withinCastRange,
   withItems,
+  withStatBuffs,
   xpProgress,
   type AbilityDef,
   type AbilityIndicator,
@@ -61,6 +63,7 @@ import {
   type SimCharacter,
   type ObjectiveUnit,
   type SellOrder,
+  type ShopZone,
   type SimEntity,
   type Status,
   type Terrain,
@@ -94,10 +97,11 @@ export type RenderedMonster = {
   targetId?: number
 }
 
-// What a turret is, for drawing it and for what its team sees: its tier, and how far its team sees from it. How far it reaches is
-// the character's `attackRange`, which the ring round it is drawn from.
+// What a turret is, for drawing it and for what its team sees: its tier, whether it is the core of a base (the last turret, drawn as the heart of it), and how
+// far its team sees from it. How far it reaches is the character's `attackRange`, which the ring round it is drawn from.
 export type RenderedTurret = {
   tier: number
+  core: boolean
   visionRange: number
 }
 
@@ -108,14 +112,15 @@ export type RenderedCharacter =
     name?: string
     // Present for a monster.
     monster?: RenderedMonster
-    // Present for a turret.
+    // Present for a turret, and for the core of a base, which is one.
     turret?: RenderedTurret
-    // Present for a core.
-    core?: true
     // A structure (a turret or a core) that is protected: it takes no damage until what guards it is down (see structures.ts), so it is
     // drawn with a barrier and cannot be picked as an enemy to attack.
     invulnerable?: true
     champion: Champion
+    // A player's level, in a game that has levels (`hasEconomy`): the page shows it next to the player. Left out for anything that is not a player, and
+    // for every player in a game with no levels.
+    level?: number
     // Who it is on: the same team is teammates, and it decides the colour it is drawn in.
     team: number
     health?: GameHealthStats
@@ -179,9 +184,9 @@ export type CastPreview = {
   outOfRange?: boolean
 }
 
-// What a character is called: a player's name, or a monster's, a turret's or a core's.
+// What a character is called: a player's name, or a monster's or a turret's (the core of a base is one: `Core`).
 function characterName(character: SimCharacter): string {
-  return character.player?.name ?? character.monster?.name ?? character.turret?.name ?? character.core?.name ?? `Player ${character.id}`
+  return character.player?.name ?? character.monster?.name ?? character.turret?.name ?? `Player ${character.id}`
 }
 
 function hasStatus(statuses: readonly Status[], kind: Status['kind']): boolean {
@@ -210,6 +215,9 @@ export class ClientGameState {
   readonly simulator = new Simulator()
   private killFeed: KillFeedEntry[] = []
   private readonly announcedDeaths = new Set<string>()
+  // The last tick `getKillRewards` looked at, and the tick of the last death of each victim it told of, so a kill is shown once.
+  private lastRewardTick = -1
+  private readonly rewardedAt = new Map<number, number>()
   private localCharacterId: number | undefined
   // Whether an enemy is seen, so can be picked: all of them are, until the page says (`setSight`).
   private canSee: (character: RenderedCharacter) => boolean = () => true
@@ -563,7 +571,7 @@ export class ClientGameState {
           now,
         ),
         // The whole cooldown is the ability's shortened by the champion's haste, which is what the simulator starts it at.
-        cooldownTicks: hastedCooldownTicks(def.cooldownTicks, withItems(character.champion.statsAt(state?.getLevel() ?? 1), state?.getItems()).haste),
+        cooldownTicks: hastedCooldownTicks(def.cooldownTicks, withStatBuffs(withItems(character.champion.statsAt(state?.getLevel() ?? 1), state?.getItems()), state?.getStatuses()).haste),
       }]
     })
   }
@@ -662,6 +670,10 @@ export class ClientGameState {
     return this.getSnapshotAtEstimatedTick(now).get(this.localCharacterId)?.getAttackTarget()
   }
 
+  // How far the controlled champion is from being able to attack again, from 0 to 1. A swing spends the attack as soon as it starts, so the bar
+  // is empty for its whole windup, and it fills from the moment the hit lands (or the shot leaves) until the next swing can start, which is
+  // `nextAttackTick`, set as the swing lands. What it fills over is the wait the frame says it set, so a change of attack speed during
+  // the wait does not move the bar.
   getAttackCooldownProgress(now = performance.now()): number {
     const localCharacterId = this.localCharacterId
     const champion = localCharacterId === undefined
@@ -669,12 +681,21 @@ export class ClientGameState {
       : this.simulator.characters.get(localCharacterId)?.champion
     if (localCharacterId === undefined || !champion) return 1
     const snapshot = this.getSnapshotAtEstimatedTick(now)
-    const cooldown = snapshot.get(localCharacterId)?.getCooldown()
+    const local = snapshot.get(localCharacterId)
+    if (local?.getAction()?.kind === 'attack') return 0
+    const cooldown = local?.getCooldown()
     if (!cooldown) return 1
     const ticksRemaining = this.fractionalTicksRemaining(snapshot.tick, cooldown.ticksRemaining, now)
-    const local = snapshot.get(localCharacterId)
-    const total = champion.attackCooldownTicksWith(local?.getStatuses() ?? [], local?.getLevel() ?? 1, itemTotals(local?.getItems()).attackSpeed ?? 0)
-    return Math.max(0, Math.min(1, 1 - ticksRemaining / total))
+    const launchTick = local?.getAttackLaunchTick()
+    let total = launchTick === undefined ? 0 : snapshot.tick + cooldown.ticksRemaining - launchTick
+    if (total <= 0) {
+      // No swing has landed to say: the attack as it is now, less its windup.
+      const statuses = local?.getStatuses() ?? []
+      const level = local?.getLevel() ?? 1
+      const itemSpeed = itemTotals(local?.getItems()).attackSpeed ?? 0
+      total = champion.attackCooldownTicksWith(statuses, level, itemSpeed) - champion.attackWindupTicksWith(statuses, level, itemSpeed)
+    }
+    return Math.max(0, Math.min(1, 1 - ticksRemaining / Math.max(1, total)))
   }
 
   applyOrder(order: GameBroadcastOrder): boolean {
@@ -716,7 +737,7 @@ export class ClientGameState {
     const character = this.localCharacterId === undefined ? undefined : this.simulator.characters.get(this.localCharacterId)
     if (!character) return undefined
     const state = this.getSnapshotAtEstimatedTick(now).get(character.id)
-    return withItems(character.champion.statsAt(state?.getLevel() ?? 1), state?.getItems())
+    return withStatBuffs(withItems(character.champion.statsAt(state?.getLevel() ?? 1), state?.getItems()), state?.getStatuses())
   }
 
   // What the controlled champion has to spend and what it carries, as of the frame being drawn: what the shop and the item slots show, and
@@ -796,7 +817,7 @@ export class ClientGameState {
     if (setup.kind === 'core' && objective?.kind === 'core') {
       const shielded = this.simulator.shieldedIn(frame)
       const coreViews = setup.teams.map((team): CoreView => {
-        const core = [...this.simulator.characters.values()].find((character) => character.core && character.team === team)
+        const core = [...this.simulator.characters.values()].find((character) => character.isCore && character.team === team)
         const state = core ? frame.get(core.id) : undefined
         const status = objective.eliminated.includes(team)
           ? 'eliminated'
@@ -841,6 +862,52 @@ export class ClientGameState {
   getKillFeed(now = performance.now()): KillFeedEntry[] {
     this.killFeed = visibleKillFeed(this.killFeed, now)
     return this.killFeed
+  }
+
+  // The kills the controlled champion has made since this was last asked, each with what it paid (the gold and experience the simulation put in
+  // the champion's frame), for the effect over where the victim fell. A kill is told as soon as the frame it happened on is the one drawn, so
+  // like the champion it is as predicted as what is on screen (the killfeed waits until a kill cannot be undone), and it is told once, however
+  // many times its tick is worked out again. A kill that pays nothing (no economy, a core) is not told.
+  getKillRewards(now = performance.now()): KillRewardView[] {
+    const localId = this.localCharacterId
+    if (localId === undefined) return []
+    const frame = this.getSnapshotAtEstimatedTick(now)
+    // Every tick since the last look, as far back as the simulator keeps them: a page drawn a little slowly can pass more than one.
+    const first = Math.max(this.lastRewardTick + 1, frame.tick - (GAME_SNAPSHOT_HISTORY_TICKS - 2))
+    this.lastRewardTick = frame.tick
+    const rewards: KillRewardView[] = []
+    for (let tick = first; tick <= frame.tick; tick += 1) {
+      let at: GameTickSnapshot
+      try {
+        at = tick === frame.tick ? frame : this.simulator.at(tick)
+      } catch {
+        continue
+      }
+      for (const death of at.deaths) {
+        if (death.killerId !== localId) continue
+        // A victim cannot die twice in the frames the simulator keeps (it takes longer than that to come back), so a death of the same victim as
+        // near as that to one already told is that kill again, moved to another tick by a late order, and is not told twice.
+        const told = this.rewardedAt.get(death.victimId)
+        if (told !== undefined && Math.abs(death.tick - told) <= GAME_SNAPSHOT_HISTORY_TICKS) continue
+        const paid = this.simulator.paidFor(death, at)
+        const position = at.get(death.victimId)?.getPosition()
+        if (!paid || !position || (paid.gold <= 0 && paid.xp <= 0)) continue
+        this.rewardedAt.set(death.victimId, death.tick)
+        rewards.push({
+          id: `${death.tick}:${death.victimId}`,
+          position,
+          radius: this.simulator.characters.get(death.victimId)?.champion.radius ?? 0,
+          gold: paid.gold,
+          xp: paid.xp,
+        })
+      }
+    }
+    return rewards
+  }
+
+  // Where each team can shop, which is where its champions are healed (see shops.ts): the page tints them. None for a game with no shops.
+  getShopZones(): readonly ShopZone[] {
+    return this.simulator.shopZones
   }
 
   private recordConfirmedDeath(death: DeathRecord): void {
@@ -889,6 +956,8 @@ export class ClientGameState {
     const activeCharacterIds = new Set<number>()
     const shielded = this.simulator.shieldedIn(snapshot)
     for (const character of this.simulator.characters.values()) {
+      // A monster that has not appeared yet is not in the game: it is not drawn, aimed at or picked, and it has no frame to draw from.
+      if (snapshot.tick < character.spawnTick) continue
       activeCharacterIds.add(character.id)
       const state = snapshot.get(character.id)
       const health = state?.getHealthState()
@@ -910,11 +979,11 @@ export class ClientGameState {
             },
           }
           : {}),
-        ...(character.turret ? { turret: { tier: character.turret.tier, visionRange: character.turret.visionRange } } : {}),
-        ...(character.core ? { core: true as const } : {}),
+        ...(character.turret ? { turret: { tier: character.turret.tier, core: character.turret.core, visionRange: character.turret.visionRange } } : {}),
         ...(health?.deathTick !== undefined ? { deadForSeconds: Math.max(0, (this.estimateTick(now) - health.deathTick) / GAME_TPS) } : {}),
         ...(shielded.has(character.id) ? { invulnerable: true as const } : {}),
         champion: character.champion,
+        ...(character.player && this.simulator.hasEconomy ? { level: state?.getLevel() ?? 1 } : {}),
         team: character.team,
         ...(health ? { health } : {}),
         totalShield: state?.getShield() ?? 0,

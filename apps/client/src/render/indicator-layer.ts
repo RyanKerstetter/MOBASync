@@ -11,6 +11,8 @@ export type IndicatorInput = {
   // Where the controlled champion is drawn, and how far its attack reaches. Absent while it is dead
   // or not in the game, when there is no ring to draw.
   local?: { position: Vector2; attackRange: number }
+  // Whether to draw the ring round the controlled champion that shows how far its attacks reach (the graphics menu). It is drawn unless this says not.
+  showAttackRange?: boolean
   // What the ability being aimed would do if its key were let go now.
   castPreview?: CastPreview
   attackMarkers: readonly AttackMarker[]
@@ -32,8 +34,9 @@ export class IndicatorLayer {
   }
 
   update(input: IndicatorInput): void {
-    this.attackRange.visible = input.local !== undefined
-    if (input.local) {
+    const ringShown = input.local !== undefined && input.showAttackRange !== false
+    this.attackRange.visible = ringShown
+    if (input.local && ringShown) {
       this.attackRange.clear()
         .circle(0, 0, input.local.attackRange)
         .stroke({ color: '#79dfb1', width: 2 })

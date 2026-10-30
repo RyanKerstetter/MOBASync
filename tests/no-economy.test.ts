@@ -5,7 +5,9 @@ import {
   GAME_MODES,
   GAME_STARTING_GOLD,
   GameSnapshotSchema,
+  levelForXp,
   modeHasEconomy,
+  PLAYER_KILL_REWARD,
   Simulator,
   type ModeSetup,
 } from '../packages/shared/src/index.ts'
@@ -29,7 +31,7 @@ const bounty = defineMonster({
   moveSpeed: 0,
   radius: 20,
   attackRange: 10,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
   ai: { aggroRange: 0, deaggroRange: 300 },
   reward: { gold: 700, xp: 700, shards: 5 },
@@ -42,7 +44,7 @@ const champion = defineChampion({
   moveSpeed: 100,
   radius: 20,
   attackRange: 100,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
 })
 
@@ -91,7 +93,7 @@ for (const [name, setup] of NO_ECONOMY) {
     const simulator = game(setup)
     simulator.advanceTo(5)
     const state = simulator.at(5).get(1)
-    assert.deepEqual([state?.getGold(), state?.getXp(), state?.getLevel(), state?.getHealthState()?.maxHp], [0, 0, 1, 1000])
+    assert.deepEqual([state?.getGold(), state?.getXp(), state?.getLevel(), state?.getHealthState()?.maxHp], [0, 0, 1, champion.maxHp])
     assert.equal('gold' in (simulator.at(5).toData().characters.find((each) => each.characterId === 1) ?? {}), false, 'the frame has no gold in it')
   })
 
@@ -131,9 +133,13 @@ test('core destruction pays as before, so the same kills there do give experienc
   const simulator = game(ECONOMY_MODE)
   slay(simulator)
   assert.equal(simulator.characters.get(1001)?.kills, 1)
-  // 60 experience and 300 gold for the one who killed the player, then a monster's 700 and 700 and 5 shards for the one who killed it.
-  assert.deepEqual(held(simulator, 1001), { xp: 60, gold: GAME_STARTING_GOLD + 300, level: 1, shards: 0 })
-  assert.deepEqual(held(simulator, 1002), { xp: 700, gold: GAME_STARTING_GOLD + 700, level: 5, shards: 5 })
+  // What a kill of a player pays (`PLAYER_KILL_REWARD`) to the one who killed the player, and what the monster's entry says (the test's own, above) to the one
+  // who killed it, each on top of the gold a player starts with, and each at the level its experience makes.
+  const paid = (reward: Readonly<{ gold: number; xp: number; shards: number }>) =>
+    ({ xp: reward.xp, gold: GAME_STARTING_GOLD + reward.gold, level: levelForXp(reward.xp), shards: reward.shards })
+  assert.deepEqual(held(simulator, 1001), paid(PLAYER_KILL_REWARD))
+  assert.deepEqual(held(simulator, 1002), paid(bounty.reward))
+  assert.ok(held(simulator, 1002).level > 1, 'and the monster paid enough experience for a level or more, so the level comes from the experience')
   assert.equal(held(simulator, 1)?.level, 1, 'the one who was killed was not paid')
   assert.equal(economyClient().hasEconomy, true)
 })

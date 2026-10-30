@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   aimPoint,
   blink,
+  GAME_RESPAWN_TICKS,
   GameSnapshotSchema,
   Simulator,
   Terrain,
@@ -42,7 +43,7 @@ const hopper = (() => {
     moveSpeed: 220,
     radius: 18,
     attackRange: 100,
-    attackWindupTicks: 0,
+    attackWindup: 0,
     abilities: ['t-hop'],
   })
 })()
@@ -243,12 +244,14 @@ test('a champion that dies against a wall comes back where it started, and walks
   simulator.addPlayer(1, 'player-1', 'One', start, brawler)
   assert.deepEqual(simulator.at(0).get(1)?.getPosition(), start, 'touching the wall is a place to stand')
   killAt(simulator, 1, 10)
-  simulator.addOrder(1, moveTo(1, 200, { x: 850, y: 300 }))
-  assert.deepEqual(simulator.at(190).get(1)?.getPosition(), start)
-  for (let tick = 190; tick <= 400; tick += 1) {
+  // It is back a respawn time after it was killed, and walks from there.
+  const back = 10 + GAME_RESPAWN_TICKS
+  simulator.addOrder(1, moveTo(1, back + 10, { x: 850, y: 300 }))
+  assert.deepEqual(simulator.at(back).get(1)?.getPosition(), start)
+  for (let tick = back; tick <= back + 210; tick += 1) {
     assert.ok(!touchesWall(simulator.at(tick).get(1)?.getPosition() ?? PILLAR, brawler.radius), `tick ${tick}`)
   }
-  assert.deepEqual(simulator.at(400).get(1)?.getPosition(), { x: 850, y: 300 })
+  assert.deepEqual(simulator.at(back + 210).get(1)?.getPosition(), { x: 850, y: 300 })
 })
 
 test('a late order recomputes the same frames as one that was there in time', () => {

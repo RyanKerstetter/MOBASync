@@ -6,11 +6,12 @@ import {
   createShadowcastVision,
   GAME_MONSTER_TEAM,
   GAME_VISION_RANGE,
+  getCore,
   type SightViewer,
   type VisionMask,
   type VisionSystem,
 } from '../packages/shared/src/index.ts'
-import { brawler, defineMonster } from './fixtures.ts'
+import { brawler, defineMonster, economyClient } from './fixtures.ts'
 
 // What the page does with what a vision system says: who it looks from, what it leaves out of the frame, what a click can
 // pick, and how the darkness is made from the mask. The system in these is a stand-in that sees a square, so they are about
@@ -40,6 +41,7 @@ const entity = (ownerId: number, x: number, y: number, radius = 10): RenderedEnt
   ({ ownerId, position: { x, y }, radius }) as unknown as RenderedEntity
 
 const ids = (list: ReadonlyArray<{ id: number }>): number[] => list.map((item) => item.id)
+const distance = (from: { x: number; y: number }, to: { x: number; y: number }): number => Math.hypot(to.x - from.x, to.y - from.y)
 
 // ---------------------------------------------------------------------------- what is shown
 
@@ -104,7 +106,6 @@ test('it looks from every living champion of the local team, at the game\'s rang
     { position: { x: 100, y: 100 }, range: GAME_VISION_RANGE },
     { position: { x: 300, y: 120 }, range: GAME_VISION_RANGE },
   ]], 'two of them: not the dead one, not an enemy, not a monster')
-  assert.equal(GAME_VISION_RANGE, 500)
 })
 
 // ---------------------------------------------------------------------------- when everything is shown
@@ -173,16 +174,24 @@ const grunt = defineMonster({
   moveSpeed: 200,
   radius: 20,
   attackRange: 60,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
   ai: { aggroRange: 300 },
 })
 
+// A scene laid out in the game's own vision range (`GAME_VISION_RANGE`, which is `RANGE` here), so it means the same whatever the range is set to: Ann
+// at one corner of it, the monster out of her reach (a little over a range and a half away) and Bob further still, and Cat, her teammate, who comes to
+// stand near the monster and so sees it, and is just more than a range from Bob.
+const RANGE = GAME_VISION_RANGE
+const ANN_AT = { x: 100, y: 100 }
+const MONSTER_AT = { x: ANN_AT.x + RANGE, y: ANN_AT.y + RANGE }
+const BOB_AT = { x: ANN_AT.x + 1.6 * RANGE, y: ANN_AT.y + 1.6 * RANGE }
+const CAT_AT = { x: ANN_AT.x + 0.8 * RANGE, y: ANN_AT.y + 0.92 * RANGE }
 function game(): ClientGameState {
   const state = new ClientGameState()
-  state.simulator.addMonster(10, grunt, { x: 600, y: 600 })
-  state.simulator.addPlayer(1, 'p1', 'Ann', { x: 100, y: 100 }, brawler, 1)
-  state.simulator.addPlayer(2, 'p2', 'Bob', { x: 900, y: 900 }, brawler, 2)
+  state.simulator.addMonster(10, grunt, MONSTER_AT)
+  state.simulator.addPlayer(1, 'p1', 'Ann', ANN_AT, brawler, 1)
+  state.simulator.addPlayer(2, 'p2', 'Bob', BOB_AT, brawler, 2)
   state.setLocalCharacterId(1)
   state.simulator.advanceTo(3)
   return state
@@ -195,25 +204,27 @@ test('what is not seen cannot be clicked on, aimed at, or picked by Space, and w
   const look = (): void => vision.update(state.getCharacters(0), state.getLocalTeam())
 
   look()
-  // Ann is at (100, 100): the monster 707 away and Bob 1131 away are both out of her 500.
+  // The monster and Bob are both out of Ann's range.
+  assert.ok(distance(ANN_AT, MONSTER_AT) > RANGE && distance(ANN_AT, BOB_AT) > RANGE)
   assert.deepEqual(ids(vision.visibleCharacters(state.getCharacters(0))), [1])
-  assert.equal(state.getEnemyNear({ x: 600, y: 600 }, 0), undefined, 'the monster is under the pointer, in the dark')
-  assert.equal(state.getEnemyNear({ x: 900, y: 900 }, 0), undefined)
-  assert.equal(state.getClosestEnemy({ x: 600, y: 600 }, 0), undefined, 'and Space has no one to pick')
+  assert.equal(state.getEnemyNear(MONSTER_AT, 0), undefined, 'the monster is under the pointer, in the dark')
+  assert.equal(state.getEnemyNear(BOB_AT, 0), undefined)
+  assert.equal(state.getClosestEnemy(MONSTER_AT, 0), undefined, 'and Space has no one to pick')
 
   // A teammate close to the monster: the team sees it, so Ann can.
-  state.simulator.addPlayer(3, 'p3', 'Cat', { x: 500, y: 560 }, brawler, 1)
+  state.simulator.addPlayer(3, 'p3', 'Cat', CAT_AT, brawler, 1)
+  assert.ok(distance(CAT_AT, MONSTER_AT) < RANGE && distance(CAT_AT, BOB_AT) > RANGE, 'Cat is within a range of the monster and beyond one of Bob')
   state.simulator.advanceTo(4)
   look()
   assert.deepEqual(ids(vision.visibleCharacters(state.getCharacters(0))).sort(), [1, 10, 3].sort(), 'vision is the team\'s: Cat sees the monster, Bob is still in the dark')
-  assert.equal(state.getEnemyNear({ x: 600, y: 600 }, 0)?.id, 10, 'so it can be clicked')
-  assert.equal(state.getClosestEnemy({ x: 880, y: 900 }, 0)?.id, 10, 'and it is the one Space finds, as Bob is not seen, though the mouse is on him')
+  assert.equal(state.getEnemyNear(MONSTER_AT, 0)?.id, 10, 'so it can be clicked')
+  assert.equal(state.getClosestEnemy(BOB_AT, 0)?.id, 10, 'and it is the one Space finds, as Bob is not seen, though the mouse is on him')
 })
 
 test('with no sight asked for, as before, every enemy can be picked', () => {
   const state = game()
-  assert.equal(state.getEnemyNear({ x: 600, y: 600 }, 0)?.id, 10)
-  assert.equal(state.getEnemyNear({ x: 900, y: 900 }, 0)?.id, 2)
+  assert.equal(state.getEnemyNear(MONSTER_AT, 0)?.id, 10)
+  assert.equal(state.getEnemyNear(BOB_AT, 0)?.id, 2)
   assert.equal(state.getTerrain(), state.simulator.terrain, 'and the page is given the ground the game is played on')
 })
 
@@ -270,4 +281,23 @@ test('a team whose champions are all dead sees the whole game, whatever turrets 
   vision.update([dead, ownTurret, enemy], 1)
   assert.equal(vision.mask, undefined, 'no darkness')
   assert.deepEqual(ids(vision.visibleCharacters([dead, ownTurret, enemy])), ids([dead, ownTurret, enemy]))
+})
+
+// ---------------------------------------------------------------------------- the core
+
+// A core is a turret (the one of the core tier), so what is said of turrets above is said of it too: it is the team's and always drawn, it is a place the team looks
+// from while it stands, and a team with every champion dead sees the whole game whatever it has standing. This is the one the game plays with.
+
+test('the core the game plays with tells the page how far it sees, and the page looks from it that far', () => {
+  const state = economyClient()
+  state.simulator.addPlayer(1, 'p1', 'Ann', { x: 100, y: 100 }, brawler, 1)
+  state.simulator.addTurret(10, getCore(), { x: 1000, y: 700 }, 1)
+  state.setLocalCharacterId(1)
+  state.simulator.advanceTo(3)
+  const characters = state.getCharacters(0)
+  const body = characters.find((candidate) => candidate.id === 10)
+  assert.deepEqual(body?.turret, { tier: getCore().tier, core: true, visionRange: getCore().visionRange }, 'a turret that is the core, with its own range and not a champion\'s')
+  const looks: SightViewer[][] = []
+  new TeamVision(squareSystem(looks)).update(characters, 1)
+  assert.deepEqual(looks[0].find((viewer) => viewer.position.x === 1000), { position: { x: 1000, y: 700 }, range: getCore().visionRange })
 })

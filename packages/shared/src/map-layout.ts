@@ -3,8 +3,7 @@ import type { HillArea, Vector2 } from './index.js'
 import { monsters } from './monsters.js'
 import type { SpawnSlots } from './spawns.js'
 import { Terrain, type Rect } from './terrain.js'
-import { CORE_ID, cores } from './cores.js'
-import { turretId, turrets, turretTiers } from './turrets.js'
+import { getCore, turretId, turrets, turretTiers } from './turrets.js'
 import { flattenLayers, getProperty, mapWorldScale, type TiledMap, type TiledObject } from './tiled.js'
 
 // What the game takes from a map made in Tiled besides how it looks, found by the class of the
@@ -41,7 +40,7 @@ import { flattenLayers, getProperty, mapWorldScale, type TiledMap, type TiledObj
 //   for a tier the game does not have (yet) is left out, and said so in `warnings`, like a monster's.
 // - `core` points, each with the `team-name` of the slot of spawn points whose base it is the heart of, like a flag: slot 1 is where the
 //   biggest team starts, and so on. Core destruction is for two teams, so it uses the cores of slots 1 and 2, and a map that has both can
-//   be played in it (see modes.ts). A core is solid and needs room for its size (cores.ts) clear of the walls and the arena's edge, and a
+//   be played in it (see modes.ts). A core is a turret (see turrets.ts), so it is solid and needs room for its size clear of the walls and the arena's edge, and a
 //   way to it from the spawn points. The core is in a game of that mode only: in the others its point is not used.
 // - `shop` rectangles, each with the `team-name` of the slot of spawn points whose team shops there: a champion can buy and sell items only while
 //   it stands in a shop of its team (see shops.ts). A map with no shops can be shopped in from anywhere; a map with any needs one for every slot that
@@ -290,7 +289,9 @@ export function readMapLayout(map: TiledMap): MapLayout {
     const label = object.name || `turret object ${object.id}`
     const slot = getProperty(object.properties, SLOT_PROPERTY)
     const tier = getProperty(object.properties, TURRET_TIER_PROPERTY)
-    const body = isWhole(tier, 1, Infinity) ? turrets.get(turretId(tier)) : undefined
+    // The core is a turret too, but a map puts it down with a `core` point: a `turret` point is for the tiers `turretTiers` lists.
+    const found = isWhole(tier, 1, Infinity) ? turrets.get(turretId(tier)) : undefined
+    const body = found?.core ? undefined : found
     if (!object.point) {
       problems.push(`${label} is not a point (make it with Tiled's Insert Point tool).`)
     } else if (!isWhole(slot, 1, GAME_MAX_PLAYERS)) {
@@ -313,7 +314,7 @@ export function readMapLayout(map: TiledMap): MapLayout {
   }
 
   const corePoints = new Map<number, Spawn>()
-  const coreBody = cores.get(CORE_ID)
+  const coreBody = getCore()
   for (const { object, x, y } of ofClass(CORE_CLASS)) {
     const label = object.name || `core object ${object.id}`
     const slot = getProperty(object.properties, SLOT_PROPERTY)
@@ -327,11 +328,11 @@ export function readMapLayout(map: TiledMap): MapLayout {
       const at = inWorld(x, y)
       if (at.x < 0 || at.y < 0 || at.x > width || at.y > height) {
         problems.push(`${label} is outside the arena.`)
-      } else if (coreBody && !roomFor(terrain, at, coreBody.champion.radius)) {
+      } else if (!roomFor(terrain, at, coreBody.champion.radius)) {
         problems.push(`${label} is too close to a wall or the arena's edge: the core would stand in it.${nearestFit(at, coreBody.champion.radius)}`)
       } else {
         corePoints.set(slot, { at, label })
-        if (coreBody) solids.push({ label, at, radius: coreBody.champion.radius })
+        solids.push({ label, at, radius: coreBody.champion.radius })
       }
     }
   }

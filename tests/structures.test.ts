@@ -16,29 +16,33 @@ import {
   shieldedStructures,
   Simulator,
   slow,
+  statMultiplier,
+  STRUCTURE_ARCANE_DAMAGE,
   stun,
   type StructureRef,
   type Vector2,
 } from '../packages/shared/src/index.ts'
-import { brawler, defineAbility, defineChampion, defineCore, defineMonster, defineTurret, economySimulator } from './fixtures.ts'
+import { brawler, defineAbility, defineChampion, defineMonster, defineTurret, economySimulator } from './fixtures.ts'
 
-// What turrets and cores have in common (see structures.ts): they are hurt by attacks only and take no status, and while what guards them
-// is standing they take no damage at all. The tiers and cores here are the tests' own (numbers the game does not use), so retuning the real
+// What turrets and cores have in common (see structures.ts), which is everything, as a core is the highest tier of turret: they are hurt by attacks only and take no
+// status, and while what guards them is standing they take no damage at all. The tiers and cores here are the tests' own (numbers the game does not use), so retuning the real
 // ones changes nothing.
 
-const post = { base: { maxHp: 400, attackDamage: 10, attackSpeed: 1 }, radius: 30, attackRange: 300, attackWindupTicks: 0 }
-const front = defineTurret(61, post)
-const back = defineTurret(62, post)
-const last = defineTurret(63, post)
+const post = { base: { maxHp: 400, attackDamage: 10, attackSpeed: 1 }, radius: 30, attackRange: 300, attackWindup: 0 }
+const front = defineTurret(610, post)
+const back = defineTurret(620, post)
+const last = defineTurret(630, post)
 // Goes down in one hit (100 health), and a sturdy one behind it that a splash can be seen to hurt or not.
 const weak = defineTurret(64, { ...post, base: { maxHp: 100, attackDamage: 1, attackSpeed: 1 }, attackRange: 200 })
 const sturdy = defineTurret(65, { ...post, base: { maxHp: 400, attackDamage: 1, attackSpeed: 1 }, attackRange: 200 })
 const plain = defineTurret(66, { ...post, base: { maxHp: 1000, attackDamage: 1, attackSpeed: 1 }, attackRange: 400 })
 
-// A core that is guarded by the turrets up to tier 61 (the front one), one by those up to tier 62 (both), and one by none.
-const coreAfterFront = defineCore('t-ss-core-front', { maxHp: 300, radius: 40, guardedByTier: 61 })
-const coreAfterBoth = defineCore('t-ss-core-both', { maxHp: 300, radius: 40, guardedByTier: 62 })
-const coreOpen = defineCore('t-ss-core-open', { maxHp: 300, radius: 40, guardedByTier: 0, reward: { gold: 40, xp: 30, shards: 1 } })
+// A core is protected by the turrets of its team of lower tiers than its own: one is above the front turret and below the back one (so it waits for the front one
+// alone), one is above them both, and one is below them both, and so waits for nothing. They reach no one (a range of 1), so there is only the breaking of them.
+const coreBody = { base: { maxHp: 300, attackDamage: 1, attackSpeed: 1 }, radius: 40, attackRange: 1, attackWindup: 0, core: true } as const
+const coreAfterFront = defineTurret(615, coreBody)
+const coreAfterBoth = defineTurret(625, coreBody)
+const coreOpen = defineTurret(605, { ...coreBody, reward: { gold: 40, xp: 30, shards: 1 } })
 
 const slayer = defineChampion({ ...brawler, id: 't-ss-slayer', base: { ...brawler.base, attackDamage: 5000 }, abilities: [] })
 // An auto that splashes everyone of another team for 150 as well, so what a hit does to a structure that is not its target can be seen.
@@ -70,8 +74,8 @@ const dead = (simulator: Simulator, tick: number, id: number): boolean => simula
 
 // ---------------------------------------------------------------------------- who is protected
 
-const turret = (id: number, team: number, turretTier: number): StructureRef => ({ id, team, turretTier })
-const core = (id: number, team: number, guardedByTier: number): StructureRef => ({ id, team, guardedByTier })
+const turret = (id: number, team: number, tier: number): StructureRef => ({ id, team, tier, core: false })
+const core = (id: number, team: number, tier: number): StructureRef => ({ id, team, tier, core: true })
 const standingExcept = (...down: number[]) => (id: number): boolean => !down.includes(id)
 const sorted = (set: ReadonlySet<number>): number[] => [...set].sort((left, right) => left - right)
 
@@ -101,14 +105,18 @@ test('only a turret of its own team guards a structure', () => {
 })
 
 test('a core is protected while a turret of its team up to its guarding tier stands, and no other', () => {
-  const structures = [turret(1, 1, 1), turret(2, 1, 2), core(10, 1, 1), core(11, 1, 2), core(12, 1, 0)]
-  assert.deepEqual(sorted(shieldedStructures(structures, standingExcept())), [2, 10, 11], 'a core guarded by none is never protected')
+  // A core of tier 2 waits for the turrets below it (tier 1), one of tier 3 for tiers 1 and 2, and one of tier 1 has none below it.
+  const structures = [turret(1, 1, 1), turret(2, 1, 2), core(10, 1, 2), core(11, 1, 3), core(12, 1, 1)]
+  assert.deepEqual(sorted(shieldedStructures(structures, standingExcept())), [2, 10, 11], 'a core with no turret of a lower tier is never protected')
   assert.deepEqual(sorted(shieldedStructures(structures, standingExcept(1))), [11], 'tier 1 down opens the core guarded by tier 1, and not the one that waits for tier 2')
   assert.deepEqual(sorted(shieldedStructures(structures, standingExcept(1, 2))), [])
   assert.deepEqual(sorted(shieldedStructures(structures, standingExcept(2))), [10, 11], 'tier 2 down does not open the core that tier 1 guards')
-  const other = [turret(1, 2, 1), core(10, 1, 1)]
+  const other = [turret(1, 2, 1), core(10, 1, 2)]
   assert.deepEqual(sorted(shieldedStructures(other, standingExcept())), [], 'a turret of another team guards nothing')
-  assert.deepEqual(sorted(shieldedStructures([core(10, 1, 1)], standingExcept())), [], 'and a core with no turrets is open')
+  assert.deepEqual(sorted(shieldedStructures([core(10, 1, 2)], standingExcept())), [], 'and a core with no turrets is open')
+  // A core is the end of the chain: it guards nothing, even a turret of a higher tier than its own.
+  assert.deepEqual(sorted(shieldedStructures([core(10, 1, 1), turret(1, 1, 2)], standingExcept())), [], 'a core protects no turret')
+  assert.deepEqual(sorted(shieldedStructures([core(10, 1, 1), core(11, 1, 2)], standingExcept())), [], 'and no other core')
 })
 
 // ---------------------------------------------------------------------------- being protected, in a game
@@ -295,7 +303,7 @@ function base(coreType = coreAfterFront): Simulator {
   const simulator = economySimulator()
   simulator.addTurret(1, front, { x: 1800, y: 700 }, 1)
   simulator.addTurret(2, back, { x: 1800, y: 1100 }, 1)
-  simulator.addCore(3, coreType, { x: 2200, y: 900 }, 1)
+  simulator.addTurret(3, coreType, { x: 2200, y: 900 }, 1)
   player(simulator, 11, { x: 2000, y: 900 }, 2, slayer)
   return simulator
 }
@@ -322,7 +330,7 @@ test('a core is protected until the turrets that guard it are down, and is then 
   assert.equal(dead(simulator, 260, 3), true, 'the core is down')
 })
 
-test('a core guarded by a higher tier waits for every turret up to it, and one guarded by none is never protected', () => {
+test('a core of a higher tier waits for every turret below it, and one with none below it is never protected', () => {
   const both = base(coreAfterBoth)
   both.addOrder(11, attack(11, 1, 1))
   run(both, 1, 100)
@@ -343,7 +351,7 @@ test('a core guarded by a higher tier waits for every turret up to it, and one g
   assert.equal(dead(open, 60, 3), true, 'a core guarded by no turret is hurt at once')
 })
 
-test('a core does not move or attack, never comes back, is solid until it is broken, and pays its reward to the player who breaks it', () => {
+test('a core does not move, reaches no one when it has no reach, never comes back, is solid until it is broken, and pays its reward to the player who breaks it', () => {
   const simulator = base(coreOpen)
   const at = { x: 2200, y: 900 }
   // Solid: a player walking into it is held off, and it stays put.
@@ -377,12 +385,12 @@ test('no monster goes after a core, or a turret, whatever is in its range', () =
     moveSpeed: 200,
     radius: 20,
     attackRange: 60,
-    attackWindupTicks: 0,
+    attackWindup: 0,
     abilities: [],
     ai: { aggroRange: 900 },
   })
   const simulator = economySimulator()
-  simulator.addCore(1, coreOpen, { x: 1000, y: 700 }, 1)
+  simulator.addTurret(1, coreOpen, { x: 1000, y: 700 }, 1)
   simulator.addTurret(2, plain, { x: 1100, y: 800 }, 1)
   simulator.addMonster(3, watcher, { x: 1300, y: 700 })
   for (let tick = 1; tick <= 200; tick += 1) simulator.at(tick)
@@ -416,4 +424,75 @@ test('the page marks a protected structure, and does not offer it as something t
     [11, false, false],
   ])
   assert.equal(state.getEnemyNear({ x: 1000, y: 1100 }, 0)?.id, 11, 'and it can be clicked on')
+})
+
+// ---------------------------------------------------------------------------- arcane against structures
+
+// An attack on a structure deals damage for each point of the attacker's arcane on top of its own (`STRUCTURE_ARCANE_DAMAGE`), once for the
+// whole attack. The champions and structures in these are the tests' own, with every number spelled out; the only thing read from the game is
+// how much damage a point of arcane does to a structure.
+const ARCANE = 40
+const ATTACK = 50
+const noArcane = { skip: STRUCTURE_ARCANE_DAMAGE <= 0 && 'arcane does nothing to structures' }
+const bareHanded = defineChampion({ ...brawler, id: 't-ss-bare', base: { ...brawler.base, attackDamage: ATTACK, arcane: 0 }, abilities: [] })
+const mage = defineChampion({ ...brawler, id: 't-ss-mage', base: { ...brawler.base, attackDamage: ATTACK, arcane: ARCANE }, abilities: [] })
+// Two hits in one attack, which still adds the arcane once.
+const twoHits = defineChampion({
+  ...brawler,
+  id: 't-ss-two-hits',
+  base: { ...brawler.base, attackDamage: ATTACK, arcane: ARCANE },
+  abilities: [],
+  onAttackHit: [damage(attackDamage()), damage(25)],
+})
+const bulky = defineTurret(68, { base: { maxHp: 100_000, attackDamage: 1, attackSpeed: 1 }, radius: 30, attackRange: 200, attackWindup: 0 })
+const bulkyCore = defineTurret(660, { base: { maxHp: 100_000, attackDamage: 1, attackSpeed: 1 }, radius: 40, attackRange: 1, attackWindup: 0, core: true })
+const armoured = defineTurret(69, { base: { maxHp: 100_000, attackDamage: 1, attackSpeed: 1, resistance: 100 }, radius: 30, attackRange: 200, attackWindup: 0 })
+
+// What the first attack of `champion` on a structure (a turret or a core) at the same spot takes off its health.
+function firstHitOn(champion: typeof mage, structure: 'turret' | 'core' | 'armoured'): number {
+  const simulator = economySimulator()
+  const target = structure === 'turret' ? bulky : structure === 'armoured' ? armoured : bulkyCore
+  if (structure === 'core') simulator.addTurret(1, bulkyCore, { x: 1000, y: 700 }, 1)
+  else simulator.addTurret(1, target as typeof bulky, { x: 1000, y: 700 }, 1)
+  player(simulator, 2, { x: 1080, y: 700 }, 2, champion)
+  simulator.addOrder(2, attack(2, 1, 1))
+  const landing = 1 + champion.attackWindupTicks
+  return target.champion.maxHp - (health(simulator, landing, 1) as number)
+}
+
+test('an attack on a turret or a core deals a point of damage for each point of arcane behind it, on top of its own', noArcane, () => {
+  for (const structure of ['turret', 'core'] as const) {
+    assert.equal(firstHitOn(bareHanded, structure), ATTACK, `with no arcane it is just the attack, on a ${structure}`)
+    assert.equal(firstHitOn(mage, structure), ATTACK + ARCANE * STRUCTURE_ARCANE_DAMAGE, `and with ${ARCANE} arcane it is more, on a ${structure}`)
+  }
+})
+
+test('the arcane is added once for the whole attack, however many hits the attack has', noArcane, () => {
+  assert.equal(firstHitOn(twoHits, 'turret'), ATTACK + 25 + ARCANE * STRUCTURE_ARCANE_DAMAGE)
+})
+
+test("a structure's resistance takes its share off the arcane as it does off the rest of the attack", noArcane, () => {
+  const resistance = armoured.champion.statsAt(1).resistance
+  assert.equal(firstHitOn(mage, 'armoured'), Math.round((ATTACK + ARCANE * STRUCTURE_ARCANE_DAMAGE) * statMultiplier(resistance)))
+  assert.ok(firstHitOn(mage, 'armoured') > firstHitOn(bareHanded, 'armoured'), 'and it is still more than none')
+})
+
+test('arcane adds nothing to an attack on a champion, or on a structure that is protected', () => {
+  const duelFor = (champion: typeof mage): number => {
+    const simulator = economySimulator()
+    player(simulator, 1, { x: 1000, y: 700 }, 1, brawler)
+    player(simulator, 2, { x: 1060, y: 700 }, 2, champion)
+    simulator.addOrder(2, attack(2, 1, 1))
+    return brawler.maxHp - (health(simulator, 1 + champion.attackWindupTicks, 1) as number)
+  }
+  assert.equal(duelFor(mage), duelFor(bareHanded), 'a champion takes the attack and no more, whatever arcane it comes from')
+  assert.equal(duelFor(mage), ATTACK)
+
+  // The second of two turrets waits for the first, so an attack on it does nothing, with arcane or without.
+  const simulator = economySimulator()
+  simulator.addTurret(1, front, { x: 1000, y: 700 }, 1)
+  simulator.addTurret(2, back, { x: 1000, y: 1100 }, 1)
+  player(simulator, 3, { x: 1080, y: 1100 }, 2, mage)
+  simulator.addOrder(3, attack(3, 1, 2))
+  assert.equal(health(simulator, 60, 2), back.champion.maxHp, 'a protected turret is not hurt')
 })

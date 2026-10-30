@@ -1,11 +1,12 @@
 import { Container, Graphics, Text, type RenderLayer } from 'pixi.js'
 import { getTeam } from '../../../../packages/shared/src/index.ts'
-import { CharacterSprite, type LoadedSpriteSet } from '../character-sprite.ts'
+import { CharacterSprite, teamVariant, type LoadedSpriteSet, type SheetPainter } from '../character-sprite.ts'
 import type { RenderedCharacter } from '../game-state.ts'
 import { layoutCorpse } from './corpse.ts'
 import { characterDepth } from './depth.ts'
 import { layoutDeaggroBar } from './deaggro-bar.ts'
 import { layoutHealthBar } from './health-bar.ts'
+import { layoutLevelBadge, LEVEL_BADGE_RADIUS } from './level-badge.ts'
 import { layoutStackPips } from './stack-pips.ts'
 import { statusLabels } from './status-labels.ts'
 
@@ -16,12 +17,17 @@ type Actor = {
   overlay: Container
   // Drawn from sprite sheets, for a champion that has a sprite set; otherwise its body is a circle.
   sprite?: CharacterSprite
+  // The body of a champion, a turret or a core that has no sprite set, drawn as shapes. Empty for one that has: a sprite stands on the ground by itself.
+  shape: Graphics
   statusText: Text
   stackPips: Graphics
   // A structure's barrier, drawn round it while it is protected and nothing can hurt it yet.
   barrier?: Graphics
   label: Text
   healthBar: Graphics
+  // A player's level, in a round badge at the left end of its health bar. It is only shown for a player in a game that has levels.
+  levelBadge: Container
+  levelText: Text
   // A monster's deaggro bar, under its health bar, while it has something in it.
   deaggroBar: Graphics
   cooldownBar: Graphics
@@ -29,8 +35,8 @@ type Actor = {
 
 // The health bar over each champion, in world units. A tick marks every HEALTH_TICK_EVERY health,
 // and a bigger one every HEALTH_MAJOR_TICK_EVERY.
-const HEALTH_BAR_WIDTH = 84
-const HEALTH_BAR_HEIGHT = 9
+export const HEALTH_BAR_WIDTH = 84
+export const HEALTH_BAR_HEIGHT = 9
 const HEALTH_TICK_EVERY = 100
 const HEALTH_MAJOR_TICK_EVERY = 1000
 
@@ -48,7 +54,12 @@ export class CharacterLayer {
   readonly overlay = new Container()
   private readonly actors = new Map<number, Actor>()
 
-  constructor(private spriteSets: ReadonlyMap<string, LoadedSpriteSet>, private readonly depth?: RenderLayer) {}
+  // `paint` is how a sheet is painted in a team's colour (see `teamVariant`): the page's own, unless a test gives another.
+  constructor(
+    private spriteSets: ReadonlyMap<string, LoadedSpriteSet>,
+    private readonly depth?: RenderLayer,
+    private readonly paint?: SheetPainter,
+  ) {}
 
   // Draws every champion from these sets from now on. The champions already drawn are dropped, so
   // the next update draws them again from the new ones.
@@ -83,14 +94,16 @@ export class CharacterLayer {
     for (const character of everyone) {
       const isLocal = character.id === localCharacterId
       const actor = this.actors.get(character.id) ?? this.addActor(character, isLocal)
-      // A structure that is destroyed is gone for good, and leaves nothing lying there. A monster that dies loses its nameplate at once, and its
-      // body a couple of seconds later (`layoutCorpse`), and is drawn again when it respawns.
-      const structure = character.turret !== undefined || character.core !== undefined
+      // A monster or a structure that dies loses its nameplate at once, and its body a couple of seconds later (`layoutCorpse`). A monster is
+      // drawn again when it respawns; a structure is destroyed for good, so its sprite plays its collapse where it stood, and that is the last
+      // of it. One drawn as shapes has no collapse to play, so it is gone as it falls.
+      const structure = character.turret !== undefined
       const corpse = layoutCorpse(character)
-      const drawn = !hidden.has(character.id) && !(structure && character.dead)
-      actor.node.visible = drawn && corpse.body
-      actor.overlay.visible = drawn && corpse.nameplate
-      // A structure has no name over it: it is told by its body, its team's colour and (for a turret) its ring.
+      const collapsing = structure && character.dead && actor.sprite !== undefined
+      const seen = !hidden.has(character.id)
+      actor.node.visible = seen && corpse.body && (!structure || !character.dead || collapsing)
+      actor.overlay.visible = seen && corpse.nameplate
+      // A structure has no name over it: it is told by its body and (for a turret) its ring.
       actor.label.visible = !structure
       if (actor.barrier) actor.barrier.visible = character.invulnerable === true
       actor.label.text = character.name ?? character.player?.name ?? ''
@@ -110,6 +123,13 @@ export class CharacterLayer {
         maxHp: character.health?.maxHp ?? 0,
         shield: character.totalShield,
       })
+      // A player's level sits at the left end of its health bar, and goes with the bar.
+      const badge = character.dead ? undefined : layoutLevelBadge(character.level, { width: HEALTH_BAR_WIDTH, top: -above - 20, height: HEALTH_BAR_HEIGHT })
+      actor.levelBadge.visible = badge !== undefined
+      if (badge) {
+        actor.levelBadge.position.set(badge.x, badge.y)
+        actor.levelText.text = badge.text
+      }
       // A monster that is losing interest has a bar under its health that fills, and is full when it gives up and goes home.
       const losing = character.monster && !character.dead ? layoutDeaggroBar(character.monster.deaggro) : undefined
       actor.deaggroBar.visible = losing !== undefined
@@ -134,12 +154,14 @@ export class CharacterLayer {
     // Filled with the colour of its team. The champion you control has a thick white outline,
     // since its colour is no longer different from every other player's. A champion drawn from
     // sprites has no circle: it is the figure alone, and its team shows in the colour of its name.
-    const loaded = this.spriteSets.get(character.champion.id)
+    // The art of a tower or a keep is the same for every team, with a flag that is painted in the colour of the team this one is on.
+    const base = this.spriteSets.get(character.champion.id)
+    const loaded = base ? teamVariant(base, getTeam(character.team).color, this.paint) : undefined
     const shape = new Graphics()
-    if (!loaded && character.turret) {
-      drawTurretBody(shape, character.champion.radius, getTeam(character.team).color)
-    } else if (!loaded && character.core) {
+    if (!loaded && character.turret?.core) {
       drawCoreBody(shape, character.champion.radius, getTeam(character.team).color)
+    } else if (!loaded && character.turret) {
+      drawTurretBody(shape, character.champion.radius, getTeam(character.team).color)
     } else if (!loaded) {
       shape
         .circle(0, 0, character.champion.radius)
@@ -159,6 +181,21 @@ export class CharacterLayer {
     })
     label.anchor.set(0.5, 1)
     const healthBar = new Graphics()
+    // The level: a dark disc edged in the colour of its team, and the number on it. Where it goes is set each frame, from the health bar.
+    const levelBadge = new Container()
+    levelBadge.visible = false
+    const levelText = new Text({
+      text: '',
+      style: { fill: '#ffffff', fontSize: 12, fontFamily: 'Arial', fontWeight: 'bold' },
+    })
+    levelText.anchor.set(0.5)
+    levelBadge.addChild(
+      new Graphics()
+        .circle(0, 0, LEVEL_BADGE_RADIUS)
+        .fill({ color: '#0b1220', alpha: 0.9 })
+        .stroke({ color: getTeam(character.team).color, width: 2 }),
+      levelText,
+    )
     const deaggroBar = new Graphics()
     deaggroBar.visible = false
     const cooldownBar = new Graphics()
@@ -175,14 +212,14 @@ export class CharacterLayer {
     statusText.anchor.set(0.5, 1)
     const stackPips = new Graphics()
     // A structure that cannot be hurt yet has a barrier round it, shown only while that is so.
-    const barrier = character.turret || character.core ? drawBarrier(character.champion.radius) : undefined
+    const barrier = character.turret ? drawBarrier(character.champion.radius) : undefined
     node.addChild(shape, ...(barrier ? [barrier] : []), ...(sprite ? [sprite.view] : []), stackPips)
-    overlay.addChild(label, statusText, healthBar, deaggroBar, cooldownBar)
+    overlay.addChild(label, statusText, healthBar, levelBadge, deaggroBar, cooldownBar)
     this.view.addChild(node)
     this.overlay.addChild(overlay)
     // After it is in the scene, which the layer needs for where it is.
     this.depth?.attach(node)
-    const actor = { node, overlay, ...(sprite ? { sprite } : {}), ...(barrier ? { barrier } : {}), statusText, stackPips, label, healthBar, deaggroBar, cooldownBar }
+    const actor = { node, overlay, ...(sprite ? { sprite } : {}), shape, ...(barrier ? { barrier } : {}), statusText, stackPips, label, healthBar, levelBadge, levelText, deaggroBar, cooldownBar }
     this.actors.set(character.id, actor)
     return actor
   }

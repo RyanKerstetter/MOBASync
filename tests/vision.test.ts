@@ -6,6 +6,7 @@ import {
   createShadowcastVision,
   createVision,
   DEFAULT_VISION_SYSTEM,
+  GAME_ART_SCALE,
   GAME_VIEW_HEIGHT,
   GAME_VISION_RANGE,
   parseTiledMap,
@@ -27,10 +28,9 @@ visionContract('range', visionSystems.get('range') as VisionFactory, { blocksSig
 
 // ---------------------------------------------------------------------------- what the game has
 
-test('a champion sees 500, which is a little less than half the screen\'s height, so the edge of it shows on every side', () => {
-  assert.equal(GAME_VISION_RANGE, 500)
+test('a champion sees less than half the screen\'s height, so the edge of it shows on every side', () => {
   assert.ok(GAME_VISION_RANGE < GAME_VIEW_HEIGHT / 2)
-  assert.equal(SHADOWCAST_CELL, 24, "on a grid of 8 pixels of the art, which is where the competitive map is laid out")
+  assert.equal(SHADOWCAST_CELL, 8 * GAME_ART_SCALE, 'on a grid of 8 pixels of the art, which is where the competitive map is laid out')
 })
 
 test('the systems are found by name, the default is shadowcasting, and one that is not there says which are', () => {

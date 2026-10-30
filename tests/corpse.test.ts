@@ -37,7 +37,7 @@ const grunt = defineMonster({
   moveSpeed: 200,
   radius: 20,
   attackRange: 60,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
   ai: { aggroRange: 0, deaggroRange: 300, respawnTicks: 300 },
 })

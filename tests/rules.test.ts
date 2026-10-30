@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   advanceObjective,
   applyRulesChange,
+  CAPTURE_SECONDS,
   Champion,
   createModeSetup,
   defaultRules,
@@ -15,9 +16,11 @@ import {
   modeRules,
   NO_OBJECTIVES,
   readRulesChange,
+  RESPAWN_SECONDS,
   Simulator,
   Terrain,
   winningTeam,
+  type GameMode,
   type HillArea,
   type ModeSetup,
   type ObjectiveState,
@@ -43,6 +46,8 @@ function playOut(simulator: Simulator, last: number): Array<ObjectiveState | und
 
 type Dm = Extract<ObjectiveState, { kind: 'deathmatch' }>
 const deathmatch: ModeSetup = { kind: 'deathmatch', scoreLimit: 3 }
+// A mode as the game has it, for the limit it starts with and the most the leader can set it to.
+const modeDef = (id: GameMode): (typeof GAME_MODES)[number] => GAME_MODES.find((each) => each.id === id) as (typeof GAME_MODES)[number]
 const HILL_BOX: HillArea = { x: 0, y: 0, width: 10, height: 10, ellipse: false }
 
 test('every mode names its score, and has a label, a default and a most for the limit the leader sets', () => {
@@ -61,7 +66,7 @@ test('every mode names its score, and has a label, a default and a most for the 
 test('the default rules are the old respawn time, and each mode\'s default limit', () => {
   const rules = defaultRules()
   assert.equal(rules.respawnSeconds, GAME_RESPAWN_TICKS / GAME_TPS)
-  assert.deepEqual(rules.scoreLimits, { deathmatch: 25, koth: 100, ctf: 3, core: 0 })
+  assert.deepEqual(rules.scoreLimits, Object.fromEntries(GAME_MODES.map((mode) => [mode.id, mode.defaultLimit])))
 })
 
 test('a change to the rules is read, and whatever is wrong with it is said', () => {
@@ -74,10 +79,10 @@ test('a change to the rules is read, and whatever is wrong with it is said', () 
     assert.ok('problem' in read, 'it was refused')
     return 'problem' in read ? read.problem : ''
   }
-  for (const bad of [0, 61, 2.5, '3', null, NaN]) {
-    assert.match(problem({ respawnSeconds: bad }), /Respawn time must be a whole number of seconds from 1 to 60/)
+  for (const bad of [RESPAWN_SECONDS.min - 1, RESPAWN_SECONDS.max + 1, 2.5, '3', null, NaN]) {
+    assert.match(problem({ respawnSeconds: bad }), new RegExp(`Respawn time must be a whole number of seconds from ${RESPAWN_SECONDS.min} to ${RESPAWN_SECONDS.max}`))
   }
-  assert.match(problem({ scoreLimits: { ctf: 100 } }), /Captures to win must be a whole number from 0 \(no limit\) to 99/)
+  assert.match(problem({ scoreLimits: { ctf: modeDef('ctf').maxLimit + 1 } }), new RegExp(`Captures to win must be a whole number from 0 \\(no limit\\) to ${modeDef('ctf').maxLimit}`))
   assert.match(problem({ scoreLimits: { deathmatch: -1 } }), /Kills to win/)
   assert.match(problem({ scoreLimits: { deathmatch: 1.5 } }), /Kills to win/)
   assert.match(problem({ scoreLimits: { chess: 3 } }), /"chess" is not a game mode/)
@@ -86,23 +91,24 @@ test('a change to the rules is read, and whatever is wrong with it is said', () 
 
 test('a change sets only what it names, and the limit of each mode is kept as it was left', () => {
   const rules = applyRulesChange(defaultRules(), { scoreLimits: { ctf: 7 } })
-  assert.deepEqual(rules.scoreLimits, { deathmatch: 25, koth: 100, ctf: 7, core: 0 })
-  assert.equal(rules.respawnSeconds, 3)
+  assert.notEqual(modeDef('ctf').defaultLimit, 7, 'the limit it was changed to is not the one it had')
+  assert.deepEqual(rules.scoreLimits, { ...defaultRules().scoreLimits, ctf: 7 })
+  assert.equal(rules.respawnSeconds, RESPAWN_SECONDS.default)
   const next = applyRulesChange(rules, { respawnSeconds: 12 })
   assert.deepEqual([next.respawnSeconds, next.scoreLimits.ctf], [12, 7])
-  assert.equal(defaultRules().scoreLimits.ctf, 3, 'the defaults are not changed by it')
+  assert.equal(defaultRules().scoreLimits.ctf, modeDef('ctf').defaultLimit, 'the defaults are not changed by it')
 })
 
 test('a game is given its mode\'s limit, with 0 meaning there is none, and the respawn time in ticks', () => {
   const rules = applyRulesChange(defaultRules(), { respawnSeconds: 8, scoreLimits: { koth: 0 } })
-  assert.deepEqual(modeRules(rules, 'deathmatch'), { respawnTicks: 8 * GAME_TPS, scoreLimit: 25 })
-  assert.deepEqual(modeRules(rules, 'koth'), { respawnTicks: 8 * GAME_TPS, captureTicks: 10 * GAME_TPS })
+  assert.deepEqual(modeRules(rules, 'deathmatch'), { respawnTicks: 8 * GAME_TPS, scoreLimit: modeDef('deathmatch').defaultLimit })
+  assert.deepEqual(modeRules(rules, 'koth'), { respawnTicks: 8 * GAME_TPS, captureTicks: CAPTURE_SECONDS.default * GAME_TPS })
   const flags = [{ x: 100, y: 100 }, { x: 900, y: 100 }]
   assert.deepEqual(createModeSetup('ctf', [1, 2], { flags }, modeRules(rules, 'ctf')), {
     kind: 'ctf',
     flags: [{ team: 1, home: flags[0] }, { team: 2, home: flags[1] }],
-    respawnTicks: 480,
-    scoreLimit: 3,
+    respawnTicks: 8 * GAME_TPS,
+    scoreLimit: modeDef('ctf').defaultLimit,
   })
   assert.deepEqual(createModeSetup('deathmatch', [1, 2], NO_OBJECTIVES), { kind: 'deathmatch' }, 'with no rules, none are set')
 })

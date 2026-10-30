@@ -160,50 +160,49 @@ const ITEM_DEFS: readonly ItemDef[] = [
   { id: 'jetpack', name: 'Jetpack', slot: 'back', cost: 180, stats: { moveSpeed: 16 } },
   { id: 'reinforced-shield', name: 'Reinforced Shield', slot: 'back', cost: 200, stats: { maxHp: 200, resistance: 25 } },
   // Head
-  { id: 'hard-hat', name: 'Hard Hat', slot: 'head', cost: 30, icon: 'hard_hat', stats: { maxHp: 100 } },
-  { id: 'bronze-helmet', name: 'Bronze Helmet', slot: 'head', cost: 50, stats: { maxHp: 120, resistance: 8 } },
+  { id: 'hard-hat', name: 'Hard Hat', slot: 'head', cost: 30, icon: 'hard_hat', stats: { maxHp: 100 } },             // After 5 seconds without taking damage gain a 50 health shield.
+  { id: 'bronze-helmet', name: 'Bronze Helmet', slot: 'head', cost: 50, stats: { maxHp: 120, resistance: 8 } },      // 
   { id: 'hood', name: 'Dark Hood', slot: 'head', cost: 60, stats: { attackSpeed: .1, moveSpeed: 4 } },
   { id: 'viking-helm', name: 'Viking Helm', slot: 'head', cost: 60, stats: { maxHp: 250 } },
   { id: 'pirates-cap', name: 'Pirate\'s Cap', slot: 'head', cost: 120, icon: 'pirates_cap', stats: { attackDamage: 6, attackSpeed: .2 } },
   { id: 'mage-hat', name: 'Mage Hat', slot: 'head', cost: 60, stats: { arcane: 25, haste: 8 } },
   { id: 'plague-doctors-cowl', name: 'Plague Doctor\'s Cowl', slot: 'head', cost: 80, stats: { arcane: 20, resistance: 16 } },
   { id: 'plate-helm', name: 'Plate Helm', slot: 'head', cost: 150, stats: { maxHp: 300, resistance: 20 } },
-  { id: 'golden-helmet', name: 'Golden Helmet', slot: 'head', cost: 250, stats: { maxHp: 500, resistance: 25 } },
+  { id: 'golden-helmet', name: 'Golden Helmet', slot: 'head', cost: 500, stats: { maxHp: 500, resistance: 25 } },
   // Weapon
-  { id: 'wand', name: 'Wand', slot: 'weapon', cost: 40, stats: { arcane: 5, haste: 15 } },
-  { id: 'dagger', name: 'Quick Dagger', slot: 'weapon', cost: 40, stats: { attackSpeed: 0.2 } },
-  { id: 'bow', name: 'Short Bow', slot: 'weapon', cost: 40, stats: { attackSpeed: .1, attackRange: 10 } },
-  { id: 'sword', name: 'Iron Sword', slot: 'weapon', cost: 40, stats: { attackDamage: 14 } },
-  { id: 'tome', name: 'Tome', slot: 'weapon', cost: 45, stats: { arcane: 25 } },
+  { id: 'wand', name: 'Wand', slot: 'weapon', cost: 40, stats: { arcane: 25 } },                              // Abilities do 10% bonus damage
+  { id: 'dagger', name: 'Quick Dagger', slot: 'weapon', cost: 40, stats: { attackSpeed: 0.1 } },              // Gain a 15% attack speed bonus
+  { id: 'bow', name: 'Short Bow', slot: 'weapon', cost: 40, stats: { attackRange: 20 } },                     // Gain 10 attack range
+  { id: 'sword', name: 'Iron Sword', slot: 'weapon', cost: 40, stats: { attackDamage: 5 } },                  // Attacks do 10% bonus damage
+  { id: 'tome', name: 'Tome', slot: 'weapon', cost: 45, stats: { arcane: 10, haste:15 } },                    // Every 5 seconds gain a 1x arcane bonus damage applied on the next ability that does damage. 
 
 
-  { id: 'jambiya', name: 'Jambiya', slot: 'weapon', cost: 80, stats: { attackSpeed: 0.25, attackDamage: 10 } },
-  { id: 'tonfa', name: 'Tonfa', slot: 'weapon', cost: 80, stats: { attackDamage: 16, haste: 10 } },
-  { id: 'staff', name: 'Staff', slot: 'weapon', cost: 75, stats: { arcane: 40 } },
-  { id: 'mace', name: 'Mace', slot: 'weapon', cost: 90, stats: { attackDamage: 16, maxHp: 200 } },
+  { id: 'jambiya', name: 'Jambiya', slot: 'weapon', cost: 80, stats: { attackSpeed: 0.25, attackDamage: 10 } }, // Gain 10% lifesteal on attacks
+  { id: 'tonfa', name: 'Tonfa', slot: 'weapon', cost: 80, stats: { attackDamage: 16, haste: 10 } },             // Attacks do 
+  { id: 'staff', name: 'Staff', slot: 'weapon', cost: 75, stats: { arcane: 40 } },                              // Attacks give 10% movement speed bonus.
+  { id: 'mace', name: 'Mace', slot: 'weapon', cost: 90, stats: { attackDamage: 16, maxHp: 200 } },              // Attacks do 20% bonus damage
+  { id: 'poisoned-dagger', name: 'Poisoned Dagger', slot: 'weapon', cost: 70, stats: { attackSpeed: 0.3, attackDamage: 18 } }, // Attacks apply a poison. Poison scales with .1 arcane 
+
+  { id: 'light-staff', name: 'Staff of Light', slot: 'weapon', cost: 155, stats: { arcane: 40, haste: 15 } },     // Abilties do 30% bonus damage
+  { id: 'nunchucks', name: 'Nunchucks', slot: 'weapon', cost: 160, stats: { attackDamage: 18, resistance: 16 } }, // Gain 30% attack speed bonus.
+  { id: 'scythe', name: 'Scythe', slot: 'weapon', cost: 165, stats: { attackDamage: 36 } },                       // Gain 20% lifesteal on attacks.
+  { id: 'crossbow', name: 'Crossbow', slot: 'weapon', cost: 170, stats: { attackRange: 25} },                     // Gain 25 attack range
+  
+  { id: 'hammer', name: 'War Hammer', slot: 'weapon', cost: 155, stats: { attackDamage: 24, maxHp: 120 } },       // Negate 30% of resists on attacks
+  { id: 'battle-axe', name: 'Battle Axe', slot: 'weapon', cost: 160, stats: { attackDamage: 20, haste: 20 } },    // Attacks do 30% bonus damage
+  { id: 'life-staff', name: 'Staff of Life', slot: 'weapon', cost: 160, stats: { arcane: 40, maxHp: 200 } },      // Gain 15% lifesteal on abilities.
+  { id: 'dark-staff', name: 'Dark Staff', slot: 'weapon', cost: 160, stats: { arcane: 60 } },                     // Attacks gain a .6x arcane multiplier. so with 60ad and 80arcane you would do 60 + 48 = 108 damage on attack.
 
 
-  { id: 'light-staff', name: 'Staff of Light', slot: 'weapon', cost: 155, stats: { arcane: 40, haste: 15 } },
-  { id: 'nunchucks', name: 'Nunchucks', slot: 'weapon', cost: 160, stats: { attackSpeed: 0.3, attackDamage: 18 } },
-  { id: 'scythe', name: 'Scythe', slot: 'weapon', cost: 165, stats: { attackDamage: 36 } },
-  { id: 'crossbow', name: 'Crossbow', slot: 'weapon', cost: 170, stats: { attackDamage: 16, attackRange: 20 } },
-  { id: 'poisoned-dagger', name: 'Poisoned Dagger', slot: 'weapon', cost: 70, stats: { attackDamage: 24, attackSpeed: 0.2 } },
-  { id: 'hammer', name: 'War Hammer', slot: 'weapon', cost: 155, stats: { attackDamage: 24, maxHp: 120 } },
-  { id: 'battle-axe', name: 'Battle Axe', slot: 'weapon', cost: 160, stats: { attackDamage: 20, haste: 20 } },
-  { id: 'life-staff', name: 'Staff of Life', slot: 'weapon', cost: 160, stats: { arcane: 40, maxHp: 200 } },
-  { id: 'dark-staff', name: 'Dark Staff', slot: 'weapon', cost: 160, stats: { arcane: 60 } },
-
-
-  { id: 'cursed-scythe', name: 'Cursed Scythe', slot: 'weapon', cost: 280, stats: { attackDamage: 30, arcane: 50 } },
-  { id: 'cursed-tome', name: 'Cursed Tome', slot: 'weapon', cost: 300, stats: { arcane: 35, attackDamage: 5 } },
-  { id: 'holy-tome', name: 'Holy Tome', slot: 'weapon', cost: 290, stats: { arcane: 30, maxHp: 120 } },
-  { id: 'infused-dagger', name: 'Infused Dagger', slot: 'weapon', cost: 300, stats: { attackSpeed: 0.25, attackDamage: 10 } },
-  { id: 'poisoned-crossbow', name: 'Poisoned Crossbow', slot: 'weapon', cost: 300, icon: 'poisoned_crossbow', stats: { attackDamage: 18, attackRange: 40, attackSpeed: 0.05 } },
-  { id: 'machine-gun', name: 'Machine Gun', slot: 'weapon', cost: 300, stats: { attackSpeed: 0.4, attackDamage: 4 } },
-  { id: 'infused-axe', name: 'Infused Axe', slot: 'weapon', cost: 300, stats: { attackDamage: 28, haste: 5 } },
-  { id: 'infused-staff', name: 'Infused Staff', slot: 'weapon', cost: 300, stats: { arcane: 60, haste: 8 } },
-  { id: 'infused-scythe', name: 'Infused Scythe', slot: 'weapon', cost: 300, stats: { attackDamage: 22, arcane: 30 } },
-  { id: 'sniper', name: 'Sniper Rifle', slot: 'weapon', cost: 350, stats: { attackDamage: 30, attackRange: 30 } },
+  { id: 'cursed-scythe', name: 'Cursed Scythe', slot: 'weapon', cost: 280, stats: { attackDamage: 50, arcane: 80 } }, // Gain 30% lifesteal on attacks
+  { id: 'cursed-tome', name: 'Cursed Tome', slot: 'weapon', cost: 300, stats: { arcane: 120 } },                      // Gain 30% lifesteal on abilities.
+  { id: 'holy-tome', name: 'Holy Tome', slot: 'weapon', cost: 290, stats: { arcane: 60, maxHp: 200 } },               // Abilities do 50% bonus damage
+  { id: 'infused-dagger', name: 'Infused Dagger', slot: 'weapon', cost: 300, stats: { attackSpeed: 0.4, attackDamage: 24 } }, // Gain 30% attacks speed bonus and attacks do 6% current hp damage.
+  { id: 'poisoned-crossbow', name: 'Poisoned Crossbow', slot: 'weapon', cost: 300, icon: 'poisoned_crossbow', stats: { attackDamage: 18, attackRange: 30, attackSpeed: 0.2 } }, // Gain 30 attack range and Attacks apply a poison. Poison scales with .1 arcane 
+  { id: 'machine-gun', name: 'Machine Gun', slot: 'weapon', cost: 300, stats: { attackSpeed: 0.6, attackDamage: 8 } },// Gain 50% attack speed bonus
+  { id: 'infused-axe', name: 'Infused Axe', slot: 'weapon', cost: 300, stats: { attackDamage: 38, haste: 38 } },      // Basic attacks do 60% bonus damage
+  { id: 'infused-staff', name: 'Infused Staff', slot: 'weapon', cost: 300, stats: { arcane: 70, haste: 36 } },        // Negate 50% of resists on attack.
+  { id: 'sniper', name: 'Sniper Rifle', slot: 'weapon', cost: 350, stats: { attackDamage: 24, attackRange: 40 } },    // Gain 40 attack range
   // Accessory
   { id: 'scroll', name: 'Scroll', slot: 'accessory', cost: 35, stats: { arcane: 12, haste: 4 } },
   { id: 'life-amulet', name: 'Life Amulet', slot: 'accessory', cost: 50, stats: { maxHp: 250 } },

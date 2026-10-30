@@ -231,14 +231,15 @@ export class ServerGameState {
       this.nextCharacterId += 1
       this.simulator.addTurret(id, getTurret(post.tier), post.at, team)
     }
-    // And, in Core Destruction, the core of each of the two teams, at the base of the slot it starts at: the heart of the base its turrets guard.
+    // And, in Core Destruction, the core of each of the (one or two) teams, at the base of the slot it starts at: the heart of the base its turrets guard. It is a
+    // turret too (the one of the core tier), put in the same way.
     if (this.mode === 'core') {
       slotTeams.slice(0, 2).forEach((team, slot) => {
         const at = this.objectives.cores?.[slot]
         if (!at) return
         const id = this.nextCharacterId
         this.nextCharacterId += 1
-        this.simulator.addCore(id, getCore(), at, team)
+        this.simulator.addTurret(id, getCore(), at, team)
       })
     }
     this.selections.clear()

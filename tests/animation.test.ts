@@ -13,8 +13,8 @@ import {
   type AnimationClip,
   type AnimationKey,
 } from '../apps/client/src/animation.ts'
-import { championSprites, spriteRows } from '../apps/client/src/champion-sprites.ts'
-import { champions, monsters } from '../packages/shared/src/index.ts'
+import { championSprites, clipFrameSize, spriteRows } from '../apps/client/src/champion-sprites.ts'
+import { champions, monsters, TURRET_TIERS, turretId, turrets } from '../packages/shared/src/index.ts'
 
 const idle: AnimationClip = { frames: 4, fps: 6, loop: true }
 const walk: AnimationClip = { frames: 4, fps: 8, loop: true }
@@ -220,10 +220,10 @@ function pngSize(url: string): { width: number; height: number } {
   return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) }
 }
 
-test('every sprite set belongs to a champion or a monster, and every clip fits its sheet exactly', () => {
+test('every sprite set belongs to a champion, a monster, a turret or a core, and every clip fits its sheet exactly', () => {
   assert.ok(Object.keys(championSprites).length > 0)
   for (const [championId, set] of Object.entries(championSprites)) {
-    assert.ok(champions.has(championId) || monsters.has(championId), `${championId} is a champion or a monster`)
+    assert.ok(champions.has(championId) || monsters.has(championId) || turrets.has(championId), `${championId} is a champion, a monster or a turret (the core is one)`)
     assert.ok(set.anchor.x >= 0 && set.anchor.x <= set.frameWidth && set.anchor.y >= 0 && set.anchor.y <= set.frameHeight, `${championId}'s anchor is inside a frame`)
     assert.ok(set.scale > 0)
     assert.ok(set.clips.idle, `${championId} has an idle to fall back on`)
@@ -235,12 +235,54 @@ test('every sprite set belongs to a champion or a monster, and every clip fits i
     for (const [key, clip] of Object.entries(set.clips)) {
       assert.ok(clip)
       const sheet = pngSize(clip.url)
-      assert.equal(sheet.width, clip.frames * set.frameWidth, `${championId} ${key}: the frames fill the sheet across`)
-      assert.equal(sheet.height, spriteRows(set) * set.frameHeight, `${championId} ${key}: and its rows fill it down`)
+      // A clip's frames are the set's size unless it says its own (a collapse that spreads wider than the building stood).
+      const frame = clipFrameSize(set, clip)
+      assert.equal(sheet.width, clip.frames * frame.width, `${championId} ${key}: the frames fill the sheet across`)
+      assert.equal(sheet.height, spriteRows(set) * frame.height, `${championId} ${key}: and its rows fill it down`)
       assert.ok(clip.fps > 0)
     }
   }
   assert.ok(championSprites.slime?.directions, 'slimes are drawn facing the way they go')
+})
+
+test('every tier of turret, the core\'s included, is drawn from sprites that stand still and can collapse, and is the same whichever way it faces', () => {
+  const structures = Object.keys(TURRET_TIERS).map((tier) => turretId(Number(tier)))
+  assert.ok(Object.values(TURRET_TIERS).some((tier) => tier.core), 'the core is one of the tiers')
+  for (const id of structures) {
+    const set = championSprites[id]
+    assert.ok(set, `${id} has a sprite set`)
+    assert.ok(set.clips.idle?.loop, `${id} stands with an idle that goes round`)
+    assert.ok(set.clips.dead && !set.clips.dead.loop, `${id} has a collapse that plays once, and then holds`)
+    assert.equal(set.fixed, true, `${id} is a building: it is never flipped to face the way it shoots`)
+    assert.equal(set.directions, undefined, `${id} is drawn facing one way`)
+  }
+})
+
+// A building is put on the ground its body holds: the middle of it across its frame (so a wider frame for the rubble keeps it centred, as the
+// anchor is a fraction of the frame), and the disc of its body, `radius` round the position, just inside the foot of the art. Both are worked out
+// from the body's radius, which is the game's to tune, so it is read here.
+test('every tier of turret, the core\'s included, is centred on its body: across its frame, and with the disc of its body on the foot of the art', () => {
+  const bodies: Array<[string, number]> = [...turrets.values()].map((turret): [string, number] => [turret.id, turret.champion.radius])
+  assert.ok(bodies.length >= 2, 'there is a turret and a core to check')
+  for (const [id, radius] of bodies) {
+    const set = championSprites[id]
+    assert.ok(set, `${id} has a sprite set`)
+    assert.equal(set.anchor.x, set.frameWidth / 2, `${id} is centred across its frame`)
+    assert.equal(set.anchor.y, set.frameHeight - radius / set.scale, `${id}'s body ends where the art does`)
+    assert.ok((set.top ?? 0) > 0 && (set.top ?? 0) < set.anchor.y, `${id} reaches up from its position, within its frame`)
+    for (const clip of Object.values(set.clips)) {
+      const { width } = clipFrameSize(set, clip)
+      assert.equal((set.anchor.x / set.frameWidth) * width, width / 2, `${id} is still centred in a clip of ${width} px frames`)
+    }
+  }
+})
+
+test('a clip\'s frames are the set\'s size unless the clip says its own, which is how a collapse can be wider than the thing that collapses', () => {
+  const set = { frameWidth: 48, frameHeight: 80 } as Parameters<typeof clipFrameSize>[0]
+  const clip = { url: 'a.png', frames: 4, fps: 6, loop: true }
+  assert.deepEqual(clipFrameSize(set, clip), { width: 48, height: 80 })
+  assert.deepEqual(clipFrameSize(set, { ...clip, frameWidth: 64 }), { width: 64, height: 80 }, 'wider, as the rubble is')
+  assert.deepEqual(clipFrameSize(set, { ...clip, frameWidth: 64, frameHeight: 96 }), { width: 64, height: 96 })
 })
 
 test('a character drawn facing four ways faces down until it moves, then the way it goes most', () => {

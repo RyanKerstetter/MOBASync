@@ -8,6 +8,8 @@ import {
   defaultRules,
   GAME_HILL_CAPTURE_TICKS,
   GAME_HILL_POINT_TICKS,
+  GAME_MODES,
+  GAME_RESPAWN_TICKS,
   GAME_TPS,
   hillCaptureTicks,
   hillMovement,
@@ -129,28 +131,31 @@ test('the time to capture is the leader\'s to set, and a game without one takes 
 })
 
 test('a hill held after the time it was given scores, and draining takes as long as filling did', () => {
-  const quick: ModeSetup = { kind: 'koth', hill: HILL, captureTicks: 2 * GAME_TPS }
-  const state = run(undefined, crowd([1, 1]), 2 * GAME_TPS, 1, quick)
-  assert.deepEqual(state.scores, { 1: 1 }, 'tick 120 is a whole second, and it is held then')
-  const drained = run(state, crowd([2, 1]), 2 * GAME_TPS, 121, quick)
+  // The bar is full after two of the intervals a point is scored at, so it is held on a tick that a point is scored on.
+  const held = 2 * GAME_HILL_POINT_TICKS
+  const quick: ModeSetup = { kind: 'koth', hill: HILL, captureTicks: held }
+  const state = run(undefined, crowd([1, 1]), held, 1, quick)
+  assert.deepEqual(state.scores, { 1: 1 }, 'the tick it is held on is one a point is scored on')
+  const drained = run(state, crowd([2, 1]), held, held + 1, quick)
   assert.deepEqual([drained.capturer, drained.progress], [undefined, 0])
 })
 
 test('the capture time is a rule of the lobby, in whole seconds, and only a game on the hill is given it', () => {
   assert.equal(defaultRules().captureSeconds, GAME_HILL_CAPTURE_TICKS / GAME_TPS)
-  assert.equal(CAPTURE_SECONDS.default, 10)
+  assert.ok(CAPTURE_SECONDS.default >= CAPTURE_SECONDS.min && CAPTURE_SECONDS.default <= CAPTURE_SECONDS.max, 'a default the leader could have set')
+  const kothLimit = (GAME_MODES.find((mode) => mode.id === 'koth') as (typeof GAME_MODES)[number]).defaultLimit
   const rules = applyRulesChange(defaultRules(), { captureSeconds: 2 })
   assert.equal(rules.captureSeconds, 2)
-  assert.deepEqual(modeRules(rules, 'koth'), { respawnTicks: 3 * GAME_TPS, scoreLimit: 100, captureTicks: 2 * GAME_TPS })
+  assert.deepEqual(modeRules(rules, 'koth'), { respawnTicks: GAME_RESPAWN_TICKS, scoreLimit: kothLimit, captureTicks: 2 * GAME_TPS })
   assert.equal('captureTicks' in modeRules(rules, 'ctf'), false)
   assert.equal('captureTicks' in modeRules(rules, 'deathmatch'), false)
   const setup = createModeSetup('koth', [1, 2], { hill: HILL, flags: [] }, modeRules(rules, 'koth'))
-  assert.deepEqual(setup, { kind: 'koth', hill: HILL, captureTicks: 120, respawnTicks: 180, scoreLimit: 100 })
+  assert.deepEqual(setup, { kind: 'koth', hill: HILL, captureTicks: 2 * GAME_TPS, respawnTicks: GAME_RESPAWN_TICKS, scoreLimit: kothLimit })
 
   assert.deepEqual(readRulesChange({ captureSeconds: 2 }), { change: { captureSeconds: 2 } })
-  for (const bad of [0, 121, 1.5, '10', null]) {
+  for (const bad of [CAPTURE_SECONDS.min - 1, CAPTURE_SECONDS.max + 1, 1.5, '10', null]) {
     const read = readRulesChange({ captureSeconds: bad })
-    assert.ok('problem' in read && /Capture time must be a whole number of seconds from 1 to 120/.test(read.problem), String(bad))
+    assert.ok('problem' in read && new RegExp(`Capture time must be a whole number of seconds from ${CAPTURE_SECONDS.min} to ${CAPTURE_SECONDS.max}`).test(read.problem), String(bad))
   }
 })
 

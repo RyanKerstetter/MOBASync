@@ -6,7 +6,6 @@ import {
   EMPOWER_BONUS_DAMAGE,
   EMPOWER_DURATION_TICKS,
   EMPOWER_KEY,
-  SHADOW_AUTO_BONUS_DAMAGE,
   SHADOW_KEY,
   SHADOW_MAX_STACKS,
   SHADOW_STACK_TICKS,
@@ -25,9 +24,11 @@ import {
   SWORD_DURATION_TICKS,
   SWORD_KEY,
   SWORD_MAX_STACKS,
+  SHADOW_AUTO_BONUS,
 } from './abilities.js'
 import { GAME_TPS } from './constants.js'
 import {
+  arcane,
   attackDamage,
   damage,
   haste,
@@ -36,6 +37,7 @@ import {
   popMarkers,
   reduceCooldown,
   runEffects,
+  scaled,
   self,
   spawnEntity,
   stacks,
@@ -47,6 +49,7 @@ import {
   type SimContext,
   type SimReader,
 } from './effects.js'
+import { STRUCTURE_ARCANE_DAMAGE } from './structures.js'
 import { BASE_STAT_DEFAULTS, NO_GROWTH, StatBlock, type BaseStatsDef, type ChampionStats, type StatValues } from './stats.js'
 
 // A shot an auto attack fires instead of landing at once. It flies straight at its target, turning
@@ -77,7 +80,11 @@ export interface ChampionDef {
   moveSpeed: number
   radius: number
   attackRange: number
-  attackWindupTicks: number
+  // How much of the time one attack takes, from the start of one to the start of the next, goes before the hit lands (or the shot leaves):
+  // 0 for an attack that lands the moment it starts, 0.25 for one that lands a quarter of the way through, and 1 at most. It is a share
+  // of the attack and not a number of ticks, so it shortens as the attack speed rises, with the rest of the attack (see
+  // `attackWindupTicksWith`).
+  attackWindup: number
   // Leave it out for an instant attack, which lands the moment its windup finishes, however far
   // away the target is. Set it for a ranged attack that fires a shot and lands on arrival.
   attackProjectile?: AttackProjectileDef
@@ -90,7 +97,7 @@ export interface ChampionDef {
   onCast?: readonly Effect[]
 }
 
-type StatusBonus = { kind: string; amount: number }
+type StatusBonus = { kind: string; stat?: string; amount: number }
 
 // One shot definition per distinct shot, shared by every champion that fires it. The definition
 // names no champion: its hit runs the shooter's own `onAttackHit`. So a copy of a champion with
@@ -115,9 +122,22 @@ function launchAutoShot(projectile: AttackProjectileDef): Effect {
   return spawnEntity(shot)
 }
 
+// What an auto attack on a structure (a turret or a core) does on top of its damage: a point for each point of its attacker's arcane (see
+// `STRUCTURE_ARCANE_DAMAGE`). It is one extra hit for the whole attack, so the effects an attack adds (an ability readied for it, a champion's own)
+// do not each add it again, and an attack with no arcane behind it, or on anything else, adds nothing.
+const ownArcane = arcane()
+const arcaneOnStructure: Effect<SimContext> = when<SimContext>(
+  (sim, src) => STRUCTURE_ARCANE_DAMAGE > 0 && src.subject !== null && sim.character(src.subject)?.structure === true && ownArcane(sim, src) > 0,
+  [damage(scaled(0, { arcane: STRUCTURE_ARCANE_DAMAGE }))],
+)
+
 // Whether the unit an auto is aimed at is dodging it.
 const subjectDodging = (sim: SimReader, src: EffectSource): boolean =>
   src.subject !== null && sim.statusesOn(src.subject).some((status) => status.kind === 'dodge')
+
+function sumStatBuffs(statuses: readonly StatusBonus[], stat: string): number {
+  return statuses.reduce((total, status) => status.kind === 'stat' && status.stat === stat ? total + status.amount : total, 0)
+}
 
 function sumBonus(statuses: readonly StatusBonus[], kind: string): number {
   return statuses.reduce((total, status) => status.kind === kind ? total + status.amount : total, 0)
@@ -134,7 +154,8 @@ export class Champion {
   readonly moveSpeed: number
   readonly radius: number
   readonly attackRange: number
-  readonly attackWindupTicks: number
+  // The share of an attack that is its windup (see `ChampionDef`).
+  readonly attackWindup: number
   readonly attackProjectile: AttackProjectileDef | undefined
   readonly abilities: readonly string[]
   readonly onAttackHit: readonly Effect[]
@@ -158,6 +179,9 @@ export class Champion {
       if (recast !== undefined && !abilityDefs.has(recast)) {
         throw new Error(`Champion "${def.id}" has ability "${abilityId}", whose recast "${recast}" is unknown.`)
       }
+    }
+    if (!(Number.isFinite(def.attackWindup) && def.attackWindup >= 0 && def.attackWindup <= 1)) {
+      throw new Error(`Champion "${def.id}" has an attack windup that needs to be a share of the attack, from 0 to 1.`)
     }
     const projectile = def.attackProjectile
     if (projectile && !(projectile.speed > 0 && projectile.radius > 0
@@ -188,7 +212,7 @@ export class Champion {
     this.moveSpeed = def.moveSpeed
     this.radius = def.radius
     this.attackRange = def.attackRange
-    this.attackWindupTicks = def.attackWindupTicks
+    this.attackWindup = def.attackWindup
     this.attackProjectile = projectile ? { ...projectile } : undefined
     this.abilities = [...def.abilities]
     this.onAttackHit = def.onAttackHit ?? [damage(attackDamage())]
@@ -211,7 +235,7 @@ export class Champion {
     this.attackEffects = [when<SimContext>(
       subjectDodging,
       readyKeys.map((key) => popMarkers(key, self())),
-      [...this.onAttackHit, ...readied],
+      [...this.onAttackHit, ...readied, arcaneOnStructure],
     )]
     this.onAttackLaunch = this.attackProjectile ? [launchAutoShot(this.attackProjectile)] : this.attackEffects
     this.onCast = def.onCast ?? []
@@ -255,7 +279,7 @@ export class Champion {
     return this.attackCooldownTicksWith([])
   }
 
-  // Attack range and cooldown with the owner's active attack-range and attack-speed statuses, and for the cooldown the attack speed
+  // Attack range and cooldown with the owner's active attack-range and attack-speed (stat buff) statuses, and for the cooldown the attack speed
   // of the owner's level.
   // `itemRange` and `itemSpeed` are what the champion's items add to its attack range and its attacks a second (see items.ts).
   attackRangeWith(statuses: readonly StatusBonus[], itemRange = 0): number {
@@ -263,8 +287,19 @@ export class Champion {
   }
 
   attackCooldownTicksWith(statuses: readonly StatusBonus[], level = 1, itemSpeed = 0): number {
-    const speed = (this.statsAt(level).attackSpeed + itemSpeed) * (1 + sumBonus(statuses, 'attackspeed'))
+    const speed = this.statsAt(level).attackSpeed + itemSpeed + sumStatBuffs(statuses, 'attackSpeed')
     return Math.max(1, Math.ceil(GAME_TPS / speed))
+  }
+
+  // At level 1.
+  get attackWindupTicks(): number {
+    return this.attackWindupTicksWith([])
+  }
+
+  // How long an attack takes to land once it starts: its windup's share of the whole attack, at the attack speed it has now. The more
+  // attack speed it has the shorter the whole attack is, and so the shorter its windup is, in the same share.
+  attackWindupTicksWith(statuses: readonly StatusBonus[], level = 1, itemSpeed = 0): number {
+    return Math.round(this.attackWindup * this.attackCooldownTicksWith(statuses, level, itemSpeed))
   }
 
   // An ability on one of its keys, or the recast that takes the place of one while it can be cast.
@@ -286,6 +321,12 @@ const sightedOnTarget = stacks(SIGHTED_KEY, subject())
 const shadowStacksOnSelf = stacks(SHADOW_KEY, self())
 const hasShadowStack = (sim: SimReader, src: EffectSource): number => Math.min(1, shadowStacksOnSelf(sim, src))
 
+// What Ninja's auto deals: its attack damage, times 1 + SHADOW_AUTO_BONUS if it has a shadow stack to spend on it (a stack is spent by the
+// auto, so the damage is read before it goes), and plain attack damage with none.
+const ownAttackDamage = attackDamage()
+const shadowAutoDamage = (sim: SimReader, src: EffectSource): number =>
+  ownAttackDamage(sim, src) * (1 + SHADOW_AUTO_BONUS * hasShadowStack(sim, src))
+
 export const DEFAULT_CHAMPION_ID = 'cursebearer'
 
 export const champions: ReadonlyMap<string, Champion> = new Map([
@@ -295,11 +336,11 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A ranged hexer that stacks curses on its prey, then cashes them in.',
     passive: `Auto attacks apply a curse stack to the target, up to ${CURSE_MAX_STACKS}. Each stack lasts ${CURSE_DURATION_TICKS / GAME_TPS} seconds.`,
     base: { maxHp: 800, attackDamage: 40, attackSpeed: 1, resistance: 0, haste: 0, arcane: 0 },
-    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
+    growth: { maxHp: 80, attackDamage: 6, attackSpeed: 0.03, resistance: 3, haste: 8, arcane: 18 },
     moveSpeed: 140,
     radius: 20,
     attackRange: 190,
-    attackWindupTicks: 12,
+    attackWindup: 0.2,
     attackProjectile: { speed: 550, radius: 6, color: '#b07cf2' },
     abilities: ['feast', 'miasma', 'hex'],
     onAttackHit: [
@@ -313,11 +354,11 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A mobile marksman that leaps in and out of fights and kites with a long reach.',
     passive: 'Every auto attack reduces the cooldown of Leap by 1 second.',
     base: { maxHp: 700, attackDamage: 75, attackSpeed: 1, resistance: 0, haste: 0, arcane: 0 },
-    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
+    growth: { maxHp: 50, attackDamage: 14, attackSpeed: 0.05, resistance: 3, haste: 2, arcane: 4 },
     moveSpeed: 150,
     radius: 19,
     attackRange: 240,
-    attackWindupTicks: 14,
+    attackWindup: 0.23,
     attackProjectile: { speed: 900, radius: 5, color: '#6dd39b' },
     abilities: ['leap', 'focus', 'snare'],
     onAttackHit: [damage(attackDamage()), reduceCooldown('leap', GAME_TPS)],
@@ -332,7 +373,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     moveSpeed: 145,
     radius: 22,
     attackRange: 90,
-    attackWindupTicks: 13,
+    attackWindup: 0.19,
     abilities: ['slash', 'radiance', 'shackle'],
     // The auto reads the stacks before this hit adds one.
     onAttackHit: [
@@ -346,11 +387,11 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A water mage that weaves its spells into empowered attacks.',
     passive: `Your next auto attack after casting a spell deals ${EMPOWER_BONUS_DAMAGE} bonus damage.`,
     base: { maxHp: 850, attackDamage: 40, attackSpeed: .8, resistance: 0, haste: 0, arcane: 0 },
-    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
+    growth: { maxHp: 30, attackDamage: 2, attackSpeed: 0.01, resistance: 2, haste: 9, arcane: 22 },
     moveSpeed: 145,
     radius: 21,
     attackRange: 250,
-    attackWindupTicks: 16,
+    attackWindup: 0.21,
     attackProjectile: { speed: 500, radius: 7, color: '#a8e0ff' },
     abilities: ['tsunami', 'bubbles', 'spout'],
     // Any spell empowers the next auto (casting twice does not stack it); the auto spends it.
@@ -365,11 +406,11 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     name: 'Soldier',
     description: 'Shoots from range. Trades health for speed and brings a medic.',
     base: { maxHp: 750, attackDamage: 55, attackSpeed: 1, resistance: 0, haste: 0, arcane: 0 },
-    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
+    growth: { maxHp: 60, attackDamage: 12, attackSpeed: 0.04, resistance: 5, haste: 4, arcane: 4 },
     moveSpeed: 150,
     radius: 21,
     attackRange: 220,
-    attackWindupTicks: 12,
+    attackWindup: 0.2,
     attackProjectile: { speed: 800, radius: 5, color: '#ffb347' },
     abilities: ['stim', 'bolt', 'medic'],
   }),
@@ -379,11 +420,11 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A ranged bomber that bounces off its own grenades, burns the ground, and stuns or blinds with flashbangs.',
     passive: `After ${SIGHTED_AUTOS} auto attacks on the same enemy within ${SIGHTED_WINDOW_TICKS / GAME_TPS} seconds, gain ${SIGHTED_HASTE * 100}% move speed that fades away over ${SIGHTED_HASTE_TICKS / GAME_TPS} seconds.`,
     base: { maxHp: 800, attackDamage: 60, attackSpeed: .9, resistance: 0, haste: 0, arcane: 0 },
-    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
+    growth: { maxHp: 50, attackDamage: 9, attackSpeed: 0.03, resistance: 3, haste: 7, arcane: 12 },
     moveSpeed: 145,
     radius: 20,
     attackRange: 220,
-    attackWindupTicks: 15,
+    attackWindup: 0.22,
     attackProjectile: { speed: 650, radius: 6, color: '#d4b13a' },
     abilities: ['grenade', 'molotov', 'flashbang'],
     // Each auto marks its target; the third pops the marks for the speed instead of adding one.
@@ -404,12 +445,12 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     name: 'Trinketmaster',
     description: 'A melee trickster that throws a stick, calls it back through enemies, and warps to it.',
     passive: `After ${TRICK_HITS - 1} ability hits on the same enemy within ${TRICK_WINDOW_TICKS / GAME_TPS} seconds of each other, the next one deals ${TRICK_BONUS_DAMAGE} bonus damage and gives you ${TRICK_HASTE * 100}% move speed for ${TRICK_HASTE_TICKS / GAME_TPS} seconds. Your stick, going out and coming back, and the auto that Hush readies are ability hits; your plain autos are not.`,
-    base: { maxHp: 900, attackDamage: 80, attackSpeed: .9, resistance: 0, haste: 0, arcane: 0 },
-    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
+    base: { maxHp: 900, attackDamage: 70, attackSpeed: .9, resistance: 0, haste: 0, arcane: 0 },
+    growth: { maxHp: 30, attackDamage: 2, attackSpeed: 0.01, resistance: 2, haste: 10, arcane: 20 },
     moveSpeed: 150,
     radius: 21,
     attackRange: 90,
-    attackWindupTicks: 12,
+    attackWindup: 0.18,
     // Q is the stick, and becomes the recall while the stick is out.
     abilities: ['stick', 'hush', 'warp'],
   }),
@@ -417,18 +458,18 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     id: 'ninja',
     name: 'Ninja',
     description: 'A melee skirmisher that dashes through enemies, leaves shadows to dash back to, and dodges autos.',
-    passive: `Dashing through an enemy with Shadow Step gives you a shadow stack, up to ${SHADOW_MAX_STACKS} for ${SHADOW_STACK_TICKS / GAME_TPS} seconds. Each auto attack spends one for ${SHADOW_AUTO_BONUS_DAMAGE} bonus damage, and so does Shuriken, which then roots.`,
-    base: { maxHp: 800, attackDamage: 70, attackSpeed: 1, resistance: 0, haste: 0, arcane: 0 },
-    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
+    passive: `Dashing through an enemy with Shadow Step gives you a shadow stack, up to ${SHADOW_MAX_STACKS} for ${SHADOW_STACK_TICKS / GAME_TPS} seconds. Each auto attack spends one for ${SHADOW_AUTO_BONUS * 100}% bonus damage, and so does Shuriken, which then roots.`,
+    base: { maxHp: 800, attackDamage: 80, attackSpeed: 1, resistance: 0, haste: 0, arcane: 0 },
+    growth: { maxHp: 60, attackDamage: 14, attackSpeed: 0.03, resistance: 3, haste: 8, arcane: 4 },
     moveSpeed: 155,
     radius: 20,
     attackRange: 85,
-    attackWindupTicks: 10,
+    attackWindup: 0.17,
     // Q dashes, then dashes back to the shadow it left; W is the kunai; E dodges.
     abilities: ['shadowstep', 'shuriken', 'dodge'],
     // The auto reads the stacks before it spends one.
     onAttackHit: [
-      damage(linear(attackDamage(), SHADOW_AUTO_BONUS_DAMAGE, hasShadowStack)),
+      damage(shadowAutoDamage),
       popMarkers(SHADOW_KEY, self(), { count: 1 }),
     ],
   }),

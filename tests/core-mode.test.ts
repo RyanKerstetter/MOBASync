@@ -9,7 +9,11 @@ import { ServerGameState } from '../apps/server/src/game-state.ts'
 import {
   advanceObjective,
   createModeSetup,
+  GAME_ART_SCALE,
+  GAME_MAX_CHAMPION_RADIUS,
   GAME_MAX_PLAYERS,
+  GAME_VISION_RANGE,
+  CORE_TIER,
   GameSnapshotSchema,
   getCore,
   getGameMode,
@@ -25,6 +29,7 @@ import {
   summarizeMap,
   teamCountProblem,
   Terrain,
+  turretId,
   winningTeam,
   type GameResult,
   type ModeSetup,
@@ -35,15 +40,18 @@ import {
   type VisionMask,
   type VisionSystem,
 } from '../packages/shared/src/index.ts'
-import { brawler, defineChampion, defineCore, defineTurret } from './fixtures.ts'
+import { brawler, defineChampion, defineTurret } from './fixtures.ts'
 import { testSpawns } from './test-spawns.ts'
 
 // Core destruction (see modes.ts): two teams, each with a core at its base. Break the enemy's, and that team can no longer respawn; take down
 // every player left on it and the game is won. The cores and tiers in these are the tests' own.
 
-const frail = defineCore('t-cm-core', { maxHp: 100, radius: 40, guardedByTier: 0 })
-const guarded = defineCore('t-cm-core-guarded', { maxHp: 100, radius: 40, guardedByTier: 71 })
-const outpost = defineTurret(71, { base: { maxHp: 100, attackDamage: 1, attackSpeed: 1 }, radius: 30, attackRange: 200, attackWindupTicks: 0 })
+// A core is a turret, the last of a base: it waits for the turrets of its team of lower tiers. These reach no one (a range of 1), so there is only the breaking of them. One is
+// below the outpost, and so waits for nothing; the other is above it, and waits for it.
+const coreBody = { base: { maxHp: 100, attackDamage: 1, attackSpeed: 1 }, radius: 40, attackRange: 1, attackWindup: 0, core: true } as const
+const frail = defineTurret(70, coreBody)
+const guarded = defineTurret(72, coreBody)
+const outpost = defineTurret(71, { base: { maxHp: 100, attackDamage: 1, attackSpeed: 1 }, radius: 30, attackRange: 200, attackWindup: 0 })
 const slayer = defineChampion({ ...brawler, id: 't-cm-slayer', base: { ...brawler.base, attackDamage: 5000 }, abilities: [] })
 
 const ONE = { x: 600, y: 700 }
@@ -52,13 +60,14 @@ const pair = [ONE, TWO]
 
 // ---------------------------------------------------------------------------- the mode
 
-test('core destruction is a mode of its own, with no score limit to set, for exactly two teams', () => {
+test('core destruction is a mode of its own, with no score limit to set, for one team or two', () => {
   const mode = getGameMode('core')
   assert.deepEqual([mode.id, mode.name, mode.scoreName], ['core', 'Core Destruction', 'cores'])
   assert.deepEqual([mode.defaultLimit, mode.maxLimit], [0, 0], 'it ends when a team is out')
+  assert.equal(teamCountProblem('core', 1), undefined, 'one team plays alone')
   assert.equal(teamCountProblem('core', 2), undefined)
-  assert.match(teamCountProblem('core', 3) ?? '', /Core Destruction needs exactly 2 teams, and there are 3/)
-  assert.match(teamCountProblem('core', 1) ?? '', /exactly 2 teams, and there is 1/)
+  assert.match(teamCountProblem('core', 3) ?? '', /Core Destruction needs 1 or 2 teams, and there are 3/)
+  assert.match(teamCountProblem('core', 0) ?? '', /1 or 2 teams, and there are 0/)
 })
 
 test('a map needs a core for each of the first two teams for it, and says which it lacks', () => {
@@ -68,8 +77,10 @@ test('a map needs a core for each of the first two teams for it, and says which 
   for (const mode of ['deathmatch', 'koth', 'ctf'] as const) assert.equal(modeSupportProblem(mode, map), undefined, `${mode} does not need a core`)
   assert.match(modeStartProblem('core', [1, 2], NO_OBJECTIVES) ?? '', /no core for each of the first two teams/)
   assert.match(modeStartProblem('core', [1, 2], { flags: [], cores: [ONE, undefined] }) ?? '', /no core/, 'one core is not enough')
-  assert.match(modeStartProblem('core', [1, 2, 3], { flags: [], cores: pair }) ?? '', /exactly 2 teams/)
+  assert.match(modeStartProblem('core', [1, 2, 3], { flags: [], cores: pair }) ?? '', /1 or 2 teams/)
   assert.equal(modeStartProblem('core', [1, 2], { flags: [], cores: pair }), undefined)
+  assert.equal(modeStartProblem('core', [1], { flags: [], cores: pair }), undefined, 'a lone player is fine on a map that has the cores')
+  assert.match(modeStartProblem('core', [1], NO_OBJECTIVES) ?? '', /no core for each of the first two teams/, 'but the map still has to be one for the mode')
 })
 
 test('a game is set up with its two teams, the biggest first, and the respawn time it is given, and its objective starts with nothing broken', () => {
@@ -77,7 +88,8 @@ test('a game is set up with its two teams, the biggest first, and the respawn ti
   assert.deepEqual(setup, { kind: 'core', teams: [1, 2], respawnTicks: 120 }, 'team 1 has two players, so it starts at the first slot')
   assert.deepEqual(createModeSetup('core', [1, 2], { flags: [], cores: pair }), { kind: 'core', teams: [1, 2] })
   assert.throws(() => createModeSetup('core', [1, 2], NO_OBJECTIVES), /no core for each of the first two teams/)
-  assert.throws(() => createModeSetup('core', [1, 2, 3], { flags: [], cores: pair }), /exactly 2 teams/)
+  assert.throws(() => createModeSetup('core', [1, 2, 3], { flags: [], cores: pair }), /1 or 2 teams/)
+  assert.deepEqual(createModeSetup('core', [2, 2], { flags: [], cores: pair }), { kind: 'core', teams: [2] }, 'a team alone is the only one in the setup')
   assert.deepEqual(initialObjective(setup), { kind: 'core', broken: [], eliminated: [], scores: {} })
 })
 
@@ -139,8 +151,8 @@ function game(respawnTicks = 60): Simulator {
   const mode = createModeSetup('core', [1, 2], { flags: [], cores: pair }, { respawnTicks })
   const simulator = new Simulator(Terrain.plain(), mode)
   // Team 1 is on the west and team 2 on the east, each with a core that one hit breaks.
-  simulator.addCore(10, frail, ONE, 1)
-  simulator.addCore(11, frail, TWO, 2)
+  simulator.addTurret(10, frail, ONE, 1)
+  simulator.addTurret(11, frail, TWO, 2)
   return simulator
 }
 const run = (simulator: Simulator, from: number, to: number): void => {
@@ -199,6 +211,26 @@ test('a team respawns until its core is broken, and then does not, and the last 
   assert.equal(winningTeam(simulator.mode, after), 1)
 })
 
+test('a turret falling does not stop its team respawning: a core is a turret, but it is the core being broken that counts', () => {
+  const simulator = game()
+  // Team 2 has an outpost beside its core. Team 1's slayer (1) takes it down, and then a frail player of team 2 (4).
+  simulator.addTurret(12, outpost, { x: 1800, y: 760 }, 2)
+  simulator.addPlayer(1, 'p1', 'One', { x: 1800, y: 700 }, slayer, 1)
+  simulator.addPlayer(4, 'p4', 'Four', { x: 1800, y: 640 }, glass, 2)
+  simulator.addOrder(1, attack(1, 1, 12))
+  run(simulator, 1, 20)
+  assert.equal(simulator.at(20).get(12)?.isDead(), true, 'the outpost is down')
+  assert.equal(simulator.at(20).get(11)?.isDead(), false, 'and the core is not')
+  assert.deepEqual(objectiveOf(simulator, 20).broken, [], 'no core is broken, so none is counted')
+  simulator.addOrder(1, attack(1, 21, 4))
+  run(simulator, 21, 120)
+  const diedAt = simulator.at(120).get(4)?.getDeathTick()
+  assert.ok(diedAt !== undefined, 'the frail player is dead')
+  assert.equal(simulator.canRespawn(4, simulator.at(120)), true, 'and its team can still bring it back')
+  run(simulator, 121, (diedAt as number) + 70)
+  assert.equal(simulator.at((diedAt as number) + 70).get(4)?.isDead(), false, 'which it does, with its turret down')
+})
+
 test('a player who died before the core was broken, and whose time to respawn comes after, stays dead', () => {
   const simulator = game(600)
   simulator.addPlayer(1, 'p1', 'One', { x: 1800, y: 700 }, slayer, 1)
@@ -217,7 +249,7 @@ test('a player who died before the core was broken, and whose time to respawn co
 
 test('in other modes nothing changes: a team respawns whatever is broken', () => {
   const simulator = new Simulator(Terrain.plain(), { kind: 'deathmatch', respawnTicks: 60 })
-  simulator.addCore(11, frail, TWO, 2)
+  simulator.addTurret(11, frail, TWO, 2)
   simulator.addPlayer(1, 'p1', 'One', { x: 1800, y: 700 }, slayer, 1)
   simulator.addPlayer(4, 'p4', 'Four', { x: 1800, y: 900 }, glass, 2)
   simulator.addOrder(1, attack(1, 1, 11))
@@ -233,8 +265,8 @@ test('in other modes nothing changes: a team respawns whatever is broken', () =>
 test('a core protected by a turret cannot be broken until it falls, and the game plays out the same when worked out again and from a snapshot', () => {
   const build = (): Simulator => {
     const simulator = new Simulator(Terrain.plain(), createModeSetup('core', [1, 2], { flags: [], cores: pair }, { respawnTicks: 60 }))
-    simulator.addCore(10, guarded, ONE, 1)
-    simulator.addCore(11, guarded, TWO, 2)
+    simulator.addTurret(10, guarded, ONE, 1)
+    simulator.addTurret(11, guarded, TWO, 2)
     simulator.addTurret(12, outpost, { x: 1900, y: 900 }, 2)
     simulator.addPlayer(1, 'p1', 'One', { x: 1800, y: 800 }, slayer, 1)
     return simulator
@@ -263,7 +295,7 @@ test('a core protected by a turret cannot be broken until it falls, and the game
   assert.equal(snapshot.checkpoint.objective?.kind, 'core')
   const joined = new Simulator()
   joined.replaceFromSnapshot(snapshot)
-  assert.equal(joined.characters.get(11)?.core, guarded)
+  assert.equal(joined.characters.get(11)?.turret, guarded)
   straight.advanceTo(260)
   joined.advanceTo(260)
   assert.equal(JSON.stringify(joined.at(260).toData()), JSON.stringify(straight.at(260).toData()))
@@ -332,11 +364,15 @@ test('a core point that is not right says which, and what is wrong', () => {
   for (const slot of [0, GAME_MAX_PLAYERS + 1, 1.5, 'one']) assert.match(problemsOf([point(slot, 100, 100)]), /needs a team-name from 1/, String(slot))
   assert.match(problemsOf([point(1, 100, 100), point(1, 300, 100)]), /has the same team-name \(1\) as another core/)
   assert.match(problemsOf([point(1, -5, 100)]), /heart-1 is outside the arena/)
-  const pixels = getCore().champion.radius / 3
+  const pixels = getCore().champion.radius / GAME_ART_SCALE
   assert.match(problemsOf([point(1, Math.floor(pixels) - 1, 100)]), /heart-1 is too close to a wall or the arena's edge: the core would stand in it/)
   // It says where it would fit: the nearest place with its whole size inside the arena, in the map's own pixels.
-  assert.match(problemsOf([point(1, 19, 100)]), /the core would stand in it\. The nearest place that clears the walls and the edge is about \(20, 100\) in the map's own pixels \(keep it clear of the spawn points and the turrets too\)\./)
-  assert.match(problemsOf([point(1, 5, 100), point(2, 790, 100)]), /heart-1 .*about \(20, 100\).*\n.*heart-2 .*about \(\d+, 100\)/, 'for each that is wrong, and all at once')
+  const fit = Math.round(pixels * 10) / 10
+  assert.match(
+    problemsOf([point(1, Math.floor(pixels) - 1, 100)]),
+    new RegExp(`the core would stand in it\\. The nearest place that clears the walls and the edge is about \\(${fit}, 100\\) in the map's own pixels \\(keep it clear of the spawn points and the turrets too\\)\\.`),
+  )
+  assert.match(problemsOf([point(1, Math.floor(pixels / 2), 100), point(2, 790, 100)]), new RegExp(`heart-1 .*about \\(${fit}, 100\\).*\\n.*heart-2 .*about \\([\\d.]+, 100\\)`), 'for each that is wrong, and all at once')
   assert.equal(readMapLayout(mapWith([point(1, Math.ceil(pixels) + 1, 100)])).cores.length, 1, 'with room for its size it is fine')
 })
 
@@ -355,17 +391,30 @@ const tower = (tier: number, slot: number, x: number, y: number) => {
 }
 
 test('a core has to be clear of the spawn points, by its size and the widest champion\'s, or a champion would start inside it', () => {
-  // Spawn 1 of slot 1 is at (200, 140), and the core and the widest champion are 84 across from their middles: 28 map pixels.
-  assert.match(problemsOf([point(1, 200, 140)]), /spawn-1-1 is too close to heart-1: they are 0 map pixels apart and need 28, or a champion would start inside it\./)
-  assert.match(problemsOf([point(1, 220, 140)]), /spawn-1-1 is too close to heart-1: they are 20 map pixels apart and need 28,/)
-  assert.deepEqual(readMapLayout(mapWith([point(1, 228, 140)])).cores, [{ x: 684, y: 420 }], 'a core that is just clear of it is fine')
-  assert.match(problemsOf([point(1, 227, 140)]), /spawn-1-1 is too close to heart-1: they are 27 map pixels apart/, 'and a pixel nearer is not')
+  // Spawn 1 of slot 1 is at (200, 140). The core and the widest champion are `radius + GAME_MAX_CHAMPION_RADIUS` across from their middles, which is how far
+  // apart they have to be, in the map's own pixels (said to a tenth, rounded up). A whole pixel of that is just clear, and a pixel less is not.
+  const need = (getCore().champion.radius + GAME_MAX_CHAMPION_RADIUS) / GAME_ART_SCALE
+  const said = Math.ceil(need * 10) / 10
+  const clear = 200 + Math.ceil(need)
+  const half = Math.floor(need / 2)
+  assert.match(problemsOf([point(1, 200, 140)]), new RegExp(`spawn-1-1 is too close to heart-1: they are 0 map pixels apart and need ${said}, or a champion would start inside it\\.`))
+  assert.match(problemsOf([point(1, 200 + half, 140)]), new RegExp(`spawn-1-1 is too close to heart-1: they are ${half} map pixels apart and need ${said},`))
+  assert.deepEqual(readMapLayout(mapWith([point(1, clear, 140)])).cores, [{ x: clear * GAME_ART_SCALE, y: 140 * GAME_ART_SCALE }], 'a core that is just clear of it is fine')
+  assert.match(problemsOf([point(1, clear - 1, 140)]), new RegExp(`spawn-1-1 is too close to heart-1: they are ${Math.ceil(need) - 1} map pixels apart`), 'and a pixel nearer is not')
+})
+
+test('a turret point cannot name the core\'s tier: a core is a turret, but a map puts it down with a core point, so a turret point for its tier is left out and said so', () => {
+  const layout = readMapLayout(mapWith([tower(CORE_TIER, 1, 400, 300), point(1, 700, 300)]))
+  assert.deepEqual(layout.turrets, [], 'no turret was made of it')
+  assert.equal(layout.cores.filter(Boolean).length, 1, 'while the core point was')
+  assert.ok(layout.warnings.some((warning) => new RegExp(`is for a tier ${CORE_TIER} turret, which the game does not have`).test(warning)), layout.warnings.join(' | '))
+  assert.ok(!layout.warnings.some((warning) => warning.includes(`tiers ${CORE_TIER}`)) && layout.warnings.every((warning) => !/only tiers .*\b${CORE_TIER}\b/.test(warning)), 'and the tiers it lists as the game\'s do not include the core\'s')
 })
 
 test('a turret or a core cannot stand in another, and a turret has to be clear of the spawn points too', () => {
   const far = readMapLayout(mapWith([tower(1, 1, 400, 300), point(1, 400 + 120, 300)]))
   assert.deepEqual([far.turrets.length, far.cores.filter(Boolean).length], [1, 1], 'a turret and a core with room between them are fine')
-  const radii = (getTurret(1).champion.radius + getCore().champion.radius) / 3
+  const radii = (getTurret(1).champion.radius + getCore().champion.radius) / GAME_ART_SCALE
   assert.match(
     problemsOf([tower(1, 1, 400, 300), point(1, 410, 300)]),
     new RegExp(`is too close to heart-1: they are 10 map pixels apart and need ${Math.ceil(radii * 10) / 10}, or they would stand in each other\\.`),
@@ -409,11 +458,11 @@ function started(mode: 'core' | 'deathmatch', map = withCores, roster = players)
 
 test('the server puts a core in a game of this mode for each of its two teams, at the base of the slot it starts at, after the others', () => {
   const state = started('core')
-  assert.deepEqual([...state.simulator.characters.values()].map((character) => [character.id, character.core?.id, character.team]), [
+  assert.deepEqual([...state.simulator.characters.values()].map((character) => [character.id, character.isCore ? character.turret?.id : undefined, character.team]), [
     [1, undefined, 1],
     [2, undefined, 2],
-    [3, 'core', 1],
-    [4, 'core', 2],
+    [3, turretId(CORE_TIER), 1],
+    [4, turretId(CORE_TIER), 2],
   ])
   assert.deepEqual(state.simulator.characters.get(3)?.initialPosition, withCores.cores[0])
   assert.deepEqual(state.simulator.characters.get(4)?.initialPosition, withCores.cores[1])
@@ -421,12 +470,12 @@ test('the server puts a core in a game of this mode for each of its two teams, a
   assert.deepEqual(state.playingPlayerIds.sort(), ['a', 'b'], 'cores are not players')
   const snapshot = GameSnapshotSchema.parse(JSON.parse(JSON.stringify(state.snapshot())))
   assert.deepEqual(snapshot.characters.slice(2).map((character) => [character.id, character.championId, character.team, character.player]), [
-    [3, 'core', 1, undefined],
-    [4, 'core', 2, undefined],
+    [3, turretId(CORE_TIER), 1, undefined],
+    [4, turretId(CORE_TIER), 2, undefined],
   ])
   // The same map in another mode has no cores: they are what this one is played for.
   const other = started('deathmatch')
-  assert.equal([...other.simulator.characters.values()].some((character) => character.core), false)
+  assert.equal([...other.simulator.characters.values()].some((character) => character.isCore), false)
 })
 
 test('a game that is not told its mode is team deathmatch, whatever the lobby starts in', () => {
@@ -436,13 +485,46 @@ test('a game that is not told its mode is team deathmatch, whatever the lobby st
   assert.equal(state.mode, 'deathmatch', 'a map with no cores is played as it always was when no mode is given')
 })
 
-test('the server refuses the mode on a map with no cores, and with other than two teams, and says why', () => {
+test('the server refuses the mode on a map with no cores, and with more than two teams, and says why', () => {
   const state = new ServerGameState([])
   assert.match(state.modeProblem(players, 'core', { ...withCores, cores: [] }) ?? '', /no core for each of the first two teams/)
   assert.match(state.modeProblem(players, 'core', { ...withCores, cores: [withCores.cores[0], undefined] }) ?? '', /no core/)
   assert.equal(state.modeProblem(players, 'core', withCores), undefined)
   const three = [...players, { id: 'c', name: 'Cat', team: 3 }]
-  assert.match(state.modeProblem(three, 'core', withCores) ?? '', /exactly 2 teams, and there are 3/)
+  assert.match(state.modeProblem(three, 'core', withCores) ?? '', /1 or 2 teams, and there are 3/)
+})
+
+// ---------------------------------------------------------------------------- playing alone
+
+const alone = [players[0]]
+
+test('one team has no one to be the last of, so it never wins, whatever the others do', () => {
+  const solo: ModeSetup = { kind: 'core', teams: [1] }
+  const lone = advanceObjective(undefined, solo, [unit(1, 1)], 1, [], [{ team: 1, standing: true }])
+  assert.deepEqual(lone, { kind: 'core', broken: [], eliminated: [], scores: { 1: 0 } })
+  assert.equal(winningTeam(solo, lone), undefined, 'it is the last team standing from the first tick, and has won nothing')
+  // Even a team that is out leaves no one to win: the game is for as long as there are players in it.
+  const out = advanceObjective(lone, solo, [unit(1, 1, false)], 2, [], [{ team: 1, standing: false }])
+  assert.equal(winningTeam(solo, out), undefined)
+})
+
+test('the server starts a game of this mode with one team, with only its core, and it goes on until the player leaves', () => {
+  const state = started('core', withCores, alone)
+  assert.equal(state.modeProblem(alone, 'core', withCores), undefined)
+  assert.deepEqual([...state.simulator.characters.values()].map((character) => [character.id, character.isCore ? character.turret?.id : undefined, character.team]), [
+    [1, undefined, 1],
+    [2, turretId(CORE_TIER), 1],
+  ], 'the core of the slot nobody starts at is not put in')
+  state.markReady('a')
+  assert.ok(state.startIfReady())
+  let result: GameResult | undefined
+  for (let tick = 0; tick < 900 && !result; tick += 1) result = state.advanceTick()
+  assert.equal(result, undefined, 'nothing ends it')
+  assert.equal(state.status, 'running')
+
+  assert.equal(state.leaveGame('a'), true)
+  assert.equal(state.closeIfEmpty(), true, 'the player leaving is what ends it')
+  assert.equal(state.status, 'idle')
 })
 
 test('the server ends the game when a team is out, once that can no longer be undone, with the other team as the winner', () => {
@@ -502,8 +584,8 @@ test('the local player is told when their own core is down, and when the other t
 function clientGame(): ClientGameState {
   const state = new ClientGameState()
   state.simulator.reset(Terrain.plain(), createModeSetup('core', [1, 2], { flags: [], cores: pair }, { respawnTicks: 600 }))
-  state.simulator.addCore(10, guarded, ONE, 1)
-  state.simulator.addCore(11, guarded, TWO, 2)
+  state.simulator.addTurret(10, guarded, ONE, 1)
+  state.simulator.addTurret(11, guarded, TWO, 2)
   state.simulator.addTurret(12, outpost, { x: 1900, y: 900 }, 2)
   state.simulator.addPlayer(1, 'p1', 'One', { x: 1800, y: 800 }, slayer, 1)
   state.simulator.addPlayer(2, 'p2', 'Two', { x: 2100, y: 800 }, glass, 2)
@@ -523,7 +605,7 @@ test('the page shows each team\'s core, with its health, whether it is protected
   assert.equal(modeView.limit, undefined)
   assert.deepEqual(modeView.scores, [{ team: 1, score: 0 }, { team: 2, score: 0 }])
   const characters = state.getCharacters(0)
-  assert.equal(characters.find((character) => character.id === 11)?.core, true)
+  assert.deepEqual(characters.find((character) => character.id === 11)?.turret, { tier: guarded.tier, core: true, visionRange: guarded.visionRange }, 'the page is told it is the core, and how far its team sees from it')
   assert.equal(characters.find((character) => character.id === 11)?.invulnerable, true)
   assert.equal(characters.find((character) => character.id === 10)?.invulnerable, undefined)
   assert.equal(characters.find((character) => character.id === 11)?.name, 'Core')
@@ -575,18 +657,26 @@ test('the countdown is there while the core stands', () => {
 
 // ---------------------------------------------------------------------------- what the team sees, and what the game says
 
-test('a core is no place the team sees from, and is no player: a team with only its core and turrets sees the whole game', () => {
+test('a standing core is a place the team sees from, as far as it says, and is no player: a team with only its core and turrets sees the whole game', () => {
   const looks: SightViewer[][] = []
   const mask: VisionMask = { kind: 'cells', cell: 10, cols: 1, rows: 1, data: new Uint8Array([1]), revision: 1 }
   const system: VisionSystem = { name: 'square', see: (viewers) => { looks.push([...viewers]); return { mask, canSee: () => true } } }
   const piece = (id: number, team: number, extra: Partial<RenderedCharacter>): RenderedCharacter =>
     ({ id, team, position: { x: 100 * id, y: 100 }, dead: false, champion: { radius: 20 }, ...extra }) as unknown as RenderedCharacter
+  const coreRange = 720
   const vision = new TeamVision(system)
-  vision.update([piece(1, 1, {}), piece(2, 1, { core: true }), piece(3, 1, { turret: { tier: 1, visionRange: 640 } })], 1)
-  assert.deepEqual(looks[0].map((viewer) => viewer.range), [500, 640], 'the champion and the turret look, and the core does not')
+  vision.update([piece(1, 1, {}), piece(2, 1, { turret: { tier: 3, core: true, visionRange: coreRange } }), piece(3, 1, { turret: { tier: 1, core: false, visionRange: 640 } })], 1)
+  assert.deepEqual(looks[0].map((viewer) => viewer.range), [GAME_VISION_RANGE, coreRange, 640], 'the champion, the core and the turret all look, each as far as it sees')
+  assert.deepEqual(looks[0][1].position, { x: 200, y: 100 }, 'the core from where it stands')
+
+  // A core that is broken sees nothing, and neither does the other team's.
+  const broken = new TeamVision(system)
+  broken.update([piece(1, 1, {}), piece(2, 1, { turret: { tier: 3, core: true, visionRange: coreRange }, dead: true }), piece(5, 2, { turret: { tier: 3, core: true, visionRange: coreRange } })], 1)
+  assert.deepEqual(looks[1].map((viewer) => viewer.range), [GAME_VISION_RANGE])
+
   const dark = new TeamVision(system)
-  dark.update([piece(1, 1, { dead: true }), piece(2, 1, { core: true }), piece(3, 1, { turret: { tier: 1, visionRange: 640 } }), piece(4, 2, {})], 1)
-  assert.equal(dark.mask, undefined, 'nothing to see from, so everything is shown')
+  dark.update([piece(1, 1, { dead: true }), piece(2, 1, { turret: { tier: 3, core: true, visionRange: coreRange } }), piece(3, 1, { turret: { tier: 1, core: false, visionRange: 640 } }), piece(4, 2, {})], 1)
+  assert.equal(dark.mask, undefined, 'no champion to see from, so everything is shown, whatever the core and the turret light')
   assert.equal(dark.visibleCharacters([piece(4, 2, {})]).length, 1)
 })
 

@@ -181,13 +181,15 @@ export const GameFrameDashSchema = z.object({
 // Statuses are active for frames in [startTick, endTick).
 export const StatusSchema = z.object({
   id: z.string().min(1),
-  kind: z.enum(['slow', 'haste', 'attackspeed', 'attackrange', 'resist', 'root', 'stun', 'shield', 'burn', 'blind', 'silence', 'dodge']),
+  kind: z.enum(['slow', 'haste', 'attackrange', 'resist', 'root', 'stun', 'shield', 'burn', 'blind', 'silence', 'dodge', 'stat']),
   rootId: z.string(),
   ownerId: z.number().int().positive(),
   startTick: TickSchema,
   endTick: TickSchema,
   // A burn's damage for each pulse; a blind has no amount of its own.
   amount: z.number().finite().nonnegative(),
+  // Which stat a 'stat' status adds its amount to (see `statBuff`).
+  stat: z.enum(['attackDamage', 'attackSpeed', 'resistance', 'haste', 'arcane']).optional(),
   // A haste that dies away: its amount is full when it starts and falls in a straight line to
   // nothing at endTick, instead of staying the same until it ends.
   fades: z.boolean().optional(),
@@ -270,6 +272,10 @@ export const GameFrameCharacterSchema = z.object({
   // Orders written by effects; they resolve after logged orders on their tick.
   queuedOrders: z.array(CharacterOrderSchema),
   ai: AiStateSchema.optional(),
+  // The tick the last attack's hit landed (or its shot left), which is the tick `nextAttackTick` was set on. The two together say how long the
+  // wait for the next attack is, and how far through it the character is, which the attack bar draws. It is in the frame because the length of the
+  // wait cannot be worked out from the rest of it once the attack speed changes during it. Absent before its first attack.
+  attackLaunchTick: TickSchema.optional(),
   // The experience it has, from which its level is worked out (see progression.ts), and with it its stats (stats.ts). It is in the
   // frame, credited on the tick of the kill, because a level changes what the frame works out (a hit's damage, a cooldown, the
   // health), so every peer has to have it on the same tick, and a death that a late order undoes has to take it back. Absent for none.
@@ -343,7 +349,7 @@ export const ModeSetupSchema = z.discriminatedUnion('kind', [
   }),
   z.object({
     kind: z.literal('core'),
-    // The two teams that have a core, the biggest team first: the game is won by the last of them that is not eliminated.
+    // The teams that have a core, the biggest team first: the game is won by the last of two that is not eliminated. A team alone is never the last of anything.
     teams: z.array(z.number().int().positive()),
     ...RulesFields,
   }),
@@ -493,7 +499,6 @@ export {
   arcane,
   attackDamage,
   attackRangeBonus,
-  attackSpeedBonus,
   blind,
   blink,
   burn,
@@ -523,6 +528,7 @@ export {
   removeEntities,
   resetAutoTimer,
   resist,
+  statBuff,
   root,
   runEffects,
   self,
@@ -651,11 +657,11 @@ export { aimAt, think } from './ai.js'
 export type { AiBody, AiDecision, AiOrder, AiOther, WalkDistance } from './ai.js'
 export { attackEvery, getCharacterChampion, getMonster, Monster, monsters } from './monsters.js'
 export type { AiAbilityRule, AiProfile, AiProfileDef, MonsterDef } from './monsters.js'
-export { chooseTurretTarget, getTurret, Turret, TURRET_TIERS, turretId, turrets, turretTiers } from './turrets.js'
+export { chooseTurretTarget, CORE_TIER, getCore, getTurret, Turret, TURRET_TIERS, turretId, turrets, turretTiers } from './turrets.js'
 export type { TurretBody, TurretPrey, TurretTierDef } from './turrets.js'
-export { Core, CORE, CORE_ID, cores, getCore } from './cores.js'
-export type { CoreDef } from './cores.js'
-export { shieldedStructures } from './structures.js'
+export { rampMultiplier, rampStacks, TURRET_RAMP, TURRET_RAMP_GRACE_TICKS, TURRET_RAMP_KEY } from './turret-ramp.js'
+export type { TurretRamp } from './turret-ramp.js'
+export { shieldedStructures, STRUCTURE_ARCANE_DAMAGE } from './structures.js'
 export type { StructureRef } from './structures.js'
 export type { ChampionDef } from './champions.js'
 export {

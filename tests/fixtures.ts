@@ -7,15 +7,12 @@ import {
   alongAim,
   attackDamage,
   attackRangeBonus,
-  attackSpeedBonus,
   blind,
   blink,
   burn,
   capCooldown,
   Champion,
   champions,
-  Core,
-  cores,
   damage,
   dash,
   dodge,
@@ -42,6 +39,7 @@ import {
   removeEntities,
   resetAutoTimer,
   resist,
+  statBuff,
   root,
   self,
   selfInRadius,
@@ -61,7 +59,6 @@ import {
   type AbilityDef,
   type ChampionDef,
   type CharacterOrder,
-  type CoreDef,
   type DashDef,
   type EntityDef,
   type ItemDef,
@@ -94,7 +91,8 @@ export function defineMonster(def: MonsterDef): Monster {
 }
 
 // A tier of turret for a test, which the simulator finds by the id of its body (`turret-<tier>`). Like the rest it stays registered, so
-// a test uses a tier of its own, a high number the game does not use.
+// a test uses a tier of its own, a high number the game does not use. A core for a test is one too, with `core: true`: like the core of the game it is
+// protected while a turret of its team of a lower tier stands, so one that nothing guards is given a tier below every turret it is played with.
 export function defineTurret(tier: number, def: TurretTierDef): Turret {
   const turret = new Turret(tier, def)
   ;(turrets as unknown as Map<string, Turret>).set(turret.id, turret)
@@ -106,13 +104,6 @@ export function defineItem(def: ItemDef): Item {
   const item = new Item(def)
   ;(items as unknown as Map<string, Item>).set(item.id, item)
   return item
-}
-
-// A core for a test, which the simulator finds by its id. Like the rest it stays registered, so a test uses an id of its own.
-export function defineCore(id: string, def: CoreDef): Core {
-  const core = new Core(id, def)
-  ;(cores as unknown as Map<string, Core>).set(core.id, core)
-  return core
 }
 
 export function defineChampion(def: ChampionDef): Champion {
@@ -199,7 +190,7 @@ export const brawler = defineChampion({
   moveSpeed: 220,
   radius: 18,
   attackRange: 150,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: ['t-shockwave', 't-lash', 't-bolt', 't-meteor'],
 })
 
@@ -273,7 +264,7 @@ export const cursebearer = defineChampion({
   moveSpeed: 140,
   radius: 16,
   attackRange: 190,
-  attackWindupTicks: 4,
+  attackWindup: 0.08,
   abilities: ['t-feast', 't-miasma', 't-hex'],
   onAttackHit: [damage(attackDamage()), mark('curse', seconds(10), subject(), { cap: 5 })],
 })
@@ -299,7 +290,7 @@ defineAbility({
   windUpTicks: 0,
   backswingTicks: 0,
   cooldownTicks: seconds(12),
-  apply: [attackSpeedBonus(0.4, seconds(4)), attackRangeBonus(120, seconds(4))],
+  apply: [statBuff('attackSpeed', 0.4, seconds(4)), attackRangeBonus(120, seconds(4))],
 })
 
 // A trap left for 1 s that roots each enemy once, for 1.5 s, as its body touches it.
@@ -337,7 +328,7 @@ export const archer = defineChampion({
   moveSpeed: 150,
   radius: 15,
   attackRange: 220,
-  attackWindupTicks: 3,
+  attackWindup: 0.05,
   abilities: ['t-leap', 't-focus', 't-snare'],
   onAttackHit: [damage(attackDamage()), reduceCooldown('t-leap', 60)],
 })
@@ -423,7 +414,7 @@ export const swordsman = defineChampion({
   moveSpeed: 145,
   radius: 18,
   attackRange: 90,
-  attackWindupTicks: 3,
+  attackWindup: 0.05,
   abilities: ['t-slash', 't-radiance', 't-shackle'],
   onAttackHit: [
     damage(linear(attackDamage(), 25, stacks('sword', self()))),
@@ -508,7 +499,7 @@ export const capricorn = defineChampion({
   moveSpeed: 145,
   radius: 17,
   attackRange: 200,
-  attackWindupTicks: 4,
+  attackWindup: 0.07,
   abilities: ['t-tsunami', 't-bubbles', 't-gale'],
   onCast: [mark('empowered', seconds(6), self(), { cap: 1 })],
   onAttackHit: [
@@ -548,7 +539,7 @@ export const cutter = defineChampion({
   moveSpeed: 145,
   radius: 18,
   attackRange: 90,
-  attackWindupTicks: 3,
+  attackWindup: 0.05,
   abilities: ['t-cut'],
 })
 
@@ -592,7 +583,7 @@ export const spouter = defineChampion({
   moveSpeed: 145,
   radius: 18,
   attackRange: 200,
-  attackWindupTicks: 4,
+  attackWindup: 0.07,
   abilities: ['t-spout'],
 })
 
@@ -609,7 +600,7 @@ defineAbility({
   cooldownTicks: seconds(18),
   apply: [
     loseHealth(150),
-    attackSpeedBonus(0.5, seconds(5)),
+    statBuff('attackSpeed', 0.5, seconds(5)),
     haste(0.3, seconds(5)),
     resist(0.3, seconds(5)),
   ],
@@ -664,7 +655,7 @@ export const soldier = defineChampion({
   moveSpeed: 140,
   radius: 17,
   attackRange: 260,
-  attackWindupTicks: 3,
+  attackWindup: 0.06,
   abilities: ['t-stim', 't-rail', 't-medic'],
   onAttackHit: [
     when<SimContext>(
@@ -802,7 +793,7 @@ export const grenadier = defineChampion({
   moveSpeed: 150,
   radius: 16,
   attackRange: 250,
-  attackWindupTicks: 3,
+  attackWindup: 0.05,
   abilities: ['t-grenade', 't-molotov', 't-flashbang', 't-ignite'],
   // Markers on the target count its autos for 5 s; the third pops them for +50% move speed that
   // fades to nothing over 2 s.
@@ -927,7 +918,7 @@ export const trinketmaster = defineChampion({
   moveSpeed: 150,
   radius: 17,
   attackRange: 90,
-  attackWindupTicks: 3,
+  attackWindup: 0.05,
   abilities: ['t-stick', 't-hush', 't-warp'],
 })
 
@@ -1035,7 +1026,7 @@ export const ninja = defineChampion({
   moveSpeed: 160,
   radius: 16,
   attackRange: 90,
-  attackWindupTicks: 4,
+  attackWindup: 0.07,
   abilities: ['t-shadowstep', 't-kunai', 't-dodge'],
   // The auto spends one shadow stack, if there is one, for 60 bonus damage.
   onAttackHit: [
@@ -1056,7 +1047,7 @@ export const gunner = defineChampion({
   moveSpeed: 200,
   radius: 18,
   attackRange: 300,
-  attackWindupTicks: 3,
+  attackWindup: 0.05,
   attackProjectile: { speed: 600, radius: 8, color: '#ffffff' },
   abilities: [],
 })
@@ -1088,7 +1079,7 @@ export const bigHitter = defineChampion({
   moveSpeed: 220,
   radius: 18,
   attackRange: 150,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
 })
 
@@ -1114,7 +1105,7 @@ export const executioner = defineChampion({
   moveSpeed: 100,
   radius: 10,
   attackRange: 10,
-  attackWindupTicks: 1,
+  attackWindup: 0.02,
   abilities: ['t-execute'],
 })
 

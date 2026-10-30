@@ -6,14 +6,21 @@ import type { CastPreview, RenderedCharacter, RenderedEntity } from '../game-sta
 import { CharacterLayer } from './character-layer.ts'
 import { EntityLayer } from './entity-layer.ts'
 import { FogLayer } from './fog-layer.ts'
-import { FloatingDamageLayer } from './floating-damage-layer.ts'
+import { FloatingNumberLayer } from './floating-number-layer.ts'
+import { DEFAULT_EFFECTS, type EffectSettings } from './effect-settings.ts'
 import { HitboxLayer } from './hitbox-layer.ts'
 import { IndicatorLayer } from './indicator-layer.ts'
+import { KillRewardLayer } from './kill-reward-layer.ts'
+import type { KillRewardView } from './kill-reward.ts'
 import type { MapView } from './map-view.ts'
 import { ObjectiveLayer } from './objective-layer.ts'
+import { ShopAreaLayer } from './shop-area.ts'
 import { TurretRangeLayer } from './turret-range.ts'
 import type { ModeView } from '../ui/mode-hud.ts'
-import type { VisionMask } from '../../../../packages/shared/src/index.ts'
+import type { ShopZone, VisionMask } from '../../../../packages/shared/src/index.ts'
+
+// What a frame with no shops says, one array every time so the shop layer does not take it for something new to draw.
+const NO_SHOPS: readonly ShopZone[] = []
 
 // Everything the world is drawn from on one frame. It is plain data, worked out by whoever runs the
 // game, so the renderer knows nothing of the network or the simulation.
@@ -31,6 +38,10 @@ export type WorldFrame = {
   attackMarkers: readonly AttackMarker[]
   // The hill or the flags of the game mode, if it has any.
   mode?: ModeView
+  // The shops, which heal the team that owns them, tinted on the ground. Left out, there are none.
+  shops?: readonly ShopZone[]
+  // The kills the controlled champion has just made, each told once, for the gold and experience shown over where it fell.
+  rewards?: readonly KillRewardView[]
   // The way the controlled champion is walking, from where it is, for the debug view.
   debugPath?: readonly { x: number; y: number }[]
   // What the controlled champion's team sees, which the rest is darkened for. Absent when everything is shown.
@@ -51,6 +62,7 @@ export type WorldRendererOptions = {
 // The world, drawn as layers in a fixed order, bottom to top:
 //
 //   map            the ground (`MapView`), except what stands up out of it (below)
+//   shop areas     the green tint over each shop, which is a healing area (`ShopAreaLayer`)
 //   objectives     the hill, and the flags' bases and flags on the ground (`ObjectiveLayer`)
 //   ground         telegraphs and fields, under the champions so they never hide them
 //   turret ranges  the faint circle round each turret, out to the end of its reach (`TurretRangeLayer`)
@@ -64,7 +76,7 @@ export type WorldRendererOptions = {
 //   fog            the darkness over what the team cannot see (`FogLayer`): over everything drawn above, which is
 //                  why what stands in it is left out of the frame and not just darkened
 //   names          the champions' names and bars, over the fog and the walls, so they are never lost behind either
-//   floating text  damage numbers
+//   floating text  the damage taken and health got back by each champion (`FloatingNumberLayer`), and the gold and experience a kill paid (`KillRewardLayer`)
 //   debug          hitboxes, while the debug view is on
 //
 // `scene` holds them all in world coordinates; the camera moves and scales it.
@@ -75,10 +87,12 @@ export class WorldRenderer {
   private readonly characters: CharacterLayer
   private readonly entities = new EntityLayer()
   private readonly objectives = new ObjectiveLayer()
+  private readonly shopAreas = new ShopAreaLayer()
   private readonly turretRanges = new TurretRangeLayer()
   private readonly indicators = new IndicatorLayer()
   private readonly fog = new FogLayer()
-  private readonly floatingDamage = new FloatingDamageLayer()
+  private readonly floatingNumbers = new FloatingNumberLayer()
+  private readonly killRewards = new KillRewardLayer()
   private readonly hitboxes = new HitboxLayer()
 
   constructor(options: WorldRendererOptions) {
@@ -86,6 +100,7 @@ export class WorldRenderer {
     this.characters = new CharacterLayer(options.spriteSets, this.depth)
     this.scene.addChild(
       this.map.view,
+      this.shopAreas.view,
       this.objectives.ground,
       this.entities.ground,
       this.turretRanges.view,
@@ -96,12 +111,16 @@ export class WorldRenderer {
       this.entities.air,
       this.fog.view,
       this.characters.overlay,
-      this.floatingDamage.view,
+      this.floatingNumbers.view,
+      this.killRewards.view,
       this.hitboxes.view,
     )
     // The map's strips first, so one level with a champion is drawn under it.
     this.depth.attach(...(this.map.sorted ?? []))
   }
+
+  // Which of the effects drawn over the ground are on (the graphics menu). All of them are, until the page says otherwise.
+  effects: Readonly<EffectSettings> = { ...DEFAULT_EFFECTS }
 
   get debug(): boolean {
     return this.hitboxes.enabled
@@ -125,16 +144,19 @@ export class WorldRenderer {
   update(frame: WorldFrame): void {
     const { characters, entities, localCharacterId, now } = frame
     const local = characters.find((character) => character.id === localCharacterId)
-    this.floatingDamage.update(characters, now)
+    this.floatingNumbers.update(characters, now)
+    this.killRewards.update(frame.rewards ?? [], now)
+    this.shopAreas.update(frame.shops ?? NO_SHOPS, this.effects.shopGlow)
     this.characters.update(characters, localCharacterId, frame.localAttackCooldown, now, frame.unseen)
     this.entities.update(entities)
-    this.turretRanges.update(characters)
+    this.turretRanges.update(characters, this.effects.turretRanges)
     this.objectives.update(frame.mode, characters, now)
     this.fog.update(frame.fog)
     this.hitboxes.update(characters, entities, localCharacterId, frame.debugPath)
     this.indicators.update({
       characters,
       ...(local && !local.dead ? { local: { position: local.position, attackRange: local.attackRange } } : {}),
+      showAttackRange: this.effects.selfAttackRange,
       ...(frame.castPreview ? { castPreview: frame.castPreview } : {}),
       attackMarkers: frame.attackMarkers,
     })

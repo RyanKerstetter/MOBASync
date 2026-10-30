@@ -152,7 +152,7 @@ const hero = defineChampion({
   moveSpeed: 200,
   radius: 20,
   attackRange: 150,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
 })
 

@@ -214,11 +214,13 @@ test('shield statuses absorb damage before health', () => {
 })
 
 test('attack windup delays damage and moving cancels it without starting cooldown', () => {
+  const SWING_TICKS = 10
   const slowSwing = new Champion({
     ...brawler,
     id: 'slow-swing',
-    attackWindupTicks: 10,
+    attackWindup: SWING_TICKS / brawler.attackCooldownTicks,
   })
+  assert.equal(slowSwing.attackWindupTicks, SWING_TICKS)
   const createDuel = (): Simulator => {
     const simulator = new Simulator()
     simulator.addPlayer(1, 'player-1', 'Player 1', ORIGIN, slowSwing)
@@ -930,7 +932,7 @@ test('focus adds attack speed and range for its duration only', () => {
   simulator.addOrder(1, attack(3, 250))
 
   const status = simulator.at(2).get(1)?.getStatuses() ?? []
-  assertClose(status.find((s) => s.kind === 'attackspeed')?.amount ?? 0, 0.4)
+  assertClose(status.find((s) => s.kind === 'stat' && s.stat === 'attackSpeed')?.amount ?? 0, 0.4)
   assertClose(status.find((s) => s.kind === 'attackrange')?.amount ?? 0, 120)
   assert.equal(simulator.at(9).get(2)?.getHealth(), 1000 - archer.attackDamage, 'in range only while focused')
   // The cooldown after that auto is shortened: ceil(60 / 1.4) = 43 ticks.
@@ -2073,8 +2075,8 @@ test('stim costs health and gives attack speed, move speed and resistance for fi
 
   const frame = simulator.at(1)
   assert.equal(frame.get(1)?.getHealth(), soldier.maxHp - 150)
-  const amounts = Object.fromEntries((frame.get(1)?.getStatuses() ?? []).map((status) => [status.kind, status.amount]))
-  assert.deepEqual(amounts, { attackspeed: 0.5, haste: 0.3, resist: 0.3 })
+  const amounts = Object.fromEntries((frame.get(1)?.getStatuses() ?? []).map((status) => [status.stat ?? status.kind, status.amount]))
+  assert.deepEqual(amounts, { attackSpeed: 0.5, haste: 0.3, resist: 0.3 })
   assert.equal(frame.get(1)?.getStatuses().every((status) => status.endTick === 1 + 300), true)
 
   assert.equal(simulator.at(300).get(1)?.getStatuses().length, 3, 'still active on the last tick')

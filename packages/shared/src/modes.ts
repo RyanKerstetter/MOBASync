@@ -21,10 +21,11 @@ import type { GameMode, HillArea, ModeSetup, ObjectiveState, Vector2 } from './i
 //   it up, and carry it to your own flag's base to score a point, as long as your flag is at home. A
 //   carrier that dies drops the flag where it fell, and it stays there until a champion of the flag's
 //   own team walks over it, which sends it back to its base, or an enemy picks it up again.
-// - core destruction: two teams, each with a core at its base (cores.ts), guarded by its turrets (turrets.ts). Break the enemy's core,
+// - core destruction: two teams, each with a core at its base, which is the last of its turrets (turrets.ts), guarded by the others. Break the enemy's core,
 //   and then every player on that team: a team whose core is broken cannot respawn, so the players it has left are all it has, and a
 //   team with its core broken and no player alive is eliminated. The last team that is not eliminated wins. There is no score limit: it
 //   ends when a team is out. A core, like a turret, is hurt by attacks only, and is protected until its team's turrets are down.
+//   It can also be played by one team alone, with nobody to beat: no team is ever the last standing, and the game ends only when its players have left.
 //
 // Only core destruction has an economy (`GameModeDef.economy`): experience and levels, gold and the shop, and shards. In the others a kill is a kill on
 // the scoreboard and nothing else: nobody levels, earns or buys, whatever they kill, and every champion is at level 1 all game.
@@ -100,7 +101,7 @@ export const GAME_MODES: readonly GameModeDef[] = [
   {
     id: 'core',
     name: 'Core Destruction',
-    summary: 'Break the enemy core, then take down every player left on that team: with their core gone they cannot respawn. Needs exactly two teams.',
+    summary: 'Break the enemy core, then take down every player left on that team: with their core gone they cannot respawn. Takes one team, to play alone, or two.',
     scoreName: 'cores',
     economy: true,
     limitLabel: 'No limit',
@@ -235,8 +236,8 @@ export function teamCountProblem(mode: GameMode, teamCount: number): string | un
   if (mode === 'ctf' && teamCount !== 2) {
     return `Capture the Flag needs exactly 2 teams, and there ${teamCount === 1 ? 'is 1' : `are ${teamCount}`}.`
   }
-  if (mode === 'core' && teamCount !== 2) {
-    return `Core Destruction needs exactly 2 teams, and there ${teamCount === 1 ? 'is 1' : `are ${teamCount}`}.`
+  if (mode === 'core' && (teamCount < 1 || teamCount > 2)) {
+    return `Core Destruction needs 1 or 2 teams, and there ${teamCount === 1 ? 'is 1' : `are ${teamCount}`}.`
   }
   return undefined
 }
@@ -462,9 +463,10 @@ export function leadingTeam(scores: Record<string, number>): number | undefined 
 // reach it together, level, have not decided it: the game goes on until one is ahead. With no limit no one wins.
 export function winningTeam(setup: ModeSetup, objective: ObjectiveState | undefined): number | undefined {
   // Core destruction is won by being the last team standing, with no score to reach: when every team but one is out. (If the last two
-  // go out on the same tick, no one has won, and the game goes on with no one in it until the leader ends it.)
+  // go out on the same tick, no one has won, and the game goes on with no one in it until the leader ends it.) A team playing alone has no one
+  // to be the last of, so it never wins: the game is over when its players have gone.
   if (setup.kind === 'core') {
-    if (objective?.kind !== 'core') return undefined
+    if (objective?.kind !== 'core' || setup.teams.length < 2) return undefined
     const standing = setup.teams.filter((team) => !objective.eliminated.includes(team))
     return standing.length === 1 ? standing[0] : undefined
   }

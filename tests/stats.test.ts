@@ -6,6 +6,8 @@ import {
   Champion,
   champions,
   damage,
+  GAME_RESPAWN_TICKS,
+  GAME_TPS,
   enemiesInRadius,
   xpToReachLevel,
   GameSnapshotSchema,
@@ -17,13 +19,16 @@ import {
   scaled,
   Simulator,
   startCooldown,
+  statBuff,
   statMultiplier,
   StatBlock,
   statReduction,
   type ChampionDef,
+  type Scaling,
   type StatValues,
   type Vector2,
 } from '../packages/shared/src/index.ts'
+import { SHURIKEN_DAMAGE, SHURIKEN_SCALING, SPOUT_DAMAGE, SPOUT_SCALING, TSUNAMI_DAMAGE, TSUNAMI_SCALING } from '../packages/shared/src/abilities.ts'
 import { defineAbility, defineChampion, defineMonster, economyClient, economySimulator } from './fixtures.ts'
 
 // A champion's stats (see stats.ts): arcane, the ability power that the abilities which scale with it add to their damage; resistance, which takes a share off every hit it
@@ -51,6 +56,7 @@ defineAbility({ id: 't-st-reset', targeting: 'none', range: 0, windUpTicks: 0, b
 const ABILITIES = [
   't-st-blast', 't-st-flame', 't-st-sting', 't-st-drain', 't-st-guard', 't-st-mend', 't-st-reset',
   't-st-from-arcane', 't-st-from-damage', 't-st-from-max-health', 't-st-from-health', 't-st-from-level', 't-st-from-all', 't-st-burn-from-arcane',
+  't-st-buff-resistance', 't-st-buff-attack-damage', 't-st-buff-arcane', 't-st-buff-haste',
 ]
 
 // What a test changes about the champion: the stats of its base and of its growth, each only in what it names.
@@ -65,7 +71,7 @@ function champion(tweak: Tweak = {}, extra: Partial<ChampionDef> = {}): Champion
     moveSpeed: 100,
     radius: 20,
     attackRange: 150,
-    attackWindupTicks: 0,
+    attackWindup: 0,
     abilities: ABILITIES,
     ...extra,
   })
@@ -190,7 +196,7 @@ test('growth that is left out does not grow, and what grows is the champion\'s a
   assert.equal(quickening.attackCooldownTicks, 60, 'a swing a second at level 1')
   assert.equal(quickening.attackCooldownTicksWith([], 1), 60)
   assert.equal(quickening.attackCooldownTicksWith([], 2), 30, 'twice a second at level 2')
-  assert.equal(quickening.attackCooldownTicksWith([{ kind: 'attackspeed', amount: 0.5 }], 2), 20, 'and a bonus on top of it')
+  assert.equal(quickening.attackCooldownTicksWith([{ kind: 'stat', stat: 'attackSpeed', amount: 0.5 }], 2), Math.ceil(GAME_TPS / 2.5), 'and a buff added on top of it')
 })
 
 test('what a champion is made of has to be a number, 0 or more, in its base and in its growth', () => {
@@ -222,7 +228,7 @@ test('what a champion is made of has to be a number, 0 or more, in its base and 
       moveSpeed: 100,
       radius: 20,
       attackRange: 150,
-      attackWindupTicks: 0,
+      attackWindup: 0,
       abilities: [],
     }), new RegExp(`needs an? ${left} that is a number`), left)
   }
@@ -367,6 +373,43 @@ test('resistance and a resist status both apply, one after the other, and a heal
   assert.equal(hp(drained, 3), 5000 - 100)
 })
 
+// ---------------------------------------------------------------------------- stat buffs
+
+const BUFF = 100
+defineAbility({ id: 't-st-buff-resistance', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [statBuff('resistance', BUFF, 60)] })
+defineAbility({ id: 't-st-buff-attack-damage', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [statBuff('attackDamage', BUFF, 60)] })
+defineAbility({ id: 't-st-buff-arcane', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [statBuff('arcane', BUFF, 60)] })
+defineAbility({ id: 't-st-buff-haste', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [statBuff('haste', BUFF, 60)] })
+
+test('attack damage and arcane buffs raise what the caster deals while they last, and wear off', () => {
+  const damageOf = (buff: string | undefined, ability: string | undefined, tick: number): number => {
+    const simulator = duel()
+    let seq = 0
+    if (buff) simulator.addOrder(1, cast(seq += 1, 1, buff, A))
+    if (ability) simulator.addOrder(1, cast(seq += 1, tick, ability, A))
+    else simulator.addOrder(1, attack(seq += 1, tick, 2))
+    return 5000 - (hp(simulator, tick + 10) ?? 0)
+  }
+  assert.equal(damageOf('t-st-buff-attack-damage', undefined, 3) - damageOf(undefined, undefined, 3), BUFF, 'an auto')
+  assert.equal(damageOf('t-st-buff-arcane', 't-st-from-arcane', 3) - damageOf(undefined, 't-st-from-arcane', 3), BUFF * 0.1, 'an ability that scales with arcane')
+  assert.equal(damageOf('t-st-buff-attack-damage', undefined, 200), damageOf(undefined, undefined, 200), 'and not after the buff ends')
+})
+
+test('a resistance buff cuts the damage taken by the formula, and a haste buff shortens the cooldowns cast after it', () => {
+  const guarded = duel()
+  guarded.addOrder(2, cast(1, 1, 't-st-buff-resistance', B))
+  guarded.addOrder(1, cast(1, 3, 't-st-blast', A))
+  const plain = duel()
+  plain.addOrder(1, cast(1, 3, 't-st-blast', A))
+  const dealt = 5000 - (hp(plain, 5) ?? 0)
+  assert.equal(5000 - (hp(guarded, 5) ?? 0), Math.round(dealt * statMultiplier(BUFF)))
+
+  const hasted = duel()
+  hasted.addOrder(1, cast(1, 1, 't-st-buff-haste', A))
+  hasted.addOrder(1, cast(2, 3, 't-st-blast', A))
+  assert.equal(hasted.at(3).get(1)?.getAbilityCooldown('t-st-blast').ticksRemaining, hastedCooldownTicks(600, BUFF))
+})
+
 // ---------------------------------------------------------------------------- haste
 
 test('haste shortens the cooldown an ability starts with, by the formula', () => {
@@ -405,7 +448,7 @@ const feed = defineMonster({
   moveSpeed: 100,
   radius: 20,
   attackRange: 60,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
   ai: { aggroRange: 0, deaggroRange: 300 },
   reward: { gold: 0, xp: xpToReachLevel(2), shards: 0 },
@@ -481,7 +524,7 @@ test('a monster has stats too, and is at level 1 since it earns nothing', () => 
     moveSpeed: 100,
     radius: 20,
     attackRange: 60,
-    attackWindupTicks: 0,
+    attackWindup: 0,
     abilities: [],
     ai: { aggroRange: 0, deaggroRange: 300 },
   })
@@ -504,7 +547,7 @@ test('the level is kept through a death and a respawn, and a respawn is at the h
   slain.addOrder(3, { id: 'k', seq: 1, tick: 20, type: 'attack', targetId: 1 })
   assert.equal(slain.at(30).get(1)?.isDead(), true, 'it was killed')
   assert.equal(slain.at(30).get(1)?.getLevel(), 2, 'and keeps its level')
-  const back = slain.at(20 + 180 + 1).get(1)
+  const back = slain.at(20 + GAME_RESPAWN_TICKS + 1).get(1)
   assert.deepEqual([back?.isDead(), back?.getLevel(), back?.getHealthState()?.maxHp, back?.getHealth()], [false, 2, 1100, 1100])
 })
 
@@ -564,7 +607,7 @@ test('the abilities in the game scale with what they say: Spout with arcane, Kun
   const hit = (abilityId: string, stats: Partial<StatValues>, target: object): number => {
     const caster = defineChampion({
       id: unique('t-st-real'), name: 'Real', base: { maxHp: 1000, attackDamage: 50, attackSpeed: 1, ...stats }, moveSpeed: 100, radius: 20,
-      attackRange: 150, attackWindupTicks: 0, abilities: [abilityId],
+      attackRange: 150, attackWindup: 0, abilities: [abilityId],
     })
     const simulator = economySimulator()
     simulator.addPlayer(1, 'p1', 'One', A, caster, 1)
@@ -573,13 +616,33 @@ test('the abilities in the game scale with what they say: Spout with arcane, Kun
     simulator.advanceTo(120)
     return 50000 - (simulator.at(120).get(2)?.getHealth() ?? 0)
   }
-  const spout = (arcane: number) => hit('spout', { arcane }, { mode: 'point', point: B })
-  assert.equal(spout(100) - spout(0), 70, 'Spout adds 0.7 of the arcane')
-  assert.ok(spout(0) > 0, 'and hits with none')
-  const kunai = (attackDamage: number) => hit('shuriken', { attackDamage }, { mode: 'direction', dir: { x: 1, y: 0 } })
-  assert.equal(kunai(150) - kunai(50), 30, 'Kunai adds 0.3 of the attack damage')
-  assert.equal(hit('shuriken', { arcane: 500 }, { mode: 'direction', dir: { x: 1, y: 0 } }), kunai(50), 'and none of the arcane')
-  const tsunami = (stats: Partial<StatValues>) => hit('tsunami', stats, { mode: 'direction', dir: { x: 1, y: 0 } })
-  assert.equal(tsunami({ maxHp: 2000 }) - tsunami({ maxHp: 1000 }), 80, 'Tsunami adds 8% of the most health')
-  assert.equal(tsunami({ arcane: 100 }) - tsunami({}), 30, 'and 0.3 of the arcane')
+  // What an ability that is `base` and the caster's stats times `scaling` does to an enemy with no resistance, which lands as a whole number. The base and the
+  // ratios are the abilities' own (exported from abilities.ts), so retuning one changes nothing here: what is tested is that the ability uses them, with
+  // every stat it says and none it does not. The caster is at full health and level 1, so those are its most health and 1.
+  type Caster = { maxHp: number; attackDamage: number; arcane: number }
+  const landed = (base: number, scaling: Scaling, caster: Caster): number => Math.round(
+    base
+    + (scaling.arcane ?? 0) * caster.arcane
+    + (scaling.attackDamage ?? 0) * caster.attackDamage
+    + (scaling.maxHealth ?? 0) * caster.maxHp
+    + (scaling.health ?? 0) * caster.maxHp
+    + (scaling.level ?? 0) * 1,
+  )
+  const BARE: Caster = { maxHp: 1000, attackDamage: 50, arcane: 0 }
+  // Every stat made different, and big enough that a ratio that is off by a little still shows.
+  const STRONG: Caster = { maxHp: 3000, attackDamage: 400, arcane: 700 }
+  const abilities: Array<[string, number, Scaling, object]> = [
+    ['spout', SPOUT_DAMAGE, SPOUT_SCALING, { mode: 'point', point: B }],
+    ['shuriken', SHURIKEN_DAMAGE, SHURIKEN_SCALING, { mode: 'direction', dir: { x: 1, y: 0 } }],
+    ['tsunami', TSUNAMI_DAMAGE, TSUNAMI_SCALING, { mode: 'direction', dir: { x: 1, y: 0 } }],
+  ]
+  for (const [abilityId, base, scaling, target] of abilities) {
+    assert.equal(hit(abilityId, BARE, target), landed(base, scaling, BARE), `${abilityId} with the stats of a champion that has no arcane`)
+    assert.equal(hit(abilityId, STRONG, target), landed(base, scaling, STRONG), `${abilityId} with stats of every kind`)
+    assert.ok(hit(abilityId, BARE, target) > 0, `${abilityId} hits with none`)
+  }
+  // Each says which stats it grows with, and the test above holds it to that; these are the ones the abilities are made to scale with.
+  assert.ok((SPOUT_SCALING.arcane ?? 0) > 0, 'Spout grows with arcane')
+  assert.ok((SHURIKEN_SCALING.attackDamage ?? 0) > 0, 'Kunai grows with attack damage')
+  assert.ok((TSUNAMI_SCALING.maxHealth ?? 0) > 0 && (TSUNAMI_SCALING.arcane ?? 0) > 0, 'Tsunami grows with health and arcane')
 })

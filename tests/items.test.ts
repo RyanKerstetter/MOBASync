@@ -6,6 +6,7 @@ import {
   buyProblem,
   damage,
   enemiesInRadius,
+  GAME_RESPAWN_TICKS,
   GAME_STARTING_GOLD,
   GameSnapshotSchema,
   getItem,
@@ -59,7 +60,7 @@ const fighter = defineChampion({
   moveSpeed: 200,
   radius: 20,
   attackRange: 150,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: ['t-it-blast', 't-it-spell'],
 })
 // Takes a lot of hits, and hits for nothing.
@@ -70,7 +71,7 @@ const dummy = defineChampion({
   moveSpeed: 200,
   radius: 20,
   attackRange: 150,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
 })
 // Goes down in one hit.
@@ -81,7 +82,7 @@ const glass = defineChampion({
   moveSpeed: 200,
   radius: 20,
   attackRange: 150,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
 })
 
@@ -190,7 +191,7 @@ test('what a champion carries adds up, and an id that is not an item adds nothin
 test('a player starts with gold to spend and nothing in their slots, and a monster or a structure has none', () => {
   const simulator = game()
   simulator.addMonster(10, defineMonster({
-    id: 't-it-grub', name: 'Grub', base: { maxHp: 100, attackDamage: 1, attackSpeed: 1 }, moveSpeed: 100, radius: 20, attackRange: 50, attackWindupTicks: 0, abilities: [], ai: { aggroRange: 0, deaggroRange: 100 },
+    id: 't-it-grub', name: 'Grub', base: { maxHp: 100, attackDamage: 1, attackSpeed: 1 }, moveSpeed: 100, radius: 20, attackRange: 50, attackWindup: 0, abilities: [], ai: { aggroRange: 0, deaggroRange: 100 },
   }), { x: 1500, y: 700 })
   assert.deepEqual([gold(simulator, 0), carried(simulator, 0)], [GOLD, {}])
   assert.equal(gold(simulator, 0, 10), 0)
@@ -393,10 +394,11 @@ test('what a champion has comes back with it when it respawns, and the health is
   run(simulator, 1, 10)
   const died = simulator.at(10).get(2)?.getDeathTick() as number
   assert.ok(died !== undefined, 'killed')
-  run(simulator, 11, died + 190)
-  assert.equal(simulator.at(died + 190).get(2)?.isDead(), false, 'back')
-  assert.deepEqual([maxHp(simulator, died + 190, 2), hp(simulator, died + 190, 2)], [400, 400])
-  assert.deepEqual(carried(simulator, died + 190, 2), { chest: plate.id })
+  const back = died + GAME_RESPAWN_TICKS + 10
+  run(simulator, 11, back)
+  assert.equal(simulator.at(back).get(2)?.isDead(), false, 'back')
+  assert.deepEqual([maxHp(simulator, back, 2), hp(simulator, back, 2)], [400, 400])
+  assert.deepEqual(carried(simulator, back, 2), { chest: plate.id })
 })
 
 // ---------------------------------------------------------------------------- the same on every peer

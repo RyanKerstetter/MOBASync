@@ -1,6 +1,7 @@
 import { Champion, champions, type AttackProjectileDef, type ChampionDef } from './champions.js'
 import { GAME_VISION_RANGE } from './constants.js'
-import { DEFAULT_TURRET_REWARD, type Resources } from './progression.js'
+import { DEFAULT_CORE_REWARD, DEFAULT_TURRET_REWARD, type Resources } from './progression.js'
+import { rampedShot, rampProblem, TURRET_RAMP, type TurretRamp } from './turret-ramp.js'
 import type { Vector2 } from './index.js'
 
 // Turrets: structures a map puts on the ground, that stand where they are put and shoot the enemy players who come within their range.
@@ -18,24 +19,23 @@ import type { Vector2 } from './index.js'
 //
 // A standing turret is also a place its team sees from, out to its `visionRange`, as a champion of the team is (see `TeamVision`, which is
 // the page's, and not a rule of the game).
+//
+// **The core is a turret.** It is the last turret of a base, the highest tier there is (`CORE_TIER`), and what makes it a core is one flag on its entry in the
+// table, `core`: when it falls its team can no longer respawn, and in Core Destruction that decides who wins (see modes.ts). Everything else it has is a
+// turret's, from the same code: it shoots, ramps, is solid, is hurt by attacks only, is protected by the lower tiers of its team until they are down (structures.ts),
+// is seen from, and is destroyed for good. It differs only where the flag says: it pays nothing by default (`DEFAULT_CORE_REWARD`), it is called `Core`, a map
+// puts it down with a `core` point and not a `turret` point, and it is in the game only when the mode is Core Destruction.
 
 // What one tier of turret is made of. The stats are the champion's (see stats.ts); a turret never levels, so there is no growth.
 export interface TurretTierDef {
-  // Its health, attack damage and attack speed (attacks a second), which a tier has to say, and its resistance (`x / (100 + x)` off every
-  // hit it takes, see stats.ts), which it can leave out for none.
   base: ChampionDef['base']
-  // How big it is, to hit and to walk into: it is solid, and does not move for anyone.
   radius: number
-  // How far it reaches, from its middle to the middle of whoever it shoots, and so how big the circle drawn round it is.
   attackRange: number
-  // How far its team sees from it, from its middle, round any walls: whoever is within it is seen, whether or not a champion of the team
-  // is near. Left out, it sees as far as a champion does (`GAME_VISION_RANGE`).
   visionRange?: number
-  // How long after it starts to shoot until the shot leaves.
-  attackWindupTicks: number
-  // The shot it fires. Left out, the hit lands as the windup ends, wherever the target is in its range.
+  attackWindup: number
   attackProjectile?: AttackProjectileDef
-  // What the player who destroys it is paid (see progression.ts). Whatever it leaves out is `DEFAULT_TURRET_REWARD`.
+  ramp?: TurretRamp
+  core?: true
   reward?: Partial<Resources>
 }
 
@@ -43,14 +43,16 @@ export class Turret {
   readonly tier: number
   // The id of its body, which is what a snapshot says it is: `turret-1` for tier 1.
   readonly id: string
-  // What it is called where something has to say what it is (the killfeed, a map that has no room for it): `Tier 1 Turret`. It has no
+  // What it is called where something has to say what it is (the killfeed, a map that has no room for it): `Tier 1 Turret`, or `Core`. It has no
   // name of its own to set, and none is drawn over it.
   readonly name: string
-  // The body of it: what the simulator makes the character from.
+  // Whether it is the core of a base: the last turret, whose fall decides Core Destruction.
+  readonly core: boolean
   readonly champion: Champion
   // What destroying it pays, with the defaults put in.
   readonly reward: Readonly<Resources>
-  // How far its team sees from it, with the default put in.
+  // How its shots ramp up, if they do.
+  readonly ramp: Readonly<TurretRamp> | undefined
   readonly visionRange: number
 
   constructor(tier: number, def: TurretTierDef) {
@@ -64,11 +66,17 @@ export class Turret {
     positive(def.radius, 'radius')
     positive(def.attackRange, 'range')
     if (def.visionRange !== undefined) positive(def.visionRange, 'vision range')
-    if (!(Number.isInteger(def.attackWindupTicks) && def.attackWindupTicks >= 0)) fail('needs a windup that is a whole number of ticks, 0 or more')
+    if (!(Number.isFinite(def.attackWindup) && def.attackWindup >= 0 && def.attackWindup <= 1)) fail('needs a windup that is a share of the attack, from 0 to 1')
+    if (def.ramp) {
+      const problem = rampProblem(def.ramp)
+      if (problem) fail(problem)
+    }
+    this.ramp = def.ramp ? { ...def.ramp } : undefined
     this.tier = tier
     this.id = turretId(tier)
     if (champions.has(this.id)) fail('has the id of a champion')
-    this.name = `Tier ${tier} Turret`
+    this.core = def.core === true
+    this.name = this.core ? 'Core' : `Tier ${tier} Turret`
     this.visionRange = def.visionRange ?? GAME_VISION_RANGE
     this.champion = new Champion({
       id: this.id,
@@ -78,14 +86,17 @@ export class Turret {
       moveSpeed: 0,
       radius: def.radius,
       attackRange: def.attackRange,
-      attackWindupTicks: def.attackWindupTicks,
+      attackWindup: def.attackWindup,
       ...(def.attackProjectile ? { attackProjectile: def.attackProjectile } : {}),
+      // What a shot does when it lands: its damage, ramped up by the shots at this target before it, if the tier ramps.
+      ...(def.ramp ? { onAttackHit: rampedShot(def.ramp, def.base.attackSpeed) } : {}),
       abilities: [],
     })
+    const unsaid = this.core ? DEFAULT_CORE_REWARD : DEFAULT_TURRET_REWARD
     this.reward = {
-      gold: def.reward?.gold ?? DEFAULT_TURRET_REWARD.gold,
-      xp: def.reward?.xp ?? DEFAULT_TURRET_REWARD.xp,
-      shards: def.reward?.shards ?? DEFAULT_TURRET_REWARD.shards,
+      gold: def.reward?.gold ?? unsaid.gold,
+      xp: def.reward?.xp ?? unsaid.xp,
+      shards: def.reward?.shards ?? unsaid.shards,
     }
     for (const [what, amount] of Object.entries(this.reward)) {
       if (!(Number.isInteger(amount) && amount >= 0)) fail(`needs a reward of ${what} that is a whole number, 0 or more`)
@@ -96,27 +107,48 @@ export class Turret {
 // The id of the body of a tier of turret.
 export const turretId = (tier: number): string => `turret-${tier}`
 
+// The tier of the core of the game: above every turret, so it is the last of a base to be hurt.
+export const CORE_TIER = 3
+
 // The tiers there are. Distances are in world units (a champion is about 40 across, and sees 500), and times are in ticks (60 a second).
 // A map says which of these a turret is, by the tier on its point; a tier the map has and this table has not is left out of the game,
 // with a warning, so a map can keep places for tiers still to come. To add a tier, add an entry; the stats are all here to tune.
 export const TURRET_TIERS: Readonly<Record<number, TurretTierDef>> = {
   1: {
-    base: { maxHp: 4500, attackDamage: 50, attackSpeed: 0.6, resistance: 25 },
-    radius: 44,
+    base: { maxHp: 4500, attackDamage: 50, attackSpeed: 1, resistance: 25 },
+    radius: 36,
     attackRange: 300,
     visionRange: 600,
-    attackWindupTicks: 12,
+    attackWindup: 0.12,
     attackProjectile: { speed: 750, radius: 10, color: '#ff7a59' },
+    // Every shot at the same target does half of the first one's damage more, up to four times it.
+    ramp: TURRET_RAMP,
     reward: { gold: 150, xp: 600 },
   },
   2: {
-    base: { maxHp: 3000, attackDamage: 60, attackSpeed: 1, resistance: 40 },
+    base: { maxHp: 6000, attackDamage: 75, attackSpeed: 1, resistance: 50 },
     radius: 36,
-    attackRange: 400,
+    attackRange: 350,
     visionRange: 600,
-    attackWindupTicks: 12,
+    attackWindup: 0.12,
     attackProjectile: { speed: 700, radius: 8, color: '#ffd166' },
+    ramp: TURRET_RAMP,
     reward: { gold: 300, xp: 900 },
+  },
+  // The core every map's `core` points are: the heart of a base, and the last gun of it. It is protected until its team's turrets are down, and it shoots
+  // whoever comes within its reach, a little harder and further than a tier 2 turret does. It pays nothing: breaking it ends the game for a team.
+  [CORE_TIER]: {
+    core: true,
+    // The health of the whole base.
+    base: { maxHp: 8000, attackDamage: 90, attackSpeed: 1, resistance: 75 },
+    radius: 60,
+    attackRange: 420,
+    // As far as a turret sees: the base is lit round the core, whether or not a champion is near.
+    visionRange: 600,
+    attackWindup: 0.12,
+    attackProjectile: { speed: 750, radius: 12, color: '#c77dff' },
+    // It ramps as the turrets do: the longer someone stays in its reach, the harder it hits them.
+    ramp: TURRET_RAMP,
   },
 }
 
@@ -135,9 +167,15 @@ export function getTurret(tier: number): Turret {
   return turret
 }
 
-// The tiers the game has, lowest first, for saying which a map can use.
+// The core of the game: the turret of the core tier, which every map's `core` points are.
+export function getCore(): Turret {
+  return getTurret(CORE_TIER)
+}
+
+// The tiers of turret the game has, lowest first, for saying which a map's `turret` points can name. The core is not one of them: a map puts it down with
+// a `core` point.
 export function turretTiers(): number[] {
-  return [...turrets.values()].map((turret) => turret.tier).sort((left, right) => left - right)
+  return [...turrets.values()].filter((turret) => !turret.core).map((turret) => turret.tier).sort((left, right) => left - right)
 }
 
 // Who a turret can see to shoot: where they are, whose they are, and whether they are alive. The simulator gives it the players only.

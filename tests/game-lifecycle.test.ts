@@ -15,7 +15,7 @@ const oneShot = defineChampion({
   moveSpeed: 220,
   radius: 18,
   attackRange: 150,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [...brawler.abilities],
 })
 

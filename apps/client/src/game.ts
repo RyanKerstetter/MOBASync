@@ -27,7 +27,7 @@ import { CastControl, type CastMode } from './cast-control.ts'
 import { loadSpriteSets, type LoadedSpriteSet } from './character-sprite.ts'
 import { championSprites } from './champion-sprites.ts'
 import { createDebugOverlay } from './ui/debug-overlay.ts'
-import { createGameMenu, menuItems } from './game-menu.ts'
+import { createGameMenu, menuFooter, menuTabs } from './game-menu.ts'
 import { HoldCommand, type HeldCommand } from './hold-command.ts'
 import { loadSettings, saveSettings } from './game-settings.ts'
 import { ClientGameState } from './game-state.ts'
@@ -182,6 +182,9 @@ export async function startGame({
   const pointerInWorld = () => screenToWorld(camera, pointerOnScreen)
   const settings = loadSettings()
   const castControl = new CastControl(castMode ?? settings.castMode)
+  // What the player turned off in the menu last time stays off.
+  world.effects = { ...settings.effects }
+  debugOverlay.setVisible(settings.diagnostics)
   // Dev tool: redraw every champion from `overrides` (sheets picked from a folder, see
   // `spriteOverridesFrom`) over the art the game came with, or from that art alone with none.
   const applySprites = async (overrides?: ReadonlyMap<string, Blob>): Promise<void> => {
@@ -197,7 +200,7 @@ export async function startGame({
         Object.values(set.clips).map((clip) => spriteFileKey(clip.url))))
       const used = [...overrides.keys()].filter((key) => wanted.has(key))
       if (used.length === 0) {
-        window.alert('No sheets in that folder match the game\'s. Pick a folder laid out like res/ (Champion_X/Idle.png, …).')
+        window.alert('No sheets in that folder match the game\'s. Pick a folder laid out like res/ (champion/archer/Idle.png, …).')
         return
       }
       applySprites(overrides)
@@ -206,10 +209,16 @@ export async function startGame({
     })
     input.click()
   }
-  // The escape menu. Its items are data (`menuItems`), so what it offers grows by adding to that list.
+  // The escape menu. Its tabs and their items are data (`menuTabs`), so what it offers grows by adding to that list.
   const menu = createGameMenu({
     container,
-    items: () => menuItems({
+    footer: () => menuFooter({
+      leaveGame: () => {
+        menu.close()
+        onLeave()
+      },
+    }),
+    tabs: () => menuTabs({
       ...(import.meta.env.DEV
         ? {
           sprites: {
@@ -226,9 +235,21 @@ export async function startGame({
         settings.castMode = mode
         saveSettings(settings)
       },
-      leaveGame: () => {
-        menu.close()
-        onLeave()
+      getEffect: (effect) => settings.effects[effect],
+      setEffect: (effect, on) => {
+        settings.effects[effect] = on
+        world.effects = { ...settings.effects }
+        saveSettings(settings)
+      },
+      getDebugView: () => world.debug,
+      setDebugView: (on) => {
+        world.debug = on
+      },
+      getDiagnostics: () => settings.diagnostics,
+      setDiagnostics: (on) => {
+        settings.diagnostics = on
+        debugOverlay.setVisible(on)
+        saveSettings(settings)
       },
     }),
   })
@@ -604,6 +625,8 @@ export async function startGame({
       entities: sight.visibleEntities(gameState.getEntities(now)),
       ...(sight.mask ? { fog: sight.mask } : {}),
       mode,
+      shops: gameState.getShopZones(),
+      rewards: gameState.getKillRewards(now),
       localCharacterId,
       ...(local ? { localAttackCooldown: gameState.getAttackCooldownProgress(now) } : {}),
       ...(world.debug ? { debugPath: gameState.getLocalPath(now) } : {}),

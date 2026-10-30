@@ -1,7 +1,6 @@
 import { champions, Champion, type ChampionDef } from './champions.js'
 import { GAME_TPS } from './constants.js'
 import { DEFAULT_MONSTER_REWARD, DEFAULT_MONSTER_XP_GROWTH, type Resources } from './progression.js'
-import { cores } from './cores.js'
 import { turrets } from './turrets.js'
 
 // Monsters: characters the game plays itself. A monster is a champion (it has health, an attack, abilities and a
@@ -47,8 +46,15 @@ export interface AiProfileDef {
   deaggroRecovery?: number
   // What it casts in a fight, best first.
   abilities?: readonly AiAbilityRule[]
+  // How many ticks after the game starts it first appears, at its home with full health: until then it is not in the game at all, so it is not
+  // drawn, and cannot be seen, hit, aimed at or pushed, and it does nothing. Only the first time: after it dies it comes back by `respawnTicks`.
+  // Without it, 0: it is there from the start.
+  spawnOffsetTicks?: number
   // How many ticks after dying it comes back at its home, with full health. Without it, it does not.
   respawnTicks?: number
+  // How many times faster it walks home (once it has given up, or has been pushed off its post) than it walks otherwise, a number more than 0: 2 is twice as
+  // fast. Going home it is also not held up by anyone: it passes through every body, and none is pushed by it. Default 1: no faster.
+  returnSpeedMultiplier?: number
   // Whether it is healed to full when it gets home after giving up. Default yes.
   resetOnReturn?: boolean
   // Whether being hurt by a player makes an idle monster go after them, from however far they hit it, if there is a way to
@@ -98,6 +104,7 @@ export class Monster {
     if (!(Number.isFinite(ai.aggroRange) && ai.aggroRange >= 0)) fail('needs an aggro range of 0 or more')
     positive(ai.deaggroRange, 'deaggro range')
     positive(ai.homeRadius, 'home radius')
+    positive(ai.returnSpeedMultiplier, 'return speed multiplier')
     const wholeTicks = (value: number | undefined, what: string): void => {
       if (value !== undefined && !(Number.isInteger(value) && value > 0)) fail(`needs ${what} that is a whole number of ticks`)
     }
@@ -109,6 +116,9 @@ export class Monster {
     if (deaggroRange < ai.aggroRange) fail('gives up nearer than it notices (deaggro range under aggro range)')
     if (ai.respawnTicks !== undefined && !(Number.isInteger(ai.respawnTicks) && ai.respawnTicks > 0)) {
       fail('needs a respawn time that is a whole number of ticks')
+    }
+    if (ai.spawnOffsetTicks !== undefined && !(Number.isInteger(ai.spawnOffsetTicks) && ai.spawnOffsetTicks >= 0)) {
+      fail('needs a spawn offset that is a whole number of ticks, 0 or more')
     }
     for (const rule of ai.abilities ?? []) {
       if (!this.champion.hasAbility(rule.abilityId)) fail(`uses ${rule.abilityId}, which is not one of its abilities`)
@@ -133,6 +143,8 @@ export class Monster {
       deaggroTicks: ai.deaggroTicks ?? 3 * GAME_TPS,
       deaggroRecovery: ai.deaggroRecovery ?? 1,
       abilities: [...(ai.abilities ?? [])].map((rule) => ({ ...rule })),
+      spawnOffsetTicks: ai.spawnOffsetTicks ?? 0,
+      returnSpeedMultiplier: ai.returnSpeedMultiplier ?? 1,
       ...(ai.respawnTicks !== undefined ? { respawnTicks: ai.respawnTicks } : {}),
       resetOnReturn: ai.resetOnReturn ?? true,
       aggroOnHit: ai.aggroOnHit ?? true,
@@ -147,6 +159,10 @@ const seconds = (value: number): number => Math.round(value * GAME_TPS)
 // the tick. The wait is worked out back from the speed, rounding up, so a speed of 1 / seconds can come out a hair
 // over and a tick long: aiming half a tick short of it lands on the tick it means.
 export const attackEvery = (cooldown: number): number => GAME_TPS / (Math.max(1, seconds(cooldown)) - 0.5)
+
+// How much faster a monster walks home than it walks otherwise, as the monsters in the game have it (each can say its own, `returnSpeedMultiplier`). A monster
+// that has given up goes home quickly, so pulling it away from its camp costs the one who did it more than the walk back.
+const RETURN_SPEED = 2
 
 // The monsters in the game. A map has one by putting a `monster-spawn` point with this id on it. Everything that makes
 // a monster what it is is here to tune: distances are in world units (a champion is about 40 across), and times are
@@ -167,8 +183,8 @@ export const monsters: ReadonlyMap<string, Monster> = new Map([
     radius: 20,
     // How near (middle to middle) it has to be to bump someone: a little past touching them.
     attackRange: 60,
-    // How long its hop takes before the bump lands.
-    attackWindupTicks: seconds(0.35),
+    // How much of each attack its hop takes before the bump lands: 0.35 s of its 1 s.
+    attackWindup: 0.35,
     abilities: [],
     ai: {
       // It notices no one, but goes after whoever hurts it.
@@ -177,6 +193,9 @@ export const monsters: ReadonlyMap<string, Monster> = new Map([
       // inside. When it is full the monster ignores everyone and goes home, and the bar is shown under it.
       deaggroRange: 300,
       deaggroTicks: seconds(3),
+      // It first appears 5 seconds into the game.
+      spawnOffsetTicks: seconds(5),
+      returnSpeedMultiplier: RETURN_SPEED,
       respawnTicks: seconds(30),
     },
     // What killing it pays the player who does: gold, which is the same every time, and experience, which is more for each level it has gained.
@@ -197,8 +216,8 @@ export const monsters: ReadonlyMap<string, Monster> = new Map([
     radius: 48,
     // How near (middle to middle) it has to be to strike: its arms reach well past its body.
     attackRange: 110,
-    // How long it takes to rise up and come down before the blow lands.
-    attackWindupTicks: seconds(0.7),
+    // How much of each attack it takes to rise up and come down before the blow lands: 0.7 s of its 2.5 s.
+    attackWindup: 0.28,
     abilities: [],
     ai: {
       // It notices no one, but goes after whoever hurts it.
@@ -207,6 +226,9 @@ export const monsters: ReadonlyMap<string, Monster> = new Map([
       // inside. When it is full the monster ignores everyone and goes home, and the bar is shown under it.
       deaggroRange: 400,
       deaggroTicks: seconds(3),
+      // It first appears 20 seconds into the game, long after the slimes.
+      spawnOffsetTicks: seconds(20),
+      returnSpeedMultiplier: RETURN_SPEED,
       respawnTicks: seconds(60),
     },
     // The big prize of the map: much more than a slime, and the only one that pays shards.
@@ -223,11 +245,12 @@ export const monsters: ReadonlyMap<string, Monster> = new Map([
     moveSpeed: 170,
     radius: 22,
     attackRange: 70,
-    attackWindupTicks: 8,
+    attackWindup: 0.13,
     abilities: ['monster-slam'],
     ai: {
       aggroRange: 380,
       abilities: [{ abilityId: 'monster-slam', withinRange: 120 }],
+      returnSpeedMultiplier: RETURN_SPEED,
       respawnTicks: seconds(30),
     },
   }),
@@ -239,9 +262,9 @@ export function getMonster(id: string): Monster {
   return monster
 }
 
-// The champion a character is: a player's, or the body of a monster, a turret or a core.
+// The champion a character is: a player's, or the body of a monster or a turret (the core of a base is one).
 export function getCharacterChampion(id: string): Champion {
-  const champion = champions.get(id) ?? monsters.get(id)?.champion ?? turrets.get(id)?.champion ?? cores.get(id)?.champion
-  if (!champion) throw new RangeError(`Unknown champion, monster, turret or core "${id}".`)
+  const champion = champions.get(id) ?? monsters.get(id)?.champion ?? turrets.get(id)?.champion
+  if (!champion) throw new RangeError(`Unknown champion, monster or turret "${id}".`)
   return champion
 }

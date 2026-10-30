@@ -13,9 +13,9 @@ The client's game code is split by what it does:
 - `game.ts` runs one game: the connection to the server, the player's input, and each frame. It works out
   what to show from `ClientGameState` and hands it on; it draws nothing itself.
 - `render/` draws the world with PixiJS and knows nothing of the network or the simulation.
-  `WorldRenderer` stacks its layers in a fixed order (the map, the hill and flags, ground effects, the turrets' ranges, indicators,
+  `WorldRenderer` stacks its layers in a fixed order (the map, the shops' healing areas, the hill and flags, ground effects, the turrets' ranges, indicators,
   the champions and the walls together, carried flags, shots, the darkness of what the team cannot see, the champions' names
-  and bars, damage numbers, debug), and each frame it is given a plain
+  and bars, the damage and healing numbers and what a kill paid, debug), and each frame it is given a plain
   `WorldFrame` to draw. The ground is a
   `MapView` handed to it: `createGameMap` gives it the Tiled map, or the plain arena floor when there
   is none (see "Maps from Tiled"). The pure layout code the layers draw from (`health-bar.ts`, `stack-pips.ts`,
@@ -263,7 +263,7 @@ A map that cannot be played on is listed with what is wrong, but cannot be picke
 - **Cores (core destruction):** point objects of class `core`, each with a whole-number `team-name` (1 to 8, once each): the slot of
   spawn points whose base it is the heart of, as for a flag. Core destruction is for two teams, so it uses the cores of slots 1
   and 2, and a map with both can be played in it; a map with fewer is fine, but the mode cannot be started on it. A core is solid and needs
-  room for its size (`CORE.radius`, `cores.ts`) clear of the walls and the arena's edge, and a way to it from the spawn points. The
+  room for its size (its tier's `radius`, in `turrets.ts`: a core is a turret) clear of the walls and the arena's edge, and a way to it from the spawn points. The
   core is in a game of that mode only: in the others its point is not used. Put it inside the base the turrets guard, and clear of the
   spawn points and the turrets (below).
 - **Room for turrets and cores.** They are solid, and a champion that starts inside one would have to be shoved out of it, so the map is
@@ -271,11 +271,11 @@ A map that cannot be played on is listed with what is wrong, but cannot be picke
   (`GAME_MAX_CHAMPION_RADIUS`, 24) put together, or if **a turret or a core overlaps another** of them. The messages say how far apart
   they are and how far they need to be, in the map's own pixels (`spawn-1-1 is too close to core-1: they are 25.6 map pixels apart and
   need 28`). A point too close to a wall or the arena's edge says the nearest place that clears the walls and the edge (`about (60, -288)
-  in the map's own pixels`), which may still be too near a spawn point or a turret: that is checked as well. A core is 20 map pixels across from its middle (`CORE.radius`, 60 world units at the default scale of 3), so it cannot sit
+  in the map's own pixels`), which may still be too near a spawn point or a turret: that is checked as well. A core is 20 map pixels across from its middle (its tier's `radius`, 60 world units at the default scale of 3), so it cannot sit
   against the arena's edge: its middle has to be at least 20 pixels in.
 - **Shops:** rectangles of class `shop`, each with a whole-number `team-name` (1 to 8): the slot of spawn points whose team shops there, as for a flag or a
-  core. A champion can buy and sell items only while its middle is in a shop of its team (see "Items and the shop"), so put one over each base, with the
-  spawn points in it. They must be plain rectangles, not turned, and at least partly in the arena. **A map with any shop needs one for every slot that has
+  core. A champion can buy and sell items only while its middle is in a shop of its team (see "Items and the shop"), and is healed there, so put one over each base, with the
+  spawn points in it. The game draws it with a green tint. They must be plain rectangles, not turned, and at least partly in the arena. **A map with any shop needs one for every slot that has
   spawn points** (a second for the same team is fine): `Slot 2 has spawn points but no shop, so its team could never buy: give a shop the team-name 2.` A
   map with none is fine, and is shopped in from anywhere.
 - **Monsters:** point objects of class `monster-spawn`, each with a text property `monster-type` naming one of the
@@ -362,11 +362,12 @@ or a unit-aimed ability cannot pick one that is not seen. The map under the dark
 
 **The rules, as they are now.** Vision is the team's: every living champion of the local team sees `GAME_VISION_RANGE` (500
 world units: a little under half the screen's height, so the edge of what is seen shows on every side), and they see together,
-so a teammate's view is yours. So does every standing **turret** of the team, as far as its tier's `visionRange` (see "Turrets"):
-it lights what is round it, behind the walls' shadows like a champion, whether or not a champion of the team is near, and a
+so a teammate's view is yours. So does every standing **turret** of the team, as far as its tier's `visionRange` (see "Turrets"),
+and so does its **core**, which is one: as far as its own tier's `visionRange`, while it stands. They
+light what is round them, behind the walls' shadows like a champion, whether or not a champion of the team is near, and a
 destroyed one sees nothing. Walls block sight (the map's `wall` rectangles, as they block walking). A champion, monster or
 shot is seen if its middle or any of the four furthest points of its body is; the team's own champions and turrets and what
-they put out are always drawn. A team with no champion alive sees the whole game until one is back (its turrets add to what
+they put out are always drawn. A team with no champion alive sees the whole game until one is back (its turrets and core add to what
 a team sees, they do not keep a dead player in the dark), and the debug view (P) shows everything too. The page's address can say `?vision=range` (only how far a champion sees, with no shadows behind walls) or `?vision=off`.
 
 **It is how the page looks, not a rule of the game.** Every client plays the whole game from every order the server sends
@@ -454,8 +455,8 @@ the team's colour over each group.
 A new lobby starts on the default map (`competetive`) in the default mode, **Core Destruction** (`DEFAULT_GAME_MODE`), when that map can be
 played in it, which `startingMode` works out; if not (a map with no cores, or none that can be played on) it starts in team deathmatch. Team
 deathmatch is also `FALLBACK_GAME_MODE`: what a lobby is put back on when its leader picks a map that cannot be played in the mode it had, and
-what a game is when it is given no mode. (Core Destruction needs exactly two teams, so a lobby of one player says so and cannot start until
-there are two teams or another mode is picked.)
+what a game is when it is given no mode. (Core Destruction takes one team or two, so a lobby of one player can start it and play alone; a lobby with
+three teams says so and cannot start until it is down to two or another mode is picked.)
 
 The lobby leader picks the mode (`GAME_MODES` in `packages/shared/src/modes.ts`) and the server keeps it on
 the lobby (`POST /api/lobbies/:code/mode`, leader only, while the lobby is idle). Starting a game checks that the
@@ -494,13 +495,16 @@ leaves out the two side panels of the HUD (the level and stats, and the items an
   where it was, and it stays there until a living champion of the flag's own team walks over it, which sends
   it back to its base, or an enemy picks it up again. A flag does not go home by itself, and only a champion of
   its own team returns it.
-- **Core Destruction:** for exactly two teams. Each team has a **core** at its base (see "Cores", below), on the map's core of the slot the
+- **Core Destruction:** for two teams, or one to play alone. Each team has a **core** at its base (see "Cores", below), on the map's core of the slot the
   team starts at, guarded by its turrets. Break the enemy core, and that team **cannot respawn**: a player who dies stays dead, and
   one who was already waiting to come back does not. Take down every player left on it and it is out, and the last team that is not
   out wins. There is no score limit, and no box for one in the lobby: the game ends when a team is. A team is *out* when its core is
   broken and none of its players is alive; a team whose core stands is never out, however many of its players are dead, since they
   come back. (Should the last players of the two teams go down on the same tick, no one has won and the game goes on with no one in
   it until the leader ends it.) The score each team shows is how many cores of the other team it has broken, 1 or 0.
+  **Played alone** (one team, of one player or more), there is no other team: the game has only that team's core and turrets, no one is ever the
+  last team standing (`winningTeam` is `undefined` for a setup of one team), and the game ends only when its players have all gone back to the
+  lobby or left (`closeIfEmpty`), or the leader ends it.
 
 **Winning.** The leader sets the score a team wins at for each mode but core destruction (`Kills to win`, `Points to win`,
 `Captures to win`; defaults 25, 100 and 3; 0 is no limit, and a game with none goes on until the leader ends it). The server checks
@@ -573,11 +577,11 @@ are three so far:
 
 - **Slime** (`slime`): small, slow and soft, in the pockets beside the competitive map's lane. It notices no one, but
   goes after whoever hurts it, from however far, bumps them for a little damage once a cooldown, and goes home once
-  it has been drawn too far from where it spawned. It is slower than every champion, so it can be walked away from, and
-  it comes back 30 seconds after it dies.
+  it has been drawn too far from where it spawned. It is slower than every champion, so it can be walked away from. It
+  first appears 5 seconds into the game, and it comes back 30 seconds after it dies.
 - **Golem** (`golem`): a huge, slow lump of rock in a notch of the wall on each side of the competitive map's middle.
   It has five times a slime's health and four times its damage, but strikes only once every 2.5 seconds, after a
-  windup of 0.7 seconds in which it rises up and leaps, and it comes back a minute after it dies. It chases by the
+  windup of 0.7 seconds (0.28 of its attack) in which it rises up and leaps, and it first appears 20 seconds into the game, and comes back a minute after it dies. It chases by the
   way round the walls, like anyone, so a player who stands where it can be seen but not reached through the wall
   has it walking the long way round.
 - **Wolf** (`wolf`): a placeholder to build on, which no map has yet.
@@ -586,7 +590,7 @@ Everything that makes a monster what it is, to be tuned, is its entry in `monste
 seconds: how near a player must come for it to chase (`aggroRange`), how far from its spawn it goes before it gives up (`deaggroRange`),
 its damage, how long until it can hit again and its health (the `base` stats: `base: { maxHp: 300, attackDamage: 10, attackSpeed: attackEvery(1.5) }`,
 where `attackEvery(1.5)` is once every 1.5 seconds, to the tick), how near it must be to hit (`attackRange`), the windup before a hit
-lands and its speed.
+lands (`attackWindup`, a share of the attack, see "The windup" under Champions and abilities) and its speed.
 
 **What a monster is** (`monsters.ts`). A `Monster` is a champion (health, an attack, abilities, a size: the simulator
 plays it with the same combat code as a player's champion, so everything abilities can do, they can do to a monster and
@@ -603,10 +607,20 @@ on the champion select screen; ids are shared, so a monster cannot have a champi
 | `deaggroTicks` | How long, in ticks (write `seconds(3)`), the bar takes to fill while the monster is outside its deaggro range (default 3 seconds). When it is full the monster ignores everyone and goes home. |
 | `deaggroRecovery` | How much the bar empties each tick while the monster is back inside the range (default 1: as fast as it filled). |
 | `abilities` | Rules for what it casts in a fight, best first: an ability, `withinRange` of the target (else the ability's own range, else its attack range) and optionally `belowHealth` (a share, for an ability it keeps for when it is hurt). The first rule that can be cast is, when it is free to act. |
+| `spawnOffsetTicks` | How long after the game starts it first appears (write `seconds(5)`), at home with full health. Until then it is not in the game at all: no frame has it, so it is not drawn, and cannot be seen, hit, aimed at, or pushed, and it does nothing. Only the first time: after it dies it comes back by `respawnTicks`. Default 0, which is there from the start. |
+| `returnSpeedMultiplier` | How many times faster it walks home than it walks otherwise (2 is twice as fast), more than 0. Going home it is also not held up by anyone (see "Returning"). Default 1: no faster. The monsters of the game have 2 (`RETURN_SPEED` in `monsters.ts`). |
 | `respawnTicks` | How long after dying it comes back at home with full health. Without it, it does not. |
 | `resetOnReturn` | Healed to full (and cleansed) when it gets home after giving up. Default yes. |
 | `aggroOnHit` | An idle monster goes after whoever hurts it, from however far they hit it, if there is any way to them. Default yes. |
 | `homeRadius` | How near home counts as home (default 30). |
+
+**The spawn offset.** A monster with a `spawnOffsetTicks` is added to the game with the rest, but its frame is made on its own tick and not before
+(`SimCharacter.spawnTick`, which is worked out from the monster and so needs nothing in a snapshot). Until then it is in no frame, so every rule that goes
+through the frame already leaves it alone: a player's attack order on it is dropped, an ability or shot passes through where it will stand, no one is pushed
+by it, and it thinks nothing. The page does not list it either (`getCharacters`), so it is not drawn, clicked on or picked with Space. On its tick it is there at
+its home with full health, before anything is done for it that tick, and is an ordinary monster from then on. It counts from tick 0, the start of the game, so the
+server and every page agree on when it appears, a page that joins part way through is told the same, and a late order that is worked out again from before the tick
+it appears on makes it appear on that same tick.
 
 **How it behaves** (`think`, `ai.ts`). A monster is *idle* (at home), *chasing* or *returning*:
 
@@ -620,7 +634,11 @@ on the champion select screen; ids are shared, so a monster cannot have a champi
   is no way to its target, which is a chase going nowhere), and while it is inside the bar empties. When the bar is
   full, it ignores everyone and goes home. There is no other limit on how far it is drawn.
 - Returning, it walks home paying no attention to anyone, so it cannot be kited back and forth. A monster whose bar
-  filled keeps it full on the way. At home it is healed and idle again.
+  filled keeps it full on the way. At home it is healed and idle again. **It goes home quickly, and cannot be body-blocked:** it walks at its
+  `returnSpeedMultiplier` times its usual speed (still slowed by a slow, as ever), and it passes through every body on the way, so a player
+  who stands in its path neither stops it nor is pushed by it (`pushCharactersApart` leaves a pair out when either is a returning monster). It is solid
+  again as soon as it is idle, so pulling a monster off its camp is a walk it makes back at twice the speed, and not one that a bystander can hold up. Only
+  the walk is changed: a slow, a root or a stun still hold it, and it can still be hurt on the way.
 
 The walk to someone is `Terrain.walkDistance`, the length of the pathfinder's route. Only someone within the aggro range in
 a straight line can be within it on foot, so the pathfinder is asked only about those, and a clear line is answered
@@ -668,7 +686,8 @@ respawns, and a structure that is destroyed is gone at once (see "Structures"). 
 **To add one:** write its abilities in `abilities.ts` if it has new ones, add a `Monster` to the list in `monsters.ts`, give
 it a sprite set in `champion-sprites.ts`, and put a `monster-spawn` point with its id as the `monster-type` on a map. `tests/ai.test.ts` is `think` on its own (aggro, targets, deaggro,
 abilities, returning), `tests/monsters.test.ts` is monsters in a simulator (fights, going home, respawning, rolling back,
-snapshots), and `defineMonster` in `tests/fixtures.ts` registers one for a test.
+snapshots), `tests/monster-return.test.ts` is the walk home (its speed, and that no one can block it), `tests/turret-ramp.test.ts` is the ramp of a turret's shots, `tests/monster-spawn.test.ts` is the spawn offset (not in any frame until its tick, untouchable until then, the same after a late order or a snapshot, and not
+drawn by the page), and `defineMonster` in `tests/fixtures.ts` registers one for a test.
 
 **Not here yet**, where a game would want it: monsters in a camp helping each other (a hit on one aggros the others),
 patrols or wandering, target choices other than the nearest, the AI telling players what it is about to do, loot
@@ -705,8 +724,10 @@ left alone. It is a champion that cannot move (`turrets.ts`), so the same combat
 | `radius` | How big it is, to hit and to walk into |
 | `attackRange` | How far it reaches, from its middle to the middle of whoever it shoots, and the radius of the circle drawn round it |
 | `visionRange` | How far its team sees from it, round any walls (see "Vision"). Leave it out for as far as a champion sees, `GAME_VISION_RANGE` |
-| `attackWindupTicks` | How long after it starts to shoot until the shot leaves |
+| `attackWindup` | How much of the time one shot takes goes before the shot leaves: a share from 0 to 1, so a tier that shoots faster also winds up faster (see "The windup" under Champions and abilities) |
 | `attackProjectile` | The bolt it fires: `speed`, `radius` and `color`. Leave it out for a hit that lands as the windup ends |
+| `core` | `true` for the core of a base: the last turret, whose fall decides Core Destruction (see "Cores"). Leave it out for an ordinary turret |
+| `ramp` | How its shots build up on a target they keep hitting: `step` (each shot does that much more of the first one's damage) and `max` (the most one shot does, as a multiple of the first). Leave it out for shots that all do the same. The tiers of the game have `TURRET_RAMP`: 0.5 and 4, so 1x, 1.5x, 2x, up to 4x |
 | `reward` | What the player who destroys it is paid: `gold`, `xp` and `shards`, each a whole number. What it leaves out is `DEFAULT_TURRET_REWARD` |
 
 A tier is tuned by changing its entry, and a new one is a new entry; the map says which tier each of its turrets is. A tier has no
@@ -728,10 +749,21 @@ shots and nothing about a turret is sent) each living turret chooses a target wi
 - It cannot chase: a target that walks out of its range is dropped on that tick, and a shot not yet away is called off.
 - It shoots with the same attack as any champion: a windup, a hit (or a bolt that homes on arrival) for its `attackDamage`, and a
   cooldown from its `attackSpeed`. It cannot be stunned, so nothing stops it shooting, and it shoots while it is protected too.
+- **Its shots ramp up.** With a `ramp` (every tier of the game has one, and so does the core), each shot it lands on the same target does `step` more of the
+  first one's damage than the shot before, up to `max` times it: with a step of 0.5 and a most of 4, 1x, 1.5x, 2x, 2.5x, 3x, 3.5x and then 4x every time
+  (`rampMultiplier`, `turret-ramp.ts`). So the longer someone stays in reach, the worse it gets for them. The ramp is a **stack of markers on the target**, put there by the
+  turret (`TURRET_RAMP_KEY`, `focus`), one for each shot up to the most (`rampStacks`), refreshed together by every shot and gone a shot's interval plus
+  `TURRET_RAMP_GRACE_TICKS` (2 seconds) after the last. So a target that steps out of reach for a moment keeps its ramp, one that is gone longer starts again
+  from the first shot, a turret that turns to a new target hits it from the first shot whatever the old one had, and each turret ramps on its own: two on the same
+  target each build their own. It is in the frame, so it travels in a snapshot and rolls back like any marker. The page shows the stacks as yellow diamonds
+  under whoever carries them. A ramp that cannot work (a step of 0 or less, a most under 1) is refused when the tier is made, and says which part.
+- **The core is a turret.** It is the last turret of a base, the highest tier (`CORE_TIER`), and one flag on its entry in the table, `core`, is all that makes it a
+  core (see "Cores", below): it is the same class, in the same registry, put in the game by the same `addTurret`, and played by this same code, so everything here is
+  true of it, the ramp, the range ring, the sight and the collapse as well.
 
 **Being destroyed.** It has health and resistance like any champion, and is hurt by auto attacks (whether a swing or a shot) and
 nothing else. When it is destroyed it stays destroyed (it never respawns, and
-is not drawn), is no longer solid, and pays its `reward` to the player who did it (the shards when the kill can no longer
+what is drawn of it is its collapse, below), is no longer solid, and pays its `reward` to the player who did it (the shards when the kill can no longer
 be undone, the experience and the gold on the tick, as for a monster). Destroying a turret is not a kill on the scoreboard and scores nothing for a
 team, and a turret that kills a player is paid nothing and scores nothing for its team: only players score.
 
@@ -740,11 +772,25 @@ held off and takes the whole push, and a knockback, a pull or a dash aimed at it
 know about turrets, so a walk that goes straight through one slides round it, as it does round another champion. Mind the room
 round them in the map: a champion needs about 48 clear between the turret and a wall to get by.
 
-**On screen.** A turret is drawn as a dark ring edged in its team's colour, with a core of that colour, and its health bar over it
-(no name). Round it is a **transparent circle** out to the end of its range (`TurretRangeLayer`, `turret-range.ts`): only a thin line
+**On screen.** A turret is drawn from the **stone tower** (`res/turret/stone-tower.png`, a flag that flaps as it idles), standing on the
+ground with nothing drawn under it, with its health bar over the top of it (no name). **Its flag is painted in the colour of its team** (the same colour as
+a player's name and the rings), so the same art is a red team's tower and a blue team's: see "Team colours on a sprite", below. A building is the same whichever way it shoots: it is never flipped (`SpriteSet.fixed`). Every tier is
+the stone tower until a tier has art of its own (`championSprites` in `champion-sprites.ts` maps each tier in `TURRET_TIERS` to it), and the tower is
+drawn at the same 3 world units an art pixel as everything else, about 100 across and 240 tall (`scale`, in its set, to change that). It is centred on
+its body: the middle of the tower across its frame (not of what is drawn, which the flag pulls to one side) is put on its position, and the disc of its
+body sits just inside the foot of the art, which is worked out from the tier's `radius` (`standingOnItsGround` in `champion-sprites.ts`), so a tier that is
+bigger or smaller stands as well on its disc, and the range ring round it is centred on the tower. If its
+sheets cannot be loaded it is drawn as shapes instead: a dark ring edged in its team's colour, with a core of that colour.
+
+**The collapse.** When a turret is destroyed its bars go at once, and its sprite plays the **destroy animation**
+(`res/turret/stone-tower-destroyed.png`, eight frames: the tower crumbles to rubble and then to nothing, and the last frame is empty) where it
+stood. Its body is then gone for good, `CORPSE_SECONDS` (2) after the tick it fell on (`layoutCorpse`, the same rule a monster's body follows),
+so a turret that is already down when you join is not shown falling again. One drawn as shapes has no collapse to play, and is gone as it falls.
+
+Round it is a **transparent circle** out to the end of its range (`TurretRangeLayer`, `turret-range.ts`): only a thin line
 in its team's colour, very faint (`TURRET_RING_EDGE_ALPHA`), with nothing filled in inside it, under the champions, so whoever stands in
 it and whatever is under it show through. It is drawn for every turret the team can see, and not for one that is
-destroyed. A turret of the other team can be right-clicked and picked with Space like an enemy champion, until it is protected: a protected one has a
+destroyed, and for none while **Turret attack range** is off in the graphics menu. A turret of the other team can be right-clicked and picked with Space like an enemy champion, until it is protected: a protected one has a
 pale **barrier** ring round it and cannot be clicked on or picked, since nothing would come of it.
 A team always sees its own turrets, an enemy turret in the dark is not drawn (like any enemy), and a standing turret is a place its
 team **sees from**, out to its `visionRange` (`TeamVision`): an enemy who comes within it is drawn, can be clicked on and picked
@@ -756,7 +802,7 @@ being fixed, rolling back, snapshots), reading them from a map (including the co
 `tests/turret-range.test.ts` covers how the page shows them. `defineTurret` in `tests/fixtures.ts` registers a tier for a test.
 
 **Not here yet**, where a game would want it: targeting other things first (minions, or whoever hit an allied champion), a lobby
-switch for whether a game has turrets, and art for the body and a destruction effect in place of the shapes drawn now.
+switch for whether a game has turrets, and art of its own for each tier (and a different one for each team).
 
 ## Structures
 
@@ -769,15 +815,21 @@ rules make them what they are:
   blink, and no status or mark, so it cannot be stunned, rooted, slowed, silenced or burnt. (The simulator tells an attack's damage
   by its source id, `ATTACK_SOURCE_PREFIX`: an auto's damage is physical, an ability's is magic.) It is done in `applyWrites`, where every
   effect lands, so no effect has to know of it.
+- **Arcane adds to an attack on one.** Since only an attack hurts a structure, a champion whose strength is its arcane would do nothing to
+  one, so an auto on a turret or a core deals `STRUCTURE_ARCANE_DAMAGE` (`structures.ts`, 1) damage for each point of the attacker's arcane,
+  on top of the attack's own damage: 1 arcane is +1 attack damage to a structure. It is one extra hit for the whole attack (`arcaneOnStructure`,
+  in `Champion.attackEffects`), so the effects an attack adds, such as an ability readied for it, do not each add it again. The structure's
+  resistance takes its share off the sum like the rest of the attack, a protected structure takes none of it, and it does nothing to an attack on
+  a champion or a monster. Set the constant to 0 for an arcane that does nothing to structures.
 - **A structure is protected until what guards it is down.** While it is, it takes no damage at all, from anything: a hit that
   splashes it does nothing either, and an order to attack it changes nothing, so a champion walking up to it is not stopped. It can
   still shoot. It is open once what guards it is down, and stays open, since nothing that is destroyed comes back.
   - A **turret** is guarded by every turret of its own team of a lower tier: tier 2 takes no damage until the tier 1 turrets are down,
     and tier 3 waits for tier 2, which waits for tier 1. With a tier missing from a map, the next up waits for every one below it,
     and turrets of the same tier do not guard each other (tier 2 waits for all of tier 1).
-  - A **core** is guarded by the turrets of its team up to its `guardedByTier` (`CORE` in `cores.ts`, 1 by default): the core can be
-    hurt once the tier 1 turrets of its team are down, whatever stands above them. Set it to 2 for the core to wait for the tier 2 turrets
-    as well, or to 0 for a core with no guard.
+  - A **core** is guarded in just the same way, as it is only the highest tier (`CORE_TIER`, above every turret): it takes no damage until the turrets of its
+    team below its tier are down, which is all of them. To have it wait for fewer, give it a lower tier; a core with no turret below it is never protected.
+    A core guards nothing: it is the end of the chain, and does not count as a turret that guards one (`StructureRef.core`).
 
 Who is protected is `shieldedStructures`, a pure function of the structures and which of them stand, so the server and every client
 work out the same set from a frame (`Simulator.shieldedIn`). It is worked out at the start of each tick's writes, so a turret that
@@ -785,21 +837,38 @@ falls on a tick opens the one it guards from the next.
 
 ## Cores
 
-A core is the heart of a team's base, and what Core Destruction is played for. It is a champion that cannot move or attack (`cores.ts`)
-and a structure, so it is hurt by attacks only and is protected until its turrets are down. Everything that makes it what it is, to be
-tuned, is `CORE`: `maxHp`, `resistance`, `radius`, `guardedByTier`, and a `reward` (gold, experience and shards for the player who
-breaks it, nothing by default). The server puts one in a game of that mode for each of its two teams, at the base of the slot the team
-starts at (the biggest team at the first core of the map), after the players and the turrets. No monster goes after one, and it gives
-its team no vision.
+A core is the heart of a team's base, and what Core Destruction is played for. **It is a turret**: the last of a base, the highest tier there is (`CORE_TIER`, 3), with
+a flag on its entry in the `TURRET_TIERS` table, `core: true`, and nothing else of its own. It is a `Turret` in the `turrets` registry (`getCore()` is `getTurret(CORE_TIER)`),
+its body is the id `turret-3`, the server puts it in the game with `addTurret` like the rest, and the simulator plays it with the same code: it shoots the enemy players
+in its range, ramps, is solid, is hurt by attacks only, is protected until the turrets below its tier are down, is a place its team sees from, has a range ring, and is
+destroyed for good. Everything that makes it what it is, to be tuned, is its entry: `base` (health, damage, attack speed, resistance), `radius`, `attackRange`,
+`attackWindup`, `attackProjectile`, `ramp`, `visionRange` and `reward`, the same fields as any tier (see "Turrets"). The default is the last gun of a base, a little harder and
+further than a tier 2 turret. The server puts one in a game of that mode for each of its teams (one or two), at the base of the slot the team starts at (the biggest team at the first
+core of the map), after the players and the turrets. No monster goes after one.
 
-Once a core is broken its team cannot respawn (`Simulator.canRespawn`; in `computeFrame`, a dead character's respawn is skipped while
-its team's core is down, so a player who died before it fell and was waiting to come back stays dead as well). It is drawn as a
-diamond in its team's colour, with its health bar over it, and the barrier ring while it is protected; a broken one is gone.
+What the flag changes, and all it changes:
+
+- **It decides the game.** Once it is broken its team cannot respawn (`Simulator.canRespawn`, through `SimCharacter.isCore`; in `computeFrame`, a dead character's respawn is skipped
+  while its team's core is down, so a player who died before it fell and was waiting to come back stays dead as well), and a team with no core and no player left is out
+  (see "Game modes"). A turret that falls does neither: only the core counts.
+- **It pays nothing by default** (`DEFAULT_CORE_REWARD`, where a turret's is `DEFAULT_TURRET_REWARD`), as breaking it is the end of the game for a team.
+- **It is called `Core`** (a turret is `Tier 1 Turret`), for the killfeed, and is drawn as the keep, with a barrier ring while it is protected. Drawn as shapes, which is when its sprite
+  cannot be loaded, it is a diamond in its team's colour and a turret a ring.
+- **A map puts it down with a `core` point, not a `turret` point**: a turret point cannot name the core's tier (it is left out, with a warning, like a tier the game does not
+  have), and `turretTiers()` is the tiers a map's turret points can name, which are all but the core's.
+- **It is in a game of Core Destruction only.**
+
+It is drawn from the **keep** sprite (`res/turret/core.png`, with nothing drawn under it, as a turret has, its flag in its team's colour, and its health bar over the top of it)
+(`championSprites` in `champion-sprites.ts` chooses the keep for a tier with the flag and the stone tower for the rest). When it is broken its bars go and the keep plays its
+destroy animation (`res/turret/core-destroyed.png`, whose frames are wider than its idle's, since the rubble spreads: `SpriteClip.frameWidth`), and it is gone `CORPSE_SECONDS`
+after it fell.
 
 **To add one to a map:** put a point of class `core` with the `team-name` of the slot on each team's base (see "Maps from Tiled"). The
 competitive map has none yet, so Core Destruction is greyed on it until it does. `tests/structures.test.ts` covers the two rules
-(who is protected, what hurts a structure) and `tests/core-mode.test.ts` the mode (the objective, respawns, winning, reading it from
-a map, the server, and what the page shows); `defineCore` in `tests/fixtures.ts` registers a core for a test.
+(who is protected, what hurts a structure), `tests/core-mode.test.ts` the mode (the objective, respawns, winning, reading it from
+a map, the server, and what the page shows), `tests/core-turret.test.ts` what is the core's own (that it is the highest tier of turret, what its flag does, how the page and a
+map treat it), and `tests/structure-sprites.test.ts` how a turret or a core is drawn and how it falls. A core for a test is `defineTurret(tier, { ..., core: true })` in
+`tests/fixtures.ts`, at a tier below the turrets of its team if nothing is to guard it.
 
 ## Resources and levels
 
@@ -834,6 +903,13 @@ as nothing is bought with them. The numbers are in `progression.ts`.
   undoes pays nothing, they are kept through a death and a respawn, and they are in a snapshot (`GameCharacterSchema`; a snapshot without them
   has none). They show up a moment after a kill, like the leaderboard.
 - **On screen.** The level and experience bar are in the left panel of the HUD (below), and the gold and shards on the buttons of the right one.
+- **The effect over a kill.** When a kill pays **you**, the gold and experience it paid pop up over where the victim fell, as `+25 gold` over
+  `+60 xp` in their own colours, rise, and fade (`KillRewardLayer`, `render/kill-reward.ts`: `KILL_REWARD_MS`, the colours and the rest are there).
+  It is for the champion you control only, for any kill that pays (a player, a monster or a structure; one that pays nothing, such as a core by default, shows
+  nothing), and a game with no economy has none. What it shows is what the kill really paid: `Simulator.paidFor` gives the gold and experience that
+  were put in the killer's frame for a death on that frame, from the same rule the frame was paid by (so a monster that has levelled pays what it did).
+  The page asks each frame (`ClientGameState.getKillRewards`), so it shows the moment the kill's frame is the one drawn, as predicted as the champion on screen
+  (the killfeed waits until a kill can no longer be undone), and it tells of a kill once: a kill that a late order moves to another tick is the same kill.
 
 ## Items and the shop
 
@@ -876,7 +952,25 @@ that starts at its slot, as it does a turret (`rankTeams`): the biggest team sho
 - **A game with no shops can be shopped in from anywhere**, so a map made without any (the free-for-all one) is not left with items nobody can buy.
 - **A map with shops needs one for every slot that has spawn points**, or that team could never buy: it is refused, saying which slot (see below).
 
+**A shop is also a healing area.** A living player standing in a shop of its own team gets health back: `SHOP_HEAL_AMOUNT` (25) every
+`SHOP_HEAL_INTERVAL_TICKS` (15 ticks, so four times a second), which is `SHOP_HEAL_PER_SECOND` (100 a second). **`SHOP_HEAL_AMOUNT` is the number to
+change** (in `shops.ts`; set it to 0 for no healing, and the area is not tinted), and the interval is how often it comes. It is the simulator's rule, in
+`computeFrame`, as a `heal` event for each player in its shop on every heal tick (`shopHealsOn`, `inOwnShop`): a heal like any other, so it stops at
+the maximum health, does not make a hit's damage numbers, and the same on every peer on the same tick, and a late order that moves a player in or out
+of its shop changes it with the rest. It heals the team that owns the shop only (not an enemy standing in it, and not a champion in the other team's),
+never the dead, a monster or a structure, and **in every mode that has shops**, not only the one with an economy. Unlike buying, healing is not allowed
+from anywhere: a game with no shops has no area to heal in.
+
 **On screen.**
+- **The healing area** is the shop's rectangle drawn on the ground with a faint see-through **green tint** and a fainter line round the edge
+  (`ShopAreaLayer`, `render/shop-area.ts`: `SHOP_AREA_COLOR`, a soft sage green and not a bright one, `SHOP_AREA_FILL_ALPHA`, `SHOP_AREA_EDGE_ALPHA`), under
+  everything that stands on it. Every team's shop is drawn, yours and the enemy's, and what is in the dark is darkened with the ground. It is the
+  **Shop glow** switch in the graphics menu (see "The escape menu"), and is hidden while that is off.
+- **The healing is shown** as a green `+N` that rises over the champion and fades, as a hit is an orange `-N` (`FloatingNumberLayer`, `render/floating-number.ts`).
+  What is a heal is told from the champion's health: it went up while its most health and its count of hits (`hpSeq`) were as they were, so a level or an
+  item that raises the most health, and a respawn, are not heals, and the number is what it got back, not what the shop gave (a champion that is nearly full gets
+  only what it was missing). The shop heals many times a second, so a champion's heals are gathered: the first is shown at once and the ones after it are
+  added up and shown together every `HEAL_MERGE_MS` (700 ms). Any heal is shown this way, an ability's as well as the shop's.
 - **The slots** are the grid on the right of the HUD, four across and two down (`HUD_ITEM_COLUMNS` by `HUD_ITEM_ROWS`, the one place that says so: the
   panel and the grid are sized from it): each shows the picture of the item in it, or the name of the kind, dim, when it is empty. The kinds fill it
   from the top left in the order of `ITEM_SLOTS`, and any cells left over are dashed outlines that do nothing, room for kinds to come (there are none now, with
@@ -914,7 +1008,7 @@ Every one that a frame works out is read at the level in that frame.
 | Stat | What it does |
 | --- | --- |
 | `maxHp`, `attackDamage`, `attackSpeed` | As before, and they grow. A level gained adds its health to the maximum and to the health the character has (a dead one's stays 0), and a respawn is at the health of its level. |
-| `arcane` | **Ability power**: an amount, 0 for none, that does **nothing by itself**. Damage is as it is written unless an ability says it scales with arcane, by its own ratio (`scaled(100, { arcane: 0.6 })` is 100 and 0.6 for each point of it), so one ability can grow harder with it than another. Items and levels add points of it; the stats panel shows the amount. See "Scaling an ability" below. |
+| `arcane` | **Ability power**: an amount, 0 for none, that does **nothing by itself**. Damage is as it is written unless an ability says it scales with arcane, by its own ratio (`scaled(100, { arcane: 0.6 })` is 100 and 0.6 for each point of it), so one ability can grow harder with it than another. Items and levels add points of it; the stats panel shows the amount. The one thing it does by itself: an auto attack on a turret or a core deals a point of damage for each point of it (`STRUCTURE_ARCANE_DAMAGE`, see "Turrets"). See "Scaling an ability" below. |
 | `resistance` | Takes `x / (100 + x)` off every hit taken, League's formula: 100 takes half, 300 three quarters, and no amount all of it. It applies to autos, abilities and burns alike, and then to a `resist` status as well (they multiply). A health cost (`loseHealth`) is not damage and ignores it. |
 | `haste` | Takes `x / (100 + x)` off an ability's cooldown, as it starts it (`hastedCooldownTicks`, whole ticks, never under one). It applies to a cooldown that is put back on its whole (`startCooldown`) and to what a refund takes off (a share of the shortened cooldown). An auto attack's rate is the attack speed, not this. |
 
@@ -925,7 +1019,7 @@ Every one that a frame works out is read at the level in that frame.
 ```ts
 base: { maxHp: 800, attackDamage: 40, attackSpeed: 1.3, resistance: 0, haste: 0, arcane: 0 },
 growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
-moveSpeed: 140, radius: 20, attackRange: 190, attackWindupTicks: 12,
+moveSpeed: 140, radius: 20, attackRange: 190, attackWindup: 0.2,
 ```
 
 There is no growth shared by all of them: each champion in the game says its own, in all six stats (they are the same placeholder
@@ -990,7 +1084,7 @@ replays the same after a rollback or a checkpoint restore. All pushes are comput
 positions as the tick found them, then applied together, pairs visited in ID order, so arrival
 order cannot matter. Two characters on exactly the same spot have no line between them, and the
 lower ID goes toward -x. The arena's edge still holds whoever is pushed against it, and the
-other takes the rest of the room. The dead are ghosts that neither push nor are pushed, and a
+other takes the rest of the room. The dead are ghosts that neither push nor are pushed, and so is a monster that is going home (see "Monsters"), and a
 character that respawns onto someone is pushed off them. Dashes and knockbacks collide too, so
 a leap into someone shoves them ahead of it rather than passing through (a dash made `through` is the
 exception, below). The client needs
@@ -1042,20 +1136,39 @@ big shield shrinks the rest of the bar instead of running off the end. A small t
 (`render/health-bar.ts`), which `render/character-layer.ts` only draws. A champion's maximum health is at most 1000 so far,
 so a 1000 tick shows only when a shield stretches the bar past it.
 
+A player's **level** is shown next to it, in a small round badge at the left end of its health bar, ringed in its team's colour (`layoutLevelBadge`,
+`render/level-badge.ts`, which `CharacterLayer` draws from the bar's own position, so it does not depend on how wide the name is). Everyone's is shown,
+yours and the other team's, and it follows the level as it rises. It is there only in a game that has levels (`RenderedCharacter.level`, set for a player
+when `hasEconomy`): none in the modes with no economy, and none on a monster, a turret or a core. It goes with the health bar when a player dies.
+
 ### The escape menu
 
 Escape opens a menu over the game (and closes it again). The game goes on behind it, and while it is
 open nothing reaches the game: no keys, and no clicks on the map. If an ability is being aimed,
-Escape drops the aim first, as it always has, and opens the menu on the next press. It offers the
-cast mode (quick cast, or quick cast with an indicator) and **Leave game**, which takes the player back to the lobby
-and leaves the game to the others (the lobby's own Leave button is what leaves the lobby).
+Escape drops the aim first, as it always has, and opens the menu on the next press. It has three tabs, and **Leave game**
+under them, which takes the player back to the lobby and leaves the game to the others (the lobby's own Leave button is what
+leaves the lobby). It hangs from near the top of the screen, so the tabs stay where they are as pages of different heights are
+opened, and it remembers the tab it was left on while the page is open.
 
-It is built to grow. `menuItems` in `game-menu.ts` is the list of rows, as data: a `choice` (a few
-options with the current one lit) or an `action` (a button), each given what to do by the game, so the
-menu knows nothing of it. Adding an option is adding an item there, and `createGameMenu` draws it.
-What a player chooses is kept in the browser by `game-settings.ts` (`loadSettings` and
-`saveSettings`, every value checked on the way in and defaulted if missing or odd), so the cast mode
-is what they last chose the next time they play. A setting is a field of `GameSettings`.
+- **Graphics** has an **Effects** section: a switch for each effect drawn over the ground, each on until it is turned off, and each
+  hiding only itself. **Turret attack range** is the ring round each turret and core that shows how far it shoots
+  (`TurretRangeLayer`), **Your attack range** is the ring round your own champion (`IndicatorLayer`; the ring of an ability being aimed is
+  not part of it, and is always drawn) and **Shop glow** is the green tint over each shop (`ShopAreaLayer`).
+- **Controls** has the **cast mode** (quick cast, or quick cast with an indicator).
+- **Dev** has the **debug view** (the same as P, see below) and the **diagnostics** (the frame rate and network text at the top left), and, in a
+  development build only, the tools to draw the champions from a folder of art picked from disk or to go back to the art the game came with.
+
+It is built to grow. `menuTabs` in `game-menu.ts` is the list of tabs, as data: each is a few sections, each a few rows, and a row is a `choice` (a few
+options with the current one lit), a `toggle` (a switch, with a line under it on what it does) or an `action` (a button), each given what to do by the
+game, so the menu knows nothing of it. Adding an option is adding a row there, and `createGameMenu` draws it (a switch is one button with
+`role="switch"` and `aria-checked`, the tabs are a `tablist`, and the control that has the keyboard keeps it when the menu is drawn again). A new effect is a
+key in `EffectSettings` (`render/effect-settings.ts`, with its default in `DEFAULT_EFFECTS`), a name and a line in `EFFECT_LABELS`, and the layer that draws it
+asking for it: the menu, the stored settings and their checking follow from the key.
+
+What a player chooses is kept in the browser by `game-settings.ts` (`loadSettings` and `saveSettings`, every value checked on the way in and
+defaulted if missing or odd, each effect on its own, so settings stored before an effect was added keep what they had and have the new one on). A setting is
+a field of `GameSettings`: the cast mode, the `effects` and whether the `diagnostics` are shown. The debug view is not kept, as P never was.
+The renderer is told by `WorldRenderer.effects`, which `game.ts` sets from the settings when the game begins and again each time a switch is turned.
 
 ### Hitbox debug view
 
@@ -1070,7 +1183,7 @@ the path the champion you control is walking (`ClientGameState.getLocalPath`) ro
 ### Sprites and animation
 
 A champion can be drawn from sprite sheets instead of as a plain circle. Every champion has its own
-folder, `res/Champion_<name>`. The Swordsman is the sword-and-shield knight, the Archer the crossbowman,
+folder, `res/champion/<name>`. The Swordsman is the sword-and-shield knight, the Archer the crossbowman,
 the Cursebearer the staff bearer, and the Ninja has art of its own. The Trinketmaster (melee) is a copy of
 the Swordsman's sheets, and the Capricorn, Soldier and Grenadier (ranged) are copies of the Archer's,
 as placeholders until they have art. They are drawn a little bigger than their
@@ -1082,7 +1195,23 @@ a sprite shows the team. The work is split in three, so animations can be added 
   art pixel is drawn (`scale`), which way the art faces, and its `clips`: for each animation, a
   sheet (`url`, a single row of frames, left to right), how many frames, the rate, and whether it
   loops. Sheets are referenced with `new URL('../../../res/...', import.meta.url)`, which Vite serves
-  in development and bundles in a build.
+  in development and bundles in a build. A clip whose frames are not the set's size says its own (`frameWidth`, `frameHeight`), which the core's
+  destroy sheet does (the rubble is wider than the keep stood), and a set marked `fixed` is a building, which is never flipped to face the way it shoots.
+  The sets are by champion or monster ID, and also by turret (`turret-<tier>`) and core (`core`) ID: the turrets are the stone tower and the core the
+  keep, from `res/turret`, each with an `idle` and a `dead` clip (its destroy animation, played once). The champions' sheets are in `res/champion/<name>`
+  (`res/champion/archer/Idle.png`), the monsters' in `res/monsters/<name>`.
+
+  **Team colours on a sprite.** A set can say `teamPaint: { primary, shade }`: the two colours its art keeps for whatever shows the team it belongs to (the flag
+  on the tower and the keep, `STRUCTURE_FLAG`: the cloth `#ff0044` and its shade `#a22633`, which nothing else in the art uses). Whoever is drawn from the set
+  has every pixel of exactly those colours repainted, in every frame of every clip, collapse included: the cloth in the colour of its team
+  (`getTeam(team).color`, exactly) and the shade in a darker and slightly greyer one made from it in the proportions the art has (`teamSwaps`, in
+  `render/team-paint.ts`, which is only that colour work on plain numbers, with `repaint` swapping the pixels). The pole and the rest of the tower are not touched.
+  The painting is `teamVariant` (`character-sprite.ts`): the first time a team's structure is drawn, each sheet of the set is drawn on a canvas, its pixels
+  swapped, and the result cut into frames like the original, and then kept, so every structure of that team is drawn from the same set and nothing is painted
+  again. `CharacterLayer` asks for the set of the character's team when it makes it. If a set has no `teamPaint`, or no sheets to paint, or a colour cannot be
+  painted, or the canvas fails, the set is drawn as it is (the flag in the colours it came in), with a warning in the console. The swap is on exact colours, so it
+  relies on the art being pixel art with no soft edges, and `tests/team-paint.test.ts` reads the real sheets to check that both colours are in them, that every
+  pixel is fully there or not there at all, and that repainting changes the flag and nothing else. A new sprite sheet with a flag is a `teamPaint` on its set.
 - `animation.ts` is the logic, and knows nothing of drawing. `chooseAnimation` picks the clip:
   being dead first, then what the champion is in the middle of (an `attack` or a `cast`), then
   walking, then `idle`, taking the first of those the set has a clip for. So a set with only a walk
@@ -1127,7 +1256,7 @@ list for its kind.
 ## Champions and abilities
 
 Per-unit stats live on a `Champion` (`packages/shared/src/champions.ts`): max
-HP, move speed, radius, attack damage, speed, range, windup, and an ability kit in
+HP, move speed, radius, attack damage, speed, range, windup (a share of the attack, below), and an ability kit in
 Q/W/E/R slot order, plus a description and passive text for champion select.
 Characters have no shield of their own. There are eight champions: Cursebearer, Archer, Swordsman, Capricorn, Soldier, Grenadier, Trinketmaster, and Ninja (all below).
 Health and damage are whole numbers in the hundreds. To add a champion, add another
@@ -1152,6 +1281,21 @@ target dies or leaves the game. The range is checked once, when the attack start
 target cannot get out of reach, so a shot slower than the target's run speed would chase forever.
 Cursebearer, Archer, Capricorn and Soldier fire shots (`speed`, `radius` and `color` are tuned in
 `champions.ts`); Swordsman is instant. The cooldown starts at launch either way.
+
+**The windup.** `attackWindup` is the share of one attack, from the start of one swing to the start of the next, that goes before the hit
+lands (or the shot leaves): 0 for an attack that lands the moment it starts, 0.25 for one that lands a quarter of the way through, and 1 at most.
+It is a share and not a number of ticks, so it shortens as the attack speed rises, the hit always landing the same way through the attack:
+`Champion.attackWindupTicksWith(statuses, level, itemSpeed)` is the share of `attackCooldownTicksWith` (the whole attack at the attack speed it has
+then, which is what a level, an item and an attack-speed buff change), rounded to a tick. The simulator works it out when a swing begins, so a
+buff cast between swings shortens the next one, and the swing after a hit still starts a whole attack after the last one did. Monsters,
+turret tiers and cores say it the same way. The numbers the game plays with are the shares that give the windups they always had at their base
+attack speed.
+
+**The attack bar.** The amber bar under the controlled champion is its attack timer. A swing spends the attack as it starts, so the bar is empty for the whole
+windup, and it fills from the moment the hit lands (or the shot leaves) to the moment the next swing can begin. A swing cut short by a move or a
+stun spends nothing, so the bar is full again. What it fills over is the wait the frame records: `nextAttackTick` is set as the hit lands, and
+`GameFrameCharacter.attackLaunchTick` is the tick it was set on, so the two give the length of the wait whatever the attack speed does during
+it (it is in the frame, and so in every checkpoint, because it cannot be worked out from the rest).
 
 Because `onAttackHit` runs on arrival, everything it reads is read then: Capricorn's empower is
 spent and Soldier's melee range is measured when the shot lands, and Cursebearer's curse is added
@@ -1259,8 +1403,8 @@ spawns its trap. The trap is a stationary `pierce` entity with an `onHit`: an en
 once for each enemy it touches, and a piercing one stays out after a catch instead of ending on
 the first, so one `root` effect covers both the enemy it lands on (caught on the tick after it
 lands) and anyone who walks in while it is out. (An `onTick` effect would instead re-apply every
-tick to everyone inside and keep renewing a root.) Attack speed and range bonuses are `attackspeed` and `attackrange`
-statuses; `Champion.attackRangeWith` and `attackCooldownTicksWith` read them for the
+tick to everyone inside and keep renewing a root.) Attack speed is a `statBuff('attackSpeed', ...)` (flat attacks a second, like an item's) and range
+bonuses are `attackrange` statuses; `Champion.attackRangeWith` and `attackCooldownTicksWith` read them for the
 attack checks and for the client's range ring and cooldown bar.
 
 **Swordsman** is a melee duelist whose stacks sit on himself. His autos add a sword stack
@@ -1330,7 +1474,8 @@ bot is killed; casting Medic again replaces the bot and refreshes the shield.
 Stim's cost is `loseHealth(amount)`: it ignores shields and resistance, and never takes the last
 point, so it cannot kill. `heal(amount)` restores up to the maximum and does nothing for a unit
 already at 0 health, since a champion with none left is dead and a heal must not bring it back.
-`resist(fraction, ticks)` is a status. Resistances add up to 90% and cut each hit before shields
+`statBuff(stat, amount, ticks)` adds flat points of `attackDamage`, `attackSpeed`, `resistance`, `haste` or
+`arcane` for a while, as an item would. `resist(fraction, ticks)` is a status. Resistances add up to 90% and cut each hit before shields
 absorb what is left.
 
 The bot has no timer. An entity definition may leave out `lifetimeTicks` (and `landAtAim`) if it has

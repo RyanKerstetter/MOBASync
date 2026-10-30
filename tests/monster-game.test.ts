@@ -29,7 +29,7 @@ const grunt = defineMonster({
   moveSpeed: 200,
   radius: 20,
   attackRange: 60,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
   ai: { aggroRange: 300 },
 })
@@ -40,7 +40,7 @@ const slayer = defineChampion({
   moveSpeed: 220,
   radius: 18,
   attackRange: 150,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [...brawler.abilities],
 })
 
@@ -275,7 +275,7 @@ const sprinter = defineChampion({
   moveSpeed: 400,
   radius: 18,
   attackRange: 500,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [...brawler.abilities],
 })
 // Loses interest once it is more than 450 from where it started, and its bar takes a second to fill.
@@ -286,7 +286,7 @@ const sulker = defineMonster({
   moveSpeed: 200,
   radius: 20,
   attackRange: 60,
-  attackWindupTicks: 0,
+  attackWindup: 0,
   abilities: [],
   ai: { aggroRange: 300, deaggroRange: 450, deaggroTicks: 60 },
 })

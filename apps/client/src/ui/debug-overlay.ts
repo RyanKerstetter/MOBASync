@@ -19,6 +19,10 @@ export function createDebugOverlay(container: HTMLElement) {
   let refreshedAt: number | undefined
 
   return {
+    // Shows the text, or hides it (the dev menu). It is kept up to date either way, so it is right the moment it is shown.
+    setVisible(visible: boolean): void {
+      root.hidden = !visible
+    },
     // Called once for each frame drawn: counts it toward the frame rate, and every quarter of a second
     // rewrites the text from `read`.
     frame(now: number, read: () => DiagnosticsInfo): void {
