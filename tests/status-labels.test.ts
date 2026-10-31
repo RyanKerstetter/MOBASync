@@ -6,8 +6,10 @@ const none: StatusFlags & { dead: boolean } = {
   stunned: false,
   rooted: false,
   silenced: false,
+  disarmed: false,
   blinded: false,
   burning: false,
+  poisoned: false,
   slowed: false,
   hasted: false,
   dodging: false,
@@ -24,6 +26,7 @@ test('each status is named in words', () => {
   assert.deepEqual(statusLabels({ ...none, hasted: true }), ['hasted'])
   assert.deepEqual(statusLabels({ ...none, stunned: true }), ['stunned'])
   assert.deepEqual(statusLabels({ ...none, silenced: true }), ['silenced'])
+  assert.deepEqual(statusLabels({ ...none, disarmed: true }), ['disarmed'])
   assert.deepEqual(statusLabels({ ...none, blinded: true }), ['blinded'])
   assert.deepEqual(statusLabels({ ...none, burning: true }), ['burning'])
   assert.deepEqual(statusLabels({ ...none, dodging: true }), ['dodging'])
@@ -31,8 +34,8 @@ test('each status is named in words', () => {
 
 test('several at once are all shown, the most disabling first', () => {
   assert.deepEqual(
-    statusLabels({ ...none, hasted: true, slowed: true, silenced: true, stunned: true }),
-    ['stunned', 'silenced', 'slowed', 'hasted'],
+    statusLabels({ ...none, hasted: true, slowed: true, disarmed: true, silenced: true, stunned: true }),
+    ['stunned', 'silenced', 'disarmed', 'slowed', 'hasted'],
   )
 })
 

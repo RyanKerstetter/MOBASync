@@ -181,12 +181,12 @@ export const GameFrameDashSchema = z.object({
 // Statuses are active for frames in [startTick, endTick).
 export const StatusSchema = z.object({
   id: z.string().min(1),
-  kind: z.enum(['slow', 'haste', 'attackrange', 'resist', 'root', 'stun', 'shield', 'burn', 'blind', 'silence', 'dodge', 'stat']),
+  kind: z.enum(['slow', 'haste', 'attackrange', 'resist', 'root', 'stun', 'shield', 'burn', 'poison', 'blind', 'silence', 'disarm', 'dodge', 'stat']),
   rootId: z.string(),
   ownerId: z.number().int().positive(),
   startTick: TickSchema,
   endTick: TickSchema,
-  // A burn's damage for each pulse; a blind has no amount of its own.
+  // A burn's or a poison's damage for each pulse; a blind has no amount of its own.
   amount: z.number().finite().nonnegative(),
   // Which stat a 'stat' status adds its amount to (see `statBuff`).
   stat: z.enum(['attackDamage', 'attackSpeed', 'resistance', 'haste', 'arcane']).optional(),
@@ -351,6 +351,8 @@ export const ModeSetupSchema = z.discriminatedUnion('kind', [
     kind: z.literal('core'),
     // The teams that have a core, the biggest team first: the game is won by the last of two that is not eliminated. A team alone is never the last of anything.
     teams: z.array(z.number().int().positive()),
+    // A champion that dies loses its items but for its pet (`KEPT_ON_DEATH`). Absent, which is how it is by default, it keeps them.
+    loseItemsOnDeath: z.literal(true).optional(),
     ...RulesFields,
   }),
 ])
@@ -487,6 +489,7 @@ export type ObjectiveState = z.infer<typeof ObjectiveStateSchema>
 export * from './constants.js'
 export * from './progression.js'
 export * from './items.js'
+export * from './item-effects.js'
 export * from './shops.js'
 export * from './stats.js'
 export { boxTouchesCircle } from './geometry.js'
@@ -499,12 +502,14 @@ export {
   arcane,
   attackDamage,
   attackRangeBonus,
+  besideOwner,
   blind,
   blink,
   burn,
   capCooldown,
   damage,
   dash,
+  disarm,
   dodge,
   enemiesInBox,
   enemiesInLine,
@@ -521,8 +526,10 @@ export {
   mark,
   maxHealth,
   missingHealth,
+  namedStatusTicksLeft,
   ownEntity,
   popMarkers,
+  prolong,
   reduceCooldown,
   refundCooldown,
   removeEntities,
@@ -558,6 +565,8 @@ export type {
 } from './effects.js'
 export {
   abilityDefs,
+  abilityIconName,
+  abilityName,
   abilityOnKey,
   getAbilityDef,
   meetsRequirement,
@@ -565,6 +574,9 @@ export {
   withinCastRange,
 } from './abilities.js'
 export type { AbilityDef, AbilityIndicator } from './abilities.js'
+export { abilityNumbers, amountValue } from './ability-info.js'
+export type { AbilityNumber, ScalingStats } from './ability-info.js'
+export type { AmountInfo } from './effects.js'
 export {
   dirname,
   findTileset,
@@ -663,7 +675,7 @@ export { rampMultiplier, rampStacks, TURRET_RAMP, TURRET_RAMP_GRACE_TICKS, TURRE
 export type { TurretRamp } from './turret-ramp.js'
 export { shieldedStructures, STRUCTURE_ARCANE_DAMAGE } from './structures.js'
 export type { StructureRef } from './structures.js'
-export type { ChampionDef } from './champions.js'
+export type { ChampionDef, ChampionMeterDef } from './champions.js'
 export {
   CharacterTickSnapshot,
   GameTickSnapshot,

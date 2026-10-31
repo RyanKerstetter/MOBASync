@@ -1,5 +1,7 @@
 import {
   abilityDefs,
+  abilityIconName,
+  abilityName,
   champions,
   GAME_TPS,
   getTeam,
@@ -46,10 +48,6 @@ function requiredElement<T extends HTMLElement>(root: HTMLElement, selector: str
   const element = root.querySelector<T>(selector)
   if (!element) throw new Error(`The champion select page is missing the required element: ${selector}`)
   return element
-}
-
-function titleCase(id: string): string {
-  return id.charAt(0).toUpperCase() + id.slice(1)
 }
 
 function statRows(champion: Champion): Array<[string, string]> {
@@ -148,8 +146,8 @@ export function createChampionSelect({ root, abilityIconUrl, onPick, onLock, onB
       const name = document.createElement('strong')
       name.className = 'ability-title'
       name.append(
-        createAbilityIcon(abilityId, abilityIconUrl),
-        document.createTextNode(`${abilityKeys[slot] ?? slot + 1} · ${titleCase(abilityId)}`),
+        createAbilityIcon(abilityIconName(abilityId), abilityIconUrl),
+        document.createTextNode(`${abilityKeys[slot] ?? slot + 1} · ${abilityName({ id: abilityId, ...abilityDefs.get(abilityId) })}`),
       )
       const detail = document.createElement('span')
       detail.textContent = abilityDescription(abilityId)

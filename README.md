@@ -518,6 +518,12 @@ of the game (`winningTeam` reads who is out from the objective), checked at the 
 (`respawnTicks`), so every peer brings a champion back on the same tick, and a champion that is dead sees
 `Respawning in 8s` where its health was.
 
+**Lose items on death** is a rule for Core Destruction, the one mode with items (off by default; the tick box is in the lobby's rules and only
+shows while that mode is picked). With it on, a player who dies loses every item they carry but their **pet** (`KEPT_ON_DEATH` in `items.ts`). The items
+are lost, not sold: they pay nothing back. Their gold is kept, and a dead champion can shop, so they can buy again before they are back. Like
+the respawn time it is part of the setup the snapshot carries (`loseItemsOnDeath`, only present when it is on), and the items go on the tick of the
+death, in the frame, so a late order that undoes the death gives them back.
+
 ### Playing a game through, and going back to the lobby
 
 A game is `running` until a team wins or the leader ends it, and then `finished`: it stops running, and the server
@@ -1186,7 +1192,9 @@ A champion can be drawn from sprite sheets instead of as a plain circle. Every c
 folder, `res/champion/<name>`. The Swordsman is the sword-and-shield knight, the Archer the crossbowman,
 the Cursebearer the staff bearer, and the Ninja has art of its own. The Trinketmaster (melee) is a copy of
 the Swordsman's sheets, and the Capricorn, Soldier and Grenadier (ranged) are copies of the Archer's,
-as placeholders until they have art. They are drawn a little bigger than their
+as placeholders until they have art. So are the Hammer, a copy of the Swordsman's, and the Chain, a copy of the
+Trinketmaster's (each in a folder of its own, `res/champion/hammer` and `res/champion/chain`, with the same file names as the
+sheets they were copied from, so art can be dropped over them). They are drawn a little bigger than their
 bodies and with no circle behind them. The name above every champion is in its team's colour, which is how
 a sprite shows the team. The work is split in three, so animations can be added as data:
 
@@ -1240,13 +1248,15 @@ clip fills its sheet exactly) and the roster, so a wrong frame count fails the t
 **Ability icons.** An ability's icon is `res/icons/<ability id>.png` (16 x 16, so `hex.png` is Hex's), drawn on its
 slot in the HUD and beside its name on the champion select screen. The ids are the ones in `abilities.ts`, so a key
 that changes ability (Q turning into `recall` or `shadowreturn`) changes its icon with it, and giving an ability an
-icon is dropping a file of that name in the folder. `ui/ability-icon-urls.ts` finds the files (Vite's
+icon is dropping a file of that name in the folder. An ability whose file has another name says it (`icon: 'drop'` on
+`hammerdrop`, since its picture is `drop.png`), and everything that draws one asks `abilityIconName` for the file's name.
+`ui/ability-icon-urls.ts` finds the files (Vite's
 `import.meta.glob`, so a new file is picked up by the dev server), and `ui/ability-icon.ts` makes the element. An
 ability with no file, or whose file will not load, shows a dim "N/A" tile with the tooltip "Icon not available" in its place.
 
 Stacks are drawn as pips under the body, by the pure function `layoutStackPips` (`render/stack-pips.ts`).
 There are two kinds, told apart by shape, colour and row, so two with similar colours can never
-share a spot. A champion's own stacks (Swordsman's sword, Capricorn's empowered, Ninja's shadow) are
+share a spot. A champion's own stacks (Swordsman's sword, Capricorn's empowered, Ninja's shadow, Hammer's plating) are
 round and sit in the row nearest the body. Marks that other champions place on it (Cursebearer's
 curse, the Grenadier's sighted) are diamonds, and when it carries both they take a row of their own below.
 A row with nothing in it takes no room, so a champion with one kind has it nearest the body. Each
@@ -1258,7 +1268,7 @@ list for its kind.
 Per-unit stats live on a `Champion` (`packages/shared/src/champions.ts`): max
 HP, move speed, radius, attack damage, speed, range, windup (a share of the attack, below), and an ability kit in
 Q/W/E/R slot order, plus a description and passive text for champion select.
-Characters have no shield of their own. There are eight champions: Cursebearer, Archer, Swordsman, Capricorn, Soldier, Grenadier, Trinketmaster, and Ninja (all below).
+Characters have no shield of their own. There are ten champions: Cursebearer, Archer, Swordsman, Capricorn, Soldier, Grenadier, Trinketmaster, Ninja, Hammer, and Chain (all below).
 Health and damage are whole numbers in the hundreds. To add a champion, add another
 `new Champion({...})` to the list in `champions.ts`; the select screen lists every
 champion in that map. Arena size, tick rate, and network timing remain global
@@ -1291,9 +1301,10 @@ buff cast between swings shortens the next one, and the swing after a hit still 
 turret tiers and cores say it the same way. The numbers the game plays with are the shares that give the windups they always had at their base
 attack speed.
 
-**The attack bar.** The amber bar under the controlled champion is its attack timer. A swing spends the attack as it starts, so the bar is empty for the whole
-windup, and it fills from the moment the hit lands (or the shot leaves) to the moment the next swing can begin. A swing cut short by a move or a
-stun spends nothing, so the bar is full again. What it fills over is the wait the frame records: `nextAttackTick` is set as the hit lands, and
+**The attack bar.** The amber bar under the controlled champion is its attack timer. A swing spends the attack when its hit lands (or its shot leaves), and
+not when it starts, so the bar stays full while a swing winds up, is empty as the hit lands, and fills from then to the moment the next swing can begin.
+A swing cut short by a move or a stun spends nothing, and the bar does not move at all (it used to drop to empty at the start of the windup and jump
+back when the swing was cancelled). Under a champion's meter, when it has one up, the bar sits just below it, where it would otherwise be drawn over it. What it fills over is the wait the frame records: `nextAttackTick` is set as the hit lands, and
 `GameFrameCharacter.attackLaunchTick` is the tick it was set on, so the two give the length of the wait whatever the attack speed does during
 it (it is in the frame, and so in every checkpoint, because it cannot be worked out from the rest).
 
@@ -1638,6 +1649,65 @@ the swing and its cooldown are spent and a shot is used up, none of the attacker
 the damage, not its own on-hit effects such as a Swordsman's stack), and an ability readied for the
 auto (Hush, Shackle) is spent along with it. Dodging an auto is how the Ninja avoids being silenced,
 rooted or stunned by one. Abilities are not dodged. The client labels the status `dodging`.
+
+**Hammer** is a melee bruiser who gets tougher the more he hits, and ends fights with a jump. P, plating: each
+auto he lands gives him a stack, up to six (`PLATING_MAX_STACKS`), and each stack is resistance: a base
+(`PLATING_RESISTANCE_PER_STACK`) and so much more for each level he is (`PLATING_SCALING_PER_LEVEL`, read with `scaled`,
+which counts the level from 1, so a level 1 Hammer's stack is the two added together), the same points an item adds. They last
+six seconds, and every auto renews all of them together. The stacks are the marker `plating` on himself; the resistance is one
+`statBuff` under the name `plating`, worked out afresh from the stacks and his level each auto and renewed with them, so the two
+are always in step (and a level he gains is in it from his next auto).
+Q, Slam, strikes a rectangle in front of him (the indicator is its width, its length is the ability's range) for damage
+that grows with his attack damage, and slows what it hits. W, Hammer Drop, is a telegraphed jump. Aimed at a point
+in range, it lays a warning circle (`visual: 'telegraph'`) on that point as the jump starts, and takes him there over
+the time the warning lasts, less a tick: so he lands as it fills in, and the warning then hits whoever is inside it for
+damage and a stun. How long that is depends on how far the point is, in a straight line from `DROP_MIN_TICKS` for a point
+at his feet to `DROP_MAX_TICKS` for the farthest he can aim, so a near drop is quick (`dropTicks`, given to the warning as its
+`lifetime` and to the jump as its `over`). It is read when it goes off, so an enemy can walk out of it.
+He goes over whatever is between (`through`), and a warning whose Hammer dies is called off (`stayWhile`).
+E, Rage, gives move speed, attack speed and damage reduction (`resist`) for five seconds, and each auto he lands adds
+0.4 s to what is left of it, never more than six seconds in all (`RAGE_MAX_TICKS`), so hitting slows its running
+down without making it last for ever. A bar under his health bar shows what is left of it, full at six seconds and
+running down in real time (below).
+
+**Chain** is a melee skirmisher who hooks enemies in and fights inside a spin of chains. P, first strike: the first
+auto he lands on an enemy, or the first hit the sweet spot of his W makes on it, does bonus damage and heals him (a
+flat amount, and a share of his most health), and then he has no first strike on that enemy for ten seconds. The cooldown is a marker (`chained`) he
+leaves on the enemy for those ten seconds. A marker is counted by its owner, so every enemy has a cooldown of its own,
+and a second Chain has his own separately. A structure takes no markers, so it is left out by name (`firstStrike`): or
+every auto on a turret would heal him. Q, Hook, is a skillshot that hurts the first enemy it hits and drags it to him: a
+`dash` of the enemy's `toward` `besideOwner()`, so it cannot attack or cast until it lands, goes over whatever is between,
+and comes to rest touching him. W, Whirl, is a charge-up and then one blow. It has no windup and no backswing, so he can
+walk and cast while it charges, but he is disarmed for it and cannot attack (he still walks up to a target he was told to
+attack, and swings when it is over). For a second two circles are outlined round him (`visual: 'field'`: they do not fill in),
+held exactly on him (`attached`), so they are centred on him as he walks; when the second is up the blow lands, with a
+flash (`visual: 'flash'`, hot at the edge and pale in the core), on whoever is inside them *then*, so an enemy can get out, and
+where he is then, so he can walk to put the ring on someone. Whoever is wholly
+inside the inner circle takes the plain hit; a body that reaches out of it at all, into the ring, is on the edge, the sweet
+spot, and takes a bigger hit, is slowed, and is first-struck, so one that touches both circles is hit as the edge. A charge that he
+dies in, or that a stun breaks, does not go off (`stayWhile`). E, Lunge, is a short dash the way it is aimed (a `direction` ability: it has no target) that gives
+attack speed for a few seconds and resets his auto timer. It has no windup, so it can be cast while Whirl charges.
+
+The engine got a few things for these. A status can have a **name**: `haste`, `resist` and `statBuff` take `{ named }`,
+which makes the status the owner's under that name (`<owner>:<name>:...`) and not the cast's or attack's own, so giving
+it again from any cast or attack renews that one status. `prolong(name, ticks, longest)` makes every status the owner
+has given a unit under the name last `ticks` longer, though never past `longest` ticks from now, and does nothing for a
+unit with none, so an auto that feeds a rage does not start one. `namedStatusTicksLeft` reads how long what is under a
+name has left. A champion can have a **meter** (`ChampionDef.meter`: the name of a status, the ticks at which its bar is
+full, and a colour): `ClientGameState` reads what is left at the estimated tick, so the bar runs down smoothly between
+frames, and gives the character a `meter` while it has any, and `CharacterLayer` draws it under the health bar.
+`dash(..., { over })` takes a number of ticks (or a function of the cast that gives them), and works the dash's speed out from how
+far it goes, so it takes that long wherever it ends (it is how Hammer Drop is a jump with a set time).
+`spawnEntity(def, { lifetime })` likewise sets how long one entity lasts as it is spawned, from the cast, instead of the
+definition's `lifetimeTicks`. A **`flash`** is an entity visual that is brightest as it appears and fades away fast over its
+lifetime, for the instant something goes off. An `attached` entity is drawn where its owner is drawn on screen, which is
+not quite where the frame has him (the champion on screen is extrapolated, or smoothed). `besideOwner(gap)` is an anchor: the point just
+short of the caster on the line to the unit hit, touching it (nothing if it is that close already), where something
+dragged to the caster comes to rest. An entity can be **`attached`** to its owner: it is put on the owner's position at the
+start of every tick, before anything else it does, so it is centred on it exactly, where `follow` hangs on a spring and
+lags. A **disarm** (`disarm(ticks)`, the status `disarm`, labelled `disarmed`) stops a character starting an auto attack and
+nothing else, as a silence stops casting and nothing else. All of it is tested in `tests/effects-named.test.ts`, with the kits in
+`tests/hammer.test.ts` and `tests/chain.test.ts`.
 
 One key doing two things is the ability's `recast`. Stick names `recast: 'recall'`, and `recall` is an
 ability in full, with its own cooldown, that the key becomes while it can be cast. What can be cast

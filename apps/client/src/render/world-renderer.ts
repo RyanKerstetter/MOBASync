@@ -36,6 +36,8 @@ export type WorldFrame = {
   // What the ability being aimed would do if its key were let go now.
   castPreview?: CastPreview
   attackMarkers: readonly AttackMarker[]
+  // The character a left click picked, which is ringed on the ground.
+  selectedId?: number
   // The hill or the flags of the game mode, if it has any.
   mode?: ModeView
   // The shops, which heal the team that owns them, tinted on the ground. Left out, there are none.
@@ -159,6 +161,7 @@ export class WorldRenderer {
       showAttackRange: this.effects.selfAttackRange,
       ...(frame.castPreview ? { castPreview: frame.castPreview } : {}),
       attackMarkers: frame.attackMarkers,
+      ...(frame.selectedId !== undefined ? { selectedId: frame.selectedId } : {}),
     })
   }
 }

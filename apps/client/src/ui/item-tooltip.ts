@@ -11,10 +11,11 @@ function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: strin
 // The box that follows the pointer over an item, in the shop or in a slot, saying what it is (see `ItemTooltip`): its name, its slot, what it costs,
 // what it adds, and a note. One box serves every item: `bind` ties an element to what to say when it is pointed at, and the box is
 // moved to the pointer, kept inside the game, and written again when what it says changes while it is up (the gold running out under it, say).
-// It takes no clicks, so it is never in the way of what it is over.
+// It takes no clicks, so it is never in the way of what it is over. The abilities on the HUD use it too, with the key in place of the slot.
 export function createItemTooltip(container: HTMLElement) {
   const name = element('span', 'item-tooltip-name')
   const slot = element('span', 'item-tooltip-slot')
+  const about = element('p', 'item-tooltip-about')
   const costAmount = element('span', 'item-tooltip-cost-amount')
   const goldIcon = element('img', 'item-tooltip-gold')
   goldIcon.alt = ''
@@ -24,7 +25,7 @@ export function createItemTooltip(container: HTMLElement) {
   const cost = element('div', 'item-tooltip-cost', goldIcon, costAmount)
   const stats = element('ul', 'item-tooltip-stats')
   const note = element('p', 'item-tooltip-note')
-  const root = element('div', 'item-tooltip', element('div', 'item-tooltip-head', name, slot), cost, stats, note)
+  const root = element('div', 'item-tooltip', element('div', 'item-tooltip-head', name, slot), about, cost, stats, note)
   root.hidden = true
   root.setAttribute('role', 'tooltip')
   container.appendChild(root)
@@ -35,6 +36,8 @@ export function createItemTooltip(container: HTMLElement) {
   const render = (tip: ItemTooltip): void => {
     name.textContent = tip.name
     slot.textContent = tip.slot
+    about.textContent = tip.about ?? ''
+    about.hidden = tip.about === undefined
     cost.hidden = tip.cost === undefined
     costAmount.textContent = tip.cost === undefined ? '' : String(tip.cost)
     stats.replaceChildren(...tip.stats.map((line) => {
@@ -42,7 +45,13 @@ export function createItemTooltip(container: HTMLElement) {
       value.textContent = line.value
       const label = element('span', 'item-tooltip-stat-label')
       label.textContent = line.label
-      return element('li', 'item-tooltip-stat', value, label)
+      const row = element('li', 'item-tooltip-stat', value, label)
+      if (line.detail !== undefined) {
+        const detail = element('span', 'item-tooltip-stat-detail')
+        detail.textContent = line.detail
+        row.append(detail)
+      }
+      return row
     }))
     stats.hidden = tip.stats.length === 0
     note.textContent = tip.note ?? ''

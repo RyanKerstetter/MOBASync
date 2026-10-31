@@ -65,7 +65,8 @@ export function signedAmount(amount: number): string {
   return `${amount < 0 && rounded !== 0 ? '-' : '+'}${rounded}`
 }
 
-export type StatLine = { label: string; value: string }
+// `detail` is a smaller line under it, such as what an ability's damage is made of.
+export type StatLine = { label: string; value: string; detail?: string }
 
 // What an item adds, a line for each stat, in the order the stats are listed in everywhere else.
 export function itemStatLines(item: Pick<Item, 'stats'>): StatLine[] {
@@ -76,20 +77,25 @@ export function itemStatLines(item: Pick<Item, 'stats'>): StatLine[] {
 }
 
 // What a tooltip says: the item's name and the slot it goes in, what it costs (or, for one you carry, nothing: it is yours), what it adds, a line about
-// what it is, and a note about what clicking it does or why it cannot be bought.
+// what it is, and a note about what clicking it does or why it cannot be bought. The box over an ability is the same (see `abilityTooltip`): its name and its
+// key, a line on what it does (`about`, which comes before the numbers), and its numbers.
 export type ItemTooltip = {
   name: string
   slot: string
+  about?: string
   cost?: number
   stats: StatLine[]
   note?: string
   tone?: 'good' | 'bad' | 'muted'
 }
 
+// What an item's effects do, as the line a tooltip has under its name (see `Item.description`): none for an item that only adds its stats.
+const itemAbout = (item: Pick<Item, 'description'>): { about?: string } => (item.description ? { about: item.description } : {})
+
 // An item in the shop: its name, cost and stats, and whether clicking it buys it (it does not away from a shop).
 export function shopTooltip(entry: ShopEntry, inShop = true): ItemTooltip {
   const { item, status, problem } = entry
-  const base = { name: item.name, slot: ITEM_SLOT_NAMES[item.slot], cost: item.cost, stats: itemStatLines(item) }
+  const base = { name: item.name, slot: ITEM_SLOT_NAMES[item.slot], ...itemAbout(item), cost: item.cost, stats: itemStatLines(item) }
   switch (status) {
     case 'available':
       return inShop ? { ...base, note: 'Click to buy.', tone: 'good' } : { ...base, note: NOT_IN_SHOP, tone: 'bad' }
@@ -105,12 +111,18 @@ export function ownedTooltip(item: Item, inShop = true): ItemTooltip {
   return {
     name: item.name,
     slot: ITEM_SLOT_NAMES[item.slot],
+    ...itemAbout(item),
     stats: itemStatLines(item),
     note: inShop
       ? `Right-click to sell for ${sellValue(item)} gold (it cost ${item.cost}).`
       : `In your shop you can sell it for ${sellValue(item)} gold (it cost ${item.cost}).`,
     tone: 'muted',
   }
+}
+
+// An item that someone else carries, which is looked at and not sold: what it is, what it does and what it adds, with nothing about selling it.
+export function carriedTooltip(item: Item): ItemTooltip {
+  return { name: item.name, slot: ITEM_SLOT_NAMES[item.slot], ...itemAbout(item), stats: itemStatLines(item) }
 }
 
 // A slot with nothing in it.

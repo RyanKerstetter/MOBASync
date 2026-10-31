@@ -5,6 +5,8 @@ export type AbilitySlotView = {
   // The key to press, as printed on the slot.
   key: string
   abilityId: string
+  // The ability's whole cooldown, with the champion's haste taken off: what its tooltip tells.
+  cooldownTicks: number
   // How far the cooldown has run, 0 just cast to 1 ready. The icon fills up with colour from the bottom as it goes.
   filled: number
   ready: boolean
@@ -26,6 +28,7 @@ export function abilitySlotViews(
     return {
       key: keyLabel(slot),
       abilityId,
+      cooldownTicks,
       filled: ready || cooldownTicks <= 0 ? 1 : Math.max(0, Math.min(1, 1 - remaining / cooldownTicks)),
       ready,
       // Under ten seconds a tenth is worth showing; above, whole seconds are plenty.
@@ -92,6 +95,9 @@ export type PlayerStats = ChampionStats
 
 export type StatRow = { label: string; value: string }
 
+// The row of the stats that is the health, which a panel that shows the health on a bar of its own (the one over a champion that has been clicked on) leaves out.
+export const MAX_HEALTH_LABEL = 'Max health'
+
 // One row of the stats panel for each stat, in the order they are listed: whole numbers (the arcane is a whole amount of ability power), except for the
 // attack speed, a rate, which is told to two places without a tail of zeros (1.2, not 1.20; 1, not 1.00). The resistance and the haste are told as the
 // stat and, after it, what it takes off a hit or a cooldown (see `statReduction`).
@@ -101,7 +107,7 @@ export function statRows(stats: PlayerStats): StatRow[] {
   const rate = (amount: number): string => String(Number(finite(amount).toFixed(2)))
   const takesOff = (stat: number): string => `${whole(stat)} (${Math.round(statReduction(finite(stat)) * 100)}%)`
   return [
-    { label: 'Max health', value: whole(stats.maxHp) },
+    { label: MAX_HEALTH_LABEL, value: whole(stats.maxHp) },
     { label: 'Attack damage', value: whole(stats.attackDamage) },
     { label: 'Attack speed', value: rate(stats.attackSpeed) },
     { label: 'Attack range', value: whole(stats.attackRange) },

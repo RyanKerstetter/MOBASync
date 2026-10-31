@@ -18,6 +18,8 @@ const OWN_STACKS: Array<[key: string, color: string]> = [
   ['sword', '#f2c14e'],
   ['empowered', '#7fd6ff'],
   ['shadow', '#ff9f43'],
+  // Hammer's plating: up to six, a steel grey.
+  ['plating', '#9fb0c3'],
 ]
 // Marks other champions place on it, read by them:
 const MARKS: Array<[key: string, color: string]> = [

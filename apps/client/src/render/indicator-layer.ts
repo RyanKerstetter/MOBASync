@@ -16,21 +16,24 @@ export type IndicatorInput = {
   // What the ability being aimed would do if its key were let go now.
   castPreview?: CastPreview
   attackMarkers: readonly AttackMarker[]
+  // The character a left click picked, which has a ring round its feet while its panel is up.
+  selectedId?: number
 }
 
 // What the player is shown about their own champion's reach: the attack range ring, the indicator
-// of the ability being aimed, and the reticles on the enemy a click would attack and on the one the
-// attack is locked on.
+// of the ability being aimed, the reticles on the enemy a click would attack and on the one the
+// attack is locked on, and the ring round the one that has been clicked on to look at.
 export class IndicatorLayer {
   readonly view = new Container()
   private readonly attackRange = new Graphics()
   private readonly castIndicator = new Graphics()
   private readonly attackMarkers = new Graphics()
+  private readonly selection = new Graphics()
 
   constructor() {
     this.attackRange.alpha = 0.3
     this.attackRange.visible = false
-    this.view.addChild(this.attackRange, this.castIndicator, this.attackMarkers)
+    this.view.addChild(this.attackRange, this.castIndicator, this.attackMarkers, this.selection)
   }
 
   update(input: IndicatorInput): void {
@@ -44,6 +47,17 @@ export class IndicatorLayer {
     }
     this.drawCastIndicator(input.castPreview, input.local?.position, input.characters)
     this.drawAttackMarkers(input.attackMarkers, input.characters)
+    this.drawSelection(input.selectedId, input.characters)
+  }
+
+  // A pale ring just outside the body, so which one the panel is about can be told at a glance.
+  private drawSelection(selectedId: number | undefined, characters: readonly RenderedCharacter[]): void {
+    this.selection.clear()
+    const selected = selectedId === undefined ? undefined : characters.find((character) => character.id === selectedId)
+    if (!selected || selected.dead) return
+    this.selection
+      .circle(selected.position.x, selected.position.y, selected.champion.radius + 4)
+      .stroke({ color: '#e8f4ff', width: 2, alpha: 0.85 })
   }
 
   // The range around the champion, and where the ability would go if the key were let go now.

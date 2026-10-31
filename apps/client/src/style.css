@@ -676,6 +676,188 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   pointer-events: none;
 }
 
+/* Who a left click picked, on the middle of the left edge (the diagnostics are above it and the HUD is on the bottom edge). The panel takes the mouse, over itself
+   only, for the box that says what an item is. Its left edge is the colour of what it is to you. */
+.game-inspect {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  left: 0.5rem;
+  box-sizing: border-box;
+  display: grid;
+  gap: 0.45rem;
+  width: 14rem;
+  padding: 0.55rem 0.65rem 0.65rem;
+  transform: translateY(-50%);
+  color: var(--ui-text);
+  background: var(--ui-bg);
+  border: 1px solid var(--ui-line);
+  border-left: 4px solid var(--ui-muted);
+  font: 0.8rem/1.2 system-ui, sans-serif;
+}
+
+.game-inspect[hidden],
+.game-inspect [hidden] {
+  display: none;
+}
+
+.game-inspect[data-relation='you'] {
+  border-left-color: var(--ui-accent);
+}
+
+.game-inspect[data-relation='ally'] {
+  border-left-color: #6c93c2;
+}
+
+.game-inspect[data-relation='enemy'] {
+  border-left-color: var(--ui-danger);
+}
+
+.inspect-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.inspect-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.95rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspect-level {
+  flex: none;
+  color: var(--ui-accent);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.inspect-close {
+  flex: none;
+  align-self: center;
+  width: 1.3rem;
+  height: 1.3rem;
+  padding: 0;
+  color: var(--ui-muted);
+  background: transparent;
+  border: 1px solid var(--ui-line);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.inspect-close:hover {
+  color: var(--ui-text);
+  background: var(--ui-bg-hover);
+}
+
+.inspect-subtitle {
+  margin: -0.25rem 0 0;
+  color: var(--ui-muted);
+  font-size: 0.72rem;
+}
+
+.inspect-health {
+  position: relative;
+  height: 1.2rem;
+  overflow: hidden;
+  background: var(--ui-track);
+  border: 1px solid var(--ui-line);
+}
+
+.inspect-health-fill,
+.inspect-health-shield {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+.inspect-health-fill {
+  left: 0;
+  background: #2f9a65;
+}
+
+.inspect-health-shield {
+  background: #6c93c2;
+}
+
+.inspect-health-text {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: pre;
+}
+
+/* One stat to a line, so none of the names (or "51 (34%)") has to wrap. */
+.inspect-stats {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0;
+}
+
+.inspect-stat {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.inspect-stat-label {
+  color: var(--ui-muted);
+}
+
+.inspect-stat-value {
+  margin: 0;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.inspect-items {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.25rem;
+}
+
+.inspect-item {
+  position: relative;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-muted);
+  background: var(--ui-track);
+  border: 1px dashed var(--ui-line-soft);
+}
+
+.inspect-item.is-filled {
+  border: 2px solid var(--ui-muted);
+}
+
+.inspect-item-icon,
+.inspect-item-icon > .ability-icon {
+  position: absolute;
+  inset: 0;
+}
+
+/* The name of the kind, cut short rather than let out of the cell. */
+.inspect-item-empty {
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 0 0.1rem;
+  overflow: hidden;
+  font-size: 0.5rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* The bottom of the screen: three panels in a row, each standing on the bottom edge with nothing under it. On the left the level, the
    experience bar and the stats; in the middle the abilities over the health; on the right the items and the shops. */
 .game-hud {
@@ -989,6 +1171,8 @@ button.hud-item:hover {
   overflow: hidden;
   background: var(--ui-track);
   border: 2px solid var(--ui-line);
+  /* The HUD round it takes no pointer, but the slot does, so pointing at it brings up what the ability is. */
+  pointer-events: auto;
 }
 
 .hud-slot[hidden] {
@@ -1651,6 +1835,12 @@ button.hud-item:hover {
   width: 5rem;
 }
 
+/* A tick box is as big as a tick box, not as wide as a number box. */
+.rule-row input[type='checkbox'] {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
 /* Who is still in the game, and how the last one ended, for players back in the lobby. */
 .game-activity,
 .last-result {
@@ -2086,6 +2276,11 @@ button.hud-item:hover {
   text-transform: uppercase;
 }
 
+/* What an ability does, in a line under its name and before its numbers. */
+.item-tooltip-about {
+  margin: 0;
+}
+
 .item-tooltip-cost {
   display: flex;
   align-items: center;
@@ -2110,7 +2305,15 @@ button.hud-item:hover {
 
 .item-tooltip-stat {
   display: flex;
-  gap: 0.4rem;
+  flex-wrap: wrap;
+  gap: 0 0.4rem;
+}
+
+/* What a number is made of, on a line of its own under it. */
+.item-tooltip-stat-detail {
+  flex-basis: 100%;
+  color: var(--ui-muted);
+  font-size: 0.7rem;
 }
 
 .item-tooltip-stat-value {

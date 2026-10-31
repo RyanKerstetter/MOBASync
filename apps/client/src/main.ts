@@ -56,6 +56,8 @@ const modeWarning = requiredElement<HTMLParagraphElement>('#mode-warning')
 const respawnInput = requiredElement<HTMLInputElement>('#rule-respawn')
 const captureRow = requiredElement<HTMLElement>('#rule-capture-row')
 const captureInput = requiredElement<HTMLInputElement>('#rule-capture')
+const loseItemsRow = requiredElement<HTMLElement>('#rule-lose-items-row')
+const loseItemsInput = requiredElement<HTMLInputElement>('#rule-lose-items')
 const limitList = requiredElement<HTMLDivElement>('#rule-limits')
 const gameActivity = requiredElement<HTMLParagraphElement>('#game-activity')
 const lastResult = requiredElement<HTMLParagraphElement>('#last-result')
@@ -301,6 +303,7 @@ for (const mode of GAME_MODES) {
 }
 respawnInput.addEventListener('change', () => void changeRules({ respawnSeconds: respawnInput.valueAsNumber }))
 captureInput.addEventListener('change', () => void changeRules({ captureSeconds: captureInput.valueAsNumber }))
+loseItemsInput.addEventListener('change', () => void changeRules({ loseItemsOnDeath: loseItemsInput.checked }))
 
 // A number box shows what the lobby says, unless it is the one being typed in, or its change is on its way.
 function showNumber(input: HTMLInputElement, value: number, force: boolean): void {
@@ -309,8 +312,8 @@ function showNumber(input: HTMLInputElement, value: number, force: boolean): voi
 }
 
 // The leader's rules: how long a champion stays dead, how long the hill takes to capture (only for a game on
-// the hill), and the limit of the mode that is selected. Everyone sees them; only the leader can change them,
-// and only until the game starts.
+// the hill), whether a death costs a champion its items (only for core destruction, the mode that has them), and the
+// limit of the mode that is selected. Everyone sees them; only the leader can change them, and only until the game starts.
 function renderRules(lobby: Lobby, isLeader: boolean, force = false): void {
   const editable = isLeader && lobby.game.status === 'idle'
   respawnInput.disabled = !editable
@@ -318,6 +321,10 @@ function renderRules(lobby: Lobby, isLeader: boolean, force = false): void {
   captureRow.hidden = lobby.mode !== 'koth'
   captureInput.disabled = !editable
   showNumber(captureInput, lobby.rules.captureSeconds, force)
+  loseItemsRow.hidden = lobby.mode !== 'core'
+  loseItemsInput.disabled = !editable
+  // Like a number box, it keeps what was just clicked while the change is on its way.
+  if (force || !rulesChangePending) loseItemsInput.checked = lobby.rules.loseItemsOnDeath
   for (const [id, { row, input }] of limitRows) {
     // A mode with no limit to set (Core Destruction, which ends when a team is out) shows none.
     row.hidden = id !== lobby.mode || getGameMode(id).maxLimit === 0

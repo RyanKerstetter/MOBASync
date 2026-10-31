@@ -2,6 +2,7 @@ import { Container, Graphics, Text, type RenderLayer } from 'pixi.js'
 import { getTeam } from '../../../../packages/shared/src/index.ts'
 import { CharacterSprite, teamVariant, type LoadedSpriteSet, type SheetPainter } from '../character-sprite.ts'
 import type { RenderedCharacter } from '../game-state.ts'
+import { ATTACK_BAR_HEIGHT, attackBarTop, meterBarTop, METER_BAR_HEIGHT } from './bar-layout.ts'
 import { layoutCorpse } from './corpse.ts'
 import { characterDepth } from './depth.ts'
 import { layoutDeaggroBar } from './deaggro-bar.ts'
@@ -30,6 +31,8 @@ type Actor = {
   levelText: Text
   // A monster's deaggro bar, under its health bar, while it has something in it.
   deaggroBar: Graphics
+  // A champion's meter (a rage that runs down: see `RenderedCharacter.meter`), under its health bar, while it has something in it.
+  meterBar: Graphics
   cooldownBar: Graphics
 }
 
@@ -133,7 +136,10 @@ export class CharacterLayer {
       // A monster that is losing interest has a bar under its health that fills, and is full when it gives up and goes home.
       const losing = character.monster && !character.dead ? layoutDeaggroBar(character.monster.deaggro) : undefined
       actor.deaggroBar.visible = losing !== undefined
-      if (losing) drawBar(actor.deaggroBar, -above - 9, losing.fraction, losing.color, 4)
+      if (losing) drawBar(actor.deaggroBar, meterBarTop(above), losing.fraction, losing.color, METER_BAR_HEIGHT)
+      // A meter is under the health bar in the same place (a champion has no deaggro bar, so the two are never both there), and runs down as the status does.
+      actor.meterBar.visible = !character.dead && character.meter !== undefined
+      if (character.meter) drawBar(actor.meterBar, meterBarTop(above), character.meter.fraction, character.meter.color, METER_BAR_HEIGHT)
       actor.statusText.text = statusLabels(character).join(' · ')
       actor.statusText.position.set(0, -above - 43)
       drawStackPips(actor.stackPips, radius, character.dead ? {} : character.stacks)
@@ -144,7 +150,7 @@ export class CharacterLayer {
         now,
       })
       actor.cooldownBar.visible = isLocal && !character.dead && localAttackCooldown !== undefined
-      if (actor.cooldownBar.visible) drawBar(actor.cooldownBar, -radius - 8, localAttackCooldown ?? 1, '#f2b66d', 3)
+      if (actor.cooldownBar.visible) drawBar(actor.cooldownBar, attackBarTop(radius, above, actor.meterBar.visible), localAttackCooldown ?? 1, '#f2b66d', ATTACK_BAR_HEIGHT)
     }
   }
 
@@ -198,6 +204,8 @@ export class CharacterLayer {
     )
     const deaggroBar = new Graphics()
     deaggroBar.visible = false
+    const meterBar = new Graphics()
+    meterBar.visible = false
     const cooldownBar = new Graphics()
     // What is affecting the champion, as small words above its name.
     const statusText = new Text({
@@ -214,12 +222,12 @@ export class CharacterLayer {
     // A structure that cannot be hurt yet has a barrier round it, shown only while that is so.
     const barrier = character.turret ? drawBarrier(character.champion.radius) : undefined
     node.addChild(shape, ...(barrier ? [barrier] : []), ...(sprite ? [sprite.view] : []), stackPips)
-    overlay.addChild(label, statusText, healthBar, levelBadge, deaggroBar, cooldownBar)
+    overlay.addChild(label, statusText, healthBar, levelBadge, deaggroBar, meterBar, cooldownBar)
     this.view.addChild(node)
     this.overlay.addChild(overlay)
     // After it is in the scene, which the layer needs for where it is.
     this.depth?.attach(node)
-    const actor = { node, overlay, ...(sprite ? { sprite } : {}), shape, ...(barrier ? { barrier } : {}), statusText, stackPips, label, healthBar, levelBadge, levelText, deaggroBar, cooldownBar }
+    const actor = { node, overlay, ...(sprite ? { sprite } : {}), shape, ...(barrier ? { barrier } : {}), statusText, stackPips, label, healthBar, levelBadge, levelText, deaggroBar, meterBar, cooldownBar }
     this.actors.set(character.id, actor)
     return actor
   }

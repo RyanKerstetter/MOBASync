@@ -30,6 +30,15 @@ test('a slot is told by the key and the ability on it, and the key can change wh
   assert.deepEqual([second.key, second.abilityId], ['W', 'hush'])
 })
 
+test('a slot tells the whole cooldown its ability runs over, for its tooltip', () => {
+  const [first, second] = abilitySlotViews([
+    { slot: 0, abilityId: 'a', ticksRemaining: 100, cooldownTicks: 480 },
+    { slot: 1, abilityId: 'b', ticksRemaining: 0, cooldownTicks: 900 },
+  ], label)
+
+  assert.deepEqual([first.cooldownTicks, second.cooldownTicks], [480, 900])
+})
+
 test('the time left is in tenths under ten seconds and whole seconds above, and nothing when ready', () => {
   const [short, long, ready, exact] = abilitySlotViews([
     { slot: 0, abilityId: 'a', ticksRemaining: 204, cooldownTicks: 480 },

@@ -34,6 +34,8 @@ import { ClientGameState } from './game-state.ts'
 import { createTeamVision, type TeamVision } from './team-vision.ts'
 import { abilitySlotViews } from './ui/hud.ts'
 import { createHudView } from './ui/hud-view.ts'
+import { inspectView } from './ui/inspect.ts'
+import { createInspectView } from './ui/inspect-view.ts'
 import { createItemTooltip } from './ui/item-tooltip.ts'
 import { createModeHudView } from './ui/mode-hud-view.ts'
 import { createResultsView } from './ui/results-view.ts'
@@ -136,6 +138,14 @@ export async function startGame({
       const attempt = gameState.createSellOrder(slot)
       if (attempt.ok) reliableMessenger.send(attempt.order)
       else onStatus(attempt.reason, true)
+    },
+  })
+  // The character a left click picked, whom the panel on the left is about, until the player picks another, or nothing, or it dies.
+  let inspectedId: number | undefined
+  const inspect = createInspectView(container, {
+    tooltip: itemTooltip,
+    onClose: () => {
+      inspectedId = undefined
     },
   })
   const modeHud = createModeHudView(container)
@@ -311,10 +321,16 @@ export async function startGame({
   }
   // Holding the right button goes on giving the command, a few times a second (see `HoldCommand`).
   const holdCommand = new HoldCommand()
+  // Left click looks: on a champion, a monster or a turret, on whichever team, it puts up a panel of who it is, its stats and level, and for a player what it carries;
+  // on the ground it puts the panel away. It gives no order, and it leaves an ability that is being aimed alone.
   // Right click is the command button: on an enemy it attacks them, anywhere else it walks there.
   app.stage.on('pointerdown', (event) => {
     if (menu.isOpen) return
     const target = screenToWorld(camera, event.global)
+    if (event.button === 0) {
+      if (inPlay() && castControl.aiming === undefined) inspectedId = gameState.getCharacterNear(target)?.id
+      return
+    }
     if (gameState.isLocalDead()) return
     if (event.button !== 2 || !inPlay()) return
     // Giving an attack or move command drops any ability being aimed.
@@ -617,6 +633,11 @@ export async function startGame({
       : undefined
     // The hill or the flags, and each team's score: drawn on the map and in the HUD from the same view.
     const mode = gameState.getModeView(now)
+    // The one a left click picked is let go when it is dead or gone. While it is not seen (in the dark, say) it is not ringed and its panel is put away, as nothing
+    // is to be known of it, and both are back when it is.
+    const picked = inspectedId === undefined ? undefined : characters.find((character) => character.id === inspectedId)
+    if (inspectedId !== undefined && (!picked || picked.dead)) inspectedId = undefined
+    const inspected = picked && !picked.dead && inPlay() && sight.isVisible(picked) ? picked : undefined
     world.update({
       now,
       // What is not seen is not drawn, nor are its names and bars: the darkness is over everything else.
@@ -635,7 +656,10 @@ export async function startGame({
         hoveredId: hovered?.id,
         lockedId: gameState.getLocalAttackTarget(now),
       }),
+      ...(inspected ? { selectedId: inspected.id } : {}),
     })
+    const inspection = inspected ? gameState.getInspection(inspected, now) : undefined
+    inspect.update(inspection ? inspectView(inspection) : undefined)
     app.canvas.style.cursor = hovered ? 'crosshair' : ''
     updateCamera(local?.position ?? cameraCenter)
     // The cooldowns refresh every frame so they fill smoothly.
@@ -686,6 +710,7 @@ export async function startGame({
     debugOverlay.destroy()
     shop.destroy()
     itemTooltip.destroy()
+    inspect.destroy()
     hud.destroy()
     modeHud.destroy()
     scoreboard.destroy()

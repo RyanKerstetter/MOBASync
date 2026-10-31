@@ -5,12 +5,14 @@ import {
   alliesInRadius,
   alongAim,
   attackRangeBonus,
+  besideOwner,
   blind,
   blink,
   burn,
   capCooldown,
   damage,
   dash,
+  disarm,
   dodge,
   enemiesInBox,
   enemiesInLine,
@@ -27,6 +29,7 @@ import {
   refundCooldown,
   removeEntities,
   resetAutoTimer,
+  runEffects,
   statBuff,
   root,
   scaled,
@@ -44,10 +47,12 @@ import {
   when,
   type DashDef,
   type Effect,
+  type EffectSource,
   type EntityDef,
   type Scaling,
   type Selector,
   type SimContext,
+  type SimReader,
 } from './effects.js'
 import type { CastTarget, Vector2 } from './index.js'
 
@@ -66,7 +71,13 @@ export interface AbilityIndicator {
 
 export interface AbilityDef {
   id: string
-  // Shown on the champion select screen.
+  // What the player sees it called, where its id (see `abilityName`) would not read well, such as "Shadow Step".
+  name?: string
+  // The picture for it, as the name of a file in res/icons without its `.png`, where that is not the ability's own ID (which is the name it is looked for under
+  // when there is none): see `abilityIconName`.
+  icon?: string
+  // Shown on the champion select screen and in the tooltip over the ability. One or two plain sentences on what it does: its damage, its ratios and its
+  // cooldown are told by the tooltip itself, from the ability, so they are left out of this.
   description?: string
   targeting: CastTarget['mode']
   range: number
@@ -111,6 +122,13 @@ function ability(def: AbilityDef): AbilityDef {
   abilityMap.set(def.id, def)
   return def
 }
+
+// What the ability is called to a player: its `name`, or else its id made into words ("monster-slam" is "Monster Slam").
+export const abilityName = (def: Pick<AbilityDef, 'id' | 'name'>): string =>
+  def.name ?? def.id.split('-').map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')
+
+// The name of the file in res/icons (without `.png`) that an ability's picture is in: the `icon` it says, or else its own ID. An ID with no ability is its own name.
+export const abilityIconName = (abilityId: string): string => abilityMap.get(abilityId)?.icon ?? abilityId
 
 // The marker on a champion that says this ability's effects are ready for its next auto.
 export const readyKey = (abilityId: string): string => `ready:${abilityId}`
@@ -166,7 +184,7 @@ const curseStacksOnTarget = stacks(CURSE_KEY, targetUnit())
 const curseStacksOnHit = stacks(CURSE_KEY, subject())
 ability({
   id: 'feast',
-  description: 'Pops the curse stacks on the target. Each stack adds damage and haste, and refunds a fifth of this cooldown.',
+  description: 'Pops the target\'s curse stacks. Each stack adds damage, haste and cooldown refund.',
   targeting: 'unit',
   range: 280,
   windUpTicks: 6,
@@ -181,7 +199,7 @@ ability({
 })
 ability({
   id: 'miasma',
-  description: 'Leaves a field where you stand. Inside it you and your teammates move faster and enemies move slower.',
+  description: 'Leaves a field that speeds up allies and slows enemies.',
   targeting: 'none',
   range: 0,
   windUpTicks: 4,
@@ -227,7 +245,7 @@ const hexShot = {
 
 ability({
   id: 'hex',
-  description: 'A line shot that slows and adds two curse stacks. Against a target already at five stacks it pops them for damage and haste.',
+  description: 'A shot that slows and adds curse stacks. At full stacks it pops them for bonus damage and haste.',
   targeting: 'direction',
   range: 520,
   windUpTicks: 8,
@@ -241,7 +259,7 @@ ability({
 
 ability({
   id: 'leap',
-  description: 'Dashes to the target point. While dashing you cannot attack or cast.',
+  description: 'Dashes to the target point.',
   targeting: 'point',
   range: 150,
   windUpTicks: 0,
@@ -253,7 +271,7 @@ ability({
 })
 ability({
   id: 'focus',
-  description: 'For a few seconds your auto attacks are faster and reach farther.',
+  description: 'Your auto attacks are faster and reach farther for a few seconds.',
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
@@ -277,7 +295,7 @@ const snareField = {
 } satisfies EntityDef
 ability({
   id: 'snare',
-  description: 'Lobs a canister to the target point. It takes longer the farther it goes, then leaves a small trap for a second that roots every enemy it lands on or that walks into it.',
+  description: 'Lobs a canister that leaves a trap. Enemies it catches are rooted.',
   targeting: 'point',
   range: 450,
   windUpTicks: 4,
@@ -318,7 +336,7 @@ const tsunamiWave = {
 } satisfies EntityDef
 ability({
   id: 'tsunami',
-  description: `Sends a wave of water forward. It damages enemies, knocks them back and stuns them for ${TSUNAMI_STUN_TICKS / GAME_TPS} seconds.`,
+  description: 'A wave that damages, knocks back and stuns enemies.',
   targeting: 'direction',
   range: 320,
   windUpTicks: 5,
@@ -347,7 +365,7 @@ const bubble = {
 } satisfies EntityDef
 ability({
   id: 'bubbles',
-  description: 'Fires a stream of three bubbles. On each target the first bubble to hit does full damage and the rest do half.',
+  description: 'Fires three bubbles. The first to hit a target does full damage, the rest half.',
   targeting: 'direction',
   range: 420,
   windUpTicks: 4,
@@ -386,7 +404,7 @@ const spoutWarning: EntityDef = {
 }
 ability({
   id: 'spout',
-  description: 'Marks a small circle at the target point. After a brief warning it erupts, damaging and slowing enemies still standing in it.',
+  description: 'Marks a circle that erupts after a short delay, damaging and slowing enemies in it.',
   targeting: 'point',
   range: 350,
   windUpTicks: 4,
@@ -398,7 +416,7 @@ ability({
 // ---------------------------------------------------------------------------- Soldier
 ability({
   id: 'stim',
-  description: 'Costs you a chunk of health. For a few seconds you attack faster, move faster, and take less damage.',
+  description: 'Costs health. For a few seconds you attack faster, move faster and take less damage.',
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
@@ -425,7 +443,7 @@ const soldierBolt = {
 } satisfies EntityDef
 ability({
   id: 'bolt',
-  description: 'A bolt that pierces every enemy in a line and slows them. It hurts more the less health they have left.',
+  description: 'A piercing bolt that slows. It hits harder the less health the enemy has.',
   targeting: 'direction',
   range: 300,
   windUpTicks: 5,
@@ -448,7 +466,7 @@ const medicBot: EntityDef = {
 }
 ability({
   id: 'medic',
-  description: 'Summons a medical bot that hovers by you. Its shield lasts until it is broken, and the bot heals you over time until then. Casting again replaces it.',
+  description: 'Summons a bot with a shield. It heals you until the shield breaks.',
   targeting: 'none',
   range: 0,
   windUpTicks: 3,
@@ -491,7 +509,7 @@ const slashTrail = {
 
 ability({
   id: 'slash',
-  description: 'Cuts a line in front of you, then leaves a fiery trail that slows enemies and speeds up you and your teammates. Each sword stack adds damage.',
+  description: 'Cuts a line, then leaves a trail that slows enemies and speeds up allies. Sword stacks add damage.',
   targeting: 'direction',
   range: SLASH_LENGTH,
   windUpTicks: 10,
@@ -518,7 +536,7 @@ const lightBurst: EntityDef = {
 
 ability({
   id: 'radiance',
-  description: 'Spends your sword stacks in an explosion of light around you. Each stack adds damage and move speed.',
+  description: 'Spends your sword stacks to blast nearby enemies and speed you up.',
   targeting: 'none',
   range: 0,
   windUpTicks: 8,
@@ -534,7 +552,7 @@ ability({
 
 ability({
   id: 'shackle',
-  description: 'Readies your next auto attack to spend your sword stacks on its target: it roots them, or stuns them if you had all three. Resets your auto attack, and can be used between autos.',
+  description: 'Your next auto roots its target, or stuns it with full sword stacks.',
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
@@ -599,7 +617,7 @@ const grenade = {
 
 ability({
   id: 'grenade',
-  description: 'Lobs a grenade to the target point. It takes longer the farther it goes, then explodes, hurting enemies and bouncing them away from the middle of the blast. It bounces you away too if you are in it, and catching an enemy hands back half of this cooldown.',
+  description: 'Lobs a grenade that hurts and knocks enemies back. Hitting one refunds some cooldown.',
   targeting: 'point',
   range: 350,
   windUpTicks: 2,
@@ -628,7 +646,7 @@ const molotovFire = {
 
 ability({
   id: 'molotov',
-  description: 'Throws a molotov to the target point. It coats the ground in fire for a few seconds, slowing enemies in it and setting them alight.',
+  description: 'Lobs a molotov that burns and slows enemies standing in the fire.',
   targeting: 'point',
   range: 350,
   windUpTicks: 4,
@@ -674,7 +692,7 @@ const flashbang = {
 } satisfies EntityDef
 ability({
   id: 'flashbang',
-  description: 'Lobs a flashbang to the target point. It takes longer the farther it goes, then goes off: an enemy right under it is stunned, and one caught by the edge of the flash is briefly blinded, so their auto attacks miss.',
+  description: 'Lobs a flashbang. Enemies in the middle are stunned, those at the edge are blinded.',
   targeting: 'point',
   range: 320,
   windUpTicks: 4,
@@ -696,7 +714,7 @@ ability({
 export const TRICK_KEY = 'trick'
 export const TRICK_HITS = 3
 export const TRICK_WINDOW_TICKS = seconds(5)
-export const TRICK_BONUS_DAMAGE = 50
+export const TRICK_BONUS_DAMAGE = 100
 export const TRICK_BONUS_DAMAGE_ARCANE = 0.5
 export const TRICK_HASTE = 0.6
 export const TRICK_HASTE_TICKS = seconds(1.5)
@@ -713,7 +731,7 @@ const trickEffects: readonly Effect[] = [
     [mark(TRICK_KEY, TRICK_WINDOW_TICKS, subject(), { cap: TRICK_HITS - 1 })],
   ),
 ]
-const STICK_DAMAGE = 80
+const STICK_DAMAGE = 60
 const STICK_ARCANE = 0.5
 const STICK_RESET_TICKS = seconds(.5)
 const stick = {
@@ -740,7 +758,7 @@ const stickShot = {
 } satisfies EntityDef
 ability({
   id: 'stick',
-  description: 'Throws a stick to the point you aim at, anywhere from 150 to 360 away. It hurts enemies it passes through, then lands in the ground there, or against a wall, and stays. Walk over it to pick it up, which leaves this no more than a second to wait, or press this again to call it back, which hurts and slows enemies it passes on the way.',
+  description: 'Throws a stick that stays where it lands. Walk over it to refresh this, or press again to call it back.',
   targeting: 'point',
   range: STICK_RANGE,
   minRange: STICK_MIN_RANGE,
@@ -765,7 +783,7 @@ const stickRecall = {
 } satisfies EntityDef
 ability({
   id: 'recall',
-  description: 'Calls the stick back to you. It hurts and slows each enemy it passes through on the way. Calling it back does not refund the throw: only walking over the stick does.',
+  description: 'Calls the stick back, hurting and slowing enemies on the way.',
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
@@ -781,7 +799,7 @@ const HUSH_DAMAGE = 40
 const HUSH_ARCANE = 0.8
 ability({
   id: 'hush',
-  description: 'Readies your next auto attack to silence its target, so they cannot cast. That auto counts as an ability hit for your passive. Resets your auto attack, and can be used between autos.',
+  description: 'Your next auto silences its target and counts as an ability hit for your passive.',
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
@@ -802,7 +820,7 @@ const warpFlashOut: EntityDef = {
 const warpFlashIn: EntityDef = { ...warpFlashOut, id: 'warp-in' }
 ability({
   id: 'warp',
-  description: 'Blinks you to your stick, wherever it is, which picks it up and leaves your throw no more than a second to wait. With no stick on the ground, out or flying, but your throw on cooldown, it gives you the throw back instead.',
+  description: 'Blinks you to your stick. With no stick out, it gives you the throw back instead.',
   targeting: 'none',
   range: 0,
   windUpTicks: 3,
@@ -889,7 +907,8 @@ const shadowReturnDash: DashDef = {
 }
 ability({
   id: 'shadowstep',
-  description: `Dashes to the target point. Each enemy you pass through is hurt and slowed as you pass, and the first also gives you a shadow stack (up to two) for an enhanced auto, gets most of this cooldown back and leaves a shadow where you cast it, which fades after ${SHADOW_LIFETIME_TICKS / GAME_TPS} seconds. With a shadow out, this key dashes back to it instead.`,
+  name: 'Shadow Step',
+  description: 'Dashes through enemies, hurting and slowing them. Hitting one gives a shadow stack and leaves a shadow to return to.',
   targeting: 'point',
   range: SHADOW_STEP_RANGE,
   windUpTicks: 0,
@@ -904,7 +923,8 @@ ability({
 })
 ability({
   id: 'shadowreturn',
-  description: `Dashes back to your shadow from any distance. Passing through an enemy does the same as Shadow Step and leaves a new shadow where you cast this; passing through none loses the shadow and puts Shadow Step on its whole cooldown. The shadow fades after ${SHADOW_LIFETIME_TICKS / GAME_TPS} seconds, and then the key is Shadow Step again.`,
+  name: 'Shadow Return',
+  description: 'Dashes back to your shadow, hurting and slowing enemies on the way.',
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
@@ -943,7 +963,7 @@ const shurikenEnhanced = {
 } satisfies EntityDef
 ability({
   id: 'shuriken',
-  description: 'Throws a shuriken in a line. It hurts and slows every enemy it passes through. With a shadow stack it spends one to hurt more and root instead.',
+  description: 'A piercing shuriken that slows. With a shadow stack it hurts more and roots instead.',
   targeting: 'direction',
   range: 150,
   windUpTicks: 4,
@@ -960,13 +980,312 @@ ability({
 })
 ability({
   id: 'dodge',
-  description: 'For a short time you move faster and dodge every auto attack aimed at you.',
+  description: 'You move faster and dodge every auto attack for a moment.',
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
   backswingTicks: 0,
   cooldownTicks: seconds(12),
   apply: [haste(0.4, seconds(1.5)), dodge(seconds(1.5))],
+})
+
+// ---------------------------------------------------------------------------- Hammer
+
+// Hammer's plating: each auto he lands gives him a stack, up to six, and each stack is resistance. All the stacks end together, `PLATING_TICKS` after the last
+// auto, which renews them. The resistance is a buff of the one name (see `statBuff`), worked out afresh from the stacks each auto and renewed with them,
+// so the stacks and the resistance they give are always in step. (The effects are in champions.ts, with the rest of his autos.)
+export const PLATING_KEY = 'plating'
+export const PLATING_MAX_STACKS = 6
+export const PLATING_TICKS = seconds(6)
+// What a stack is worth: this many points of resistance, and this many more for each level he is (the level counts from 1, as it does for every `scaled` amount, so at
+// level 1 a stack is the two added together).
+export const PLATING_RESISTANCE_PER_STACK = 6
+export const PLATING_SCALING_PER_LEVEL = 1
+
+// Hammer's Slam: the hammer comes down on the ground in front of him, on a rectangle `SLAM_LENGTH` long from where he stands and as wide as the
+// indicator. It leaves a mark on the ground for an instant, in the same rectangle.
+const SLAM_LENGTH = 120
+const SLAM_HALF_WIDTH = 25
+export const SLAM_DAMAGE = 70
+export const SLAM_SCALING = { attackDamage: 0.7 } satisfies Scaling
+const slamCrater = {
+  id: 'slam-crater',
+  speed: 0,
+  box: { halfLength: SLAM_LENGTH / 2, halfWidth: SLAM_HALF_WIDTH },
+  lifetimeTicks: 10,
+  visual: 'field',
+  color: '#d9a35c',
+} satisfies EntityDef
+ability({
+  id: 'slam',
+  description: 'Smashes the ground in front of you, hurting and slowing enemies.',
+  targeting: 'direction',
+  range: SLAM_LENGTH,
+  windUpTicks: 14,
+  backswingTicks: 4,
+  cooldownTicks: seconds(7),
+  indicator: { width: SLAM_HALF_WIDTH * 2 },
+  apply: [
+    damage(scaled(SLAM_DAMAGE, SLAM_SCALING), enemiesInLine(SLAM_LENGTH, SLAM_HALF_WIDTH)),
+    slow(0.4, seconds(1.5), enemiesInLine(SLAM_LENGTH, SLAM_HALF_WIDTH)),
+    // The mark's middle is half the length ahead of him, pointing the way he struck.
+    spawnEntity(slamCrater, { at: alongAim(SLAM_LENGTH / 2) }),
+  ],
+})
+
+// Hammer's Hammer Drop: a jump to the aimed point that lands as its warning fills in. The warning is laid where he will come down, as soon as the
+// jump starts, and fills in for as long as the jump takes, so it goes off as he lands. How long that is depends on how far the point is: from `DROP_MIN_TICKS`
+// for one at his feet to `DROP_MAX_TICKS` for one at the farthest he can aim, so a near drop is quick. It hits whoever is inside then, and not whoever
+// was when it was laid: an enemy can walk out of it. He goes over whatever is between, and a jump he does not live to land ends with him.
+const DROP_RANGE = 350
+const DROP_RADIUS = 90
+export const DROP_MIN_TICKS = seconds(0.2)
+export const DROP_MAX_TICKS = seconds(0.45)
+// How long the warning lasts for the point this cast is aimed at, in a straight line between the shortest and the longest by how far it is.
+const dropTicks = (_sim: SimReader, src: EffectSource): number => {
+  if (src.aim?.mode !== 'point') return DROP_MAX_TICKS
+  const dx = src.aim.point.x - src.at.x
+  const dy = src.aim.point.y - src.at.y
+  const share = Math.min(1, Math.sqrt(dx * dx + dy * dy) / DROP_RANGE)
+  return Math.round(DROP_MIN_TICKS + (DROP_MAX_TICKS - DROP_MIN_TICKS) * share)
+}
+export const DROP_DAMAGE = 80
+export const DROP_SCALING = { attackDamage: 0.8 } satisfies Scaling
+export const DROP_STUN_TICKS = seconds(1)
+const dropBurst: EntityDef = {
+  id: 'hammerdrop-burst',
+  speed: 0,
+  radius: DROP_RADIUS,
+  lifetimeTicks: 8,
+  visual: 'field',
+  color: '#d9a35c',
+}
+const dropWarning: EntityDef = {
+  id: 'hammerdrop-warning',
+  speed: 0,
+  radius: DROP_RADIUS,
+  // The longest it lasts; each one lasts as long as its own jump (see `dropTicks`).
+  lifetimeTicks: DROP_MAX_TICKS,
+  visual: 'telegraph',
+  color: '#ff6b4a',
+  stayWhile: (sim, src) => sim.isAlive(src.ownerId),
+  onExpire: [
+    damage(scaled(DROP_DAMAGE, DROP_SCALING), enemiesInRadius(DROP_RADIUS)),
+    stun(DROP_STUN_TICKS, enemiesInRadius(DROP_RADIUS)),
+    spawnEntity(dropBurst),
+  ],
+}
+ability({
+  id: 'hammerdrop',
+  name: 'Hammer Drop',
+  icon: 'drop',
+  description: 'Leaps to a marked spot and slams down, stunning enemies where you land.',
+  targeting: 'point',
+  range: DROP_RANGE,
+  windUpTicks: 3,
+  backswingTicks: 3,
+  cooldownTicks: seconds(12),
+  movement: true,
+  indicator: { radius: DROP_RADIUS },
+  apply: [
+    spawnEntity(dropWarning, { at: aimPoint(), lifetime: dropTicks }),
+    // However far the aimed point is, it is in reach (the cast was checked), so the jump goes all the way there. It takes a tick less than the warning,
+    // because the last step of a dash can take one more than it is worked out for: he is down before the warning goes off, and not on the tick it does.
+    dash(0, Infinity, self(), { through: true, over: (sim, src) => dropTicks(sim, src) - 1 }),
+  ],
+})
+
+// Hammer's Rage: move speed, attack speed and damage reduction for `RAGE_TICKS`. Each of its effects is the one status of the name `RAGE_KEY` (see `haste`),
+// and each auto he lands makes them last `RAGE_AUTO_TICKS` longer (`prolong`, in champions.ts), up to `RAGE_MAX_TICKS` left. The page draws what is left of it as
+// a bar over him, full at `RAGE_MAX_TICKS` (the champion's `meter`).
+export const RAGE_KEY = 'rage'
+export const RAGE_TICKS = seconds(5)
+export const RAGE_AUTO_TICKS = seconds(0.6)
+export const RAGE_MAX_TICKS = seconds(6)
+export const RAGE_HASTE = 0.3
+export const RAGE_ATTACK_SPEED = 0.5
+ability({
+  id: 'rage',
+  description: 'Move and attack faster and take less damage. Your autos make it last longer.',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: seconds(16),
+  apply: [
+    haste(RAGE_HASTE, RAGE_TICKS, self(), { named: RAGE_KEY }),
+    statBuff('attackSpeed', RAGE_ATTACK_SPEED, RAGE_TICKS, self(), { named: RAGE_KEY }),
+  ],
+})
+
+// ---------------------------------------------------------------------------- Chain
+
+// Chain's first strike: the first auto he lands on an enemy, or the first hit the edge of Whirl makes on it, does bonus damage and heals him. The enemy then
+// carries a `FIRST_STRIKE_KEY` marker, his own, for `FIRST_STRIKE_COOLDOWN_TICKS`, and he has no first strike on it until the marker is gone: so each enemy
+// has a cooldown of its own, and another Chain's is separate (a marker is counted by its owner). A structure takes no markers, so it is never first-struck.
+export const FIRST_STRIKE_KEY = 'chained'
+export const FIRST_STRIKE_COOLDOWN_TICKS = seconds(10)
+export const FIRST_STRIKE_DAMAGE = 30
+export const FIRST_STRIKE_SCALING = { attackDamage: 0.3 } satisfies Scaling
+export const FIRST_STRIKE_HEAL = 40
+export const FIRST_STRIKE_HEAL_SCALING = { maxHealth: .1}
+const firstStruck = stacks(FIRST_STRIKE_KEY, subject())
+// Run for the unit hit (the subject), after the hit's own damage.
+export const firstStrike: Effect<SimContext> = when<SimContext>(
+  (sim, src) => src.subject !== null && sim.character(src.subject)?.structure !== true && firstStruck(sim, src) === 0,
+  [
+    damage(scaled(FIRST_STRIKE_DAMAGE, FIRST_STRIKE_SCALING)),
+    heal(scaled(FIRST_STRIKE_HEAL,FIRST_STRIKE_HEAL_SCALING)),
+    mark(FIRST_STRIKE_KEY, FIRST_STRIKE_COOLDOWN_TICKS, subject()),
+  ],
+)
+// The same for each unit a pulse of Whirl selects, one at a time, as the subject.
+const firstStrikeOn = (to: Selector): Effect<SimContext> => (sim, src) => {
+  for (const unitId of to(sim, src)) runEffects([firstStrike], sim, { ...src, subject: unitId })
+}
+
+// Chain's Hook: a shot that drags the first enemy it hits to him, and drops it touching him. The drag is a dash of the enemy's, so it cannot attack or cast
+// until it lands, and it goes over whatever is between.
+const HOOK_RANGE = 280
+const HOOK_SPEED = 720
+export const HOOK_DAMAGE = 60
+export const HOOK_SCALING = { attackDamage: 0.5 } satisfies Scaling
+const HOOK_PULL_SPEED = 1000
+const hook = {
+  id: 'hook',
+  speed: HOOK_SPEED,
+  radius: 14,
+  lifetimeTicks: Math.round(HOOK_RANGE / HOOK_SPEED * GAME_TPS),
+  color: '#b8c4d4',
+  onHit: [
+    damage(scaled(HOOK_DAMAGE, HOOK_SCALING)),
+    dash(HOOK_PULL_SPEED, Infinity, subject(), { toward: besideOwner(), through: true }),
+  ],
+} satisfies EntityDef
+ability({
+  id: 'hook',
+  description: 'Throws out a chain that drags the first enemy it hits to you.',
+  targeting: 'direction',
+  range: HOOK_RANGE,
+  windUpTicks: 6,
+  backswingTicks: 4,
+  cooldownTicks: seconds(12),
+  indicator: { width: hook.radius * 2 },
+  apply: [spawnEntity(hook)],
+})
+
+// Chain's Whirl: a charge-up and then one blow. For `WHIRL_CHARGE_TICKS` two circles, the core and the whole, are outlined round him (they do not fill in); when the
+// charge is full the blow lands, with a flash, on whoever is inside them then, and not whoever was when it was started, so an enemy can get out. Whoever is wholly inside the
+// core takes the plain hit; whoever reaches the ring outside it, the sweet spot, even by touching it, takes the bigger one and is slowed, and that is a first strike.
+// The cast has no windup or backswing, so he can walk and cast while it charges, but he is disarmed for it and cannot attack. The circles are held exactly on him
+// (`attached`), so they are centred on him as he walks, and what they hit is what is inside them, so it is where they are drawn. A charge that he does not live to
+// finish, or that a stun breaks, does not go off.
+const WHIRL_CHARGE_TICKS = seconds(.8)
+export const WHIRL_CORE_RADIUS = 70
+export const WHIRL_RADIUS = 120
+export const WHIRL_DAMAGE = 35
+export const WHIRL_SCALING = { attackDamage: 0.5 } satisfies Scaling
+export const WHIRL_SWEET_DAMAGE = 70
+export const WHIRL_SWEET_SCALING = { attackDamage: 0.8 } satisfies Scaling
+export const WHIRL_SWEET_SLOW = 0.4
+const WHIRL_SWEET_SLOW_TICKS = seconds(1.5)
+// Whether a body is wholly inside the core, which is the only place the plain hit reaches. A body that reaches out of it at all, into the ring, is on the edge,
+// and the edge is the better hit: so one that touches both circles is hit as the edge. (It is the body that counts, wherever its middle is.)
+const insideWhirlCore = (sim: SimReader, src: EffectSource, unitId: number): boolean => {
+  const unit = sim.character(unitId)
+  const position = sim.posAt(unitId, src.tick)
+  if (!unit || !position) return false
+  const dx = position.x - src.at.x
+  const dy = position.y - src.at.y
+  return Math.sqrt(dx * dx + dy * dy) + unit.champion.radius <= WHIRL_CORE_RADIUS
+}
+const enemiesInWhirlCore: Selector = (sim, src) =>
+  enemiesInRadius(WHIRL_CORE_RADIUS)(sim, src).filter((unitId) => insideWhirlCore(sim, src, unitId))
+const enemiesOnWhirlEdge: Selector = (sim, src) =>
+  enemiesInRadius(WHIRL_RADIUS)(sim, src).filter((unitId) => !insideWhirlCore(sim, src, unitId))
+// The blow itself is only a flash, hot at the edge, which is where it is worst, and pale in the core; its damage is dealt by the charge as it ends.
+const WHIRL_FLASH_TICKS = 10
+const whirlBurst: EntityDef = {
+  id: 'whirl-burst',
+  speed: 0,
+  radius: WHIRL_RADIUS,
+  lifetimeTicks: WHIRL_FLASH_TICKS,
+  visual: 'flash',
+  color: '#ff6b4a',
+}
+const whirlCoreBurst: EntityDef = {
+  id: 'whirl-core-burst',
+  speed: 0,
+  radius: WHIRL_CORE_RADIUS,
+  lifetimeTicks: WHIRL_FLASH_TICKS,
+  visual: 'flash',
+  color: '#fff1c9',
+}
+const whirlCharges = {
+  lifetimeTicks: WHIRL_CHARGE_TICKS,
+  attached: true,
+  visual: 'field',
+  stayWhile: (sim, src) => sim.isAlive(src.ownerId) && !sim.statusesOn(src.ownerId).some((status) => status.kind === 'stun'),
+} satisfies Partial<EntityDef>
+// The core is only outlined, in a paler colour than the edge, which is where the blow is worst.
+const whirlCoreWarning = {
+  ...whirlCharges,
+  id: 'whirl-core-warning',
+  speed: 0,
+  radius: WHIRL_CORE_RADIUS,
+  color: '#c9b27a',
+} satisfies EntityDef
+const whirlWarning = {
+  ...whirlCharges,
+  id: 'whirl-warning',
+  speed: 0,
+  radius: WHIRL_RADIUS,
+  color: '#ff6b4a',
+  onExpire: [
+    damage(scaled(WHIRL_DAMAGE, WHIRL_SCALING), enemiesInWhirlCore),
+    damage(scaled(WHIRL_SWEET_DAMAGE, WHIRL_SWEET_SCALING), enemiesOnWhirlEdge),
+    slow(WHIRL_SWEET_SLOW, WHIRL_SWEET_SLOW_TICKS, enemiesOnWhirlEdge),
+    firstStrikeOn(enemiesOnWhirlEdge),
+    spawnEntity(whirlBurst),
+    spawnEntity(whirlCoreBurst),
+  ],
+} satisfies EntityDef
+ability({
+  id: 'whirl',
+  description: 'Charges your chains around you, then lashes out. The outer edge hits harder and slows. You can move but not attack while it charges.',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: seconds(11),
+  apply: [
+    // Disarmed through the last tick before the blow lands (a status is over on the tick it ends on, and the blow comes a tick after the charge is full).
+    disarm(WHIRL_CHARGE_TICKS + 1, self()),
+    spawnEntity(whirlCoreWarning),
+    spawnEntity(whirlWarning),
+  ],
+})
+
+// Chain's Lunge: a short dash the way it is aimed, with no target, that quickens his attacks and readies his next auto at once. It has no windup, so it is cast
+// while Whirl charges.
+const LUNGE_RANGE = 120
+const LUNGE_SPEED = 400
+export const LUNGE_ATTACK_SPEED = 0.6
+export const LUNGE_BUFF_TICKS = seconds(3)
+ability({
+  id: 'lunge',
+  description: 'A short dash that speeds up your attacks and resets your auto. You can use it while Whirl charges.',
+  targeting: 'direction',
+  range: LUNGE_RANGE,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: seconds(9),
+  movement: true,
+  apply: [
+    dash(LUNGE_SPEED, LUNGE_RANGE),
+    statBuff('attackSpeed', LUNGE_ATTACK_SPEED, LUNGE_BUFF_TICKS),
+    resetAutoTimer(),
+  ],
 })
 
 // ---------------------------------------------------------------------------- Monsters
@@ -976,7 +1295,7 @@ ability({
 
 ability({
   id: 'monster-slam',
-  description: 'A placeholder monster ability: a heavy blow to everything round the caster.',
+  description: 'A heavy blow to everything around the caster.',
   targeting: 'none',
   range: 0,
   windUpTicks: 14,

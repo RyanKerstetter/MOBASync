@@ -139,6 +139,9 @@ export type LobbyRules = {
   respawnSeconds: number
   // Only king of the hill has a use for it.
   captureSeconds: number
+  // Only core destruction has a use for it, the one mode with items: a champion that dies loses what it carries, but for what is in the slots it keeps
+  // (`KEPT_ON_DEATH`, the pet). Its gold is kept, so it can buy again. Off by default.
+  loseItemsOnDeath: boolean
   scoreLimits: Record<GameMode, number>
 }
 
@@ -150,6 +153,7 @@ export function defaultRules(): LobbyRules {
   return {
     respawnSeconds: RESPAWN_SECONDS.default,
     captureSeconds: CAPTURE_SECONDS.default,
+    loseItemsOnDeath: false,
     scoreLimits: Object.fromEntries(GAME_MODES.map((mode) => [mode.id, mode.defaultLimit])) as Record<GameMode, number>,
   }
 }
@@ -158,6 +162,7 @@ export function defaultRules(): LobbyRules {
 export type RulesChange = {
   respawnSeconds?: number
   captureSeconds?: number
+  loseItemsOnDeath?: boolean
   scoreLimits?: Partial<Record<GameMode, number>>
 }
 
@@ -181,6 +186,10 @@ export function readRulesChange(raw: unknown): { change: RulesChange } | { probl
     }
     change.captureSeconds = body.captureSeconds
   }
+  if (body.loseItemsOnDeath !== undefined) {
+    if (typeof body.loseItemsOnDeath !== 'boolean') return { problem: 'Losing items on death must be on or off.' }
+    change.loseItemsOnDeath = body.loseItemsOnDeath
+  }
   if (body.scoreLimits !== undefined) {
     const limits = typeof body.scoreLimits === 'object' && body.scoreLimits !== null ? body.scoreLimits as Record<string, unknown> : undefined
     if (!limits) return { problem: 'The score limits must say which mode each is for.' }
@@ -201,13 +210,15 @@ export function applyRulesChange(rules: LobbyRules, change: RulesChange): LobbyR
   return {
     respawnSeconds: change.respawnSeconds ?? rules.respawnSeconds,
     captureSeconds: change.captureSeconds ?? rules.captureSeconds,
+    loseItemsOnDeath: change.loseItemsOnDeath ?? rules.loseItemsOnDeath,
     scoreLimits: { ...rules.scoreLimits, ...change.scoreLimits },
   }
 }
 
 // What the simulator is given of the rules for a game of this mode: how many ticks a champion stays dead, the
-// score to win at if there is one, and for king of the hill how many ticks it takes to fill the bar.
-export type ModeRules = { respawnTicks?: number; scoreLimit?: number; captureTicks?: number }
+// score to win at if there is one, for king of the hill how many ticks it takes to fill the bar, and for core destruction
+// whether a death costs a champion its items. A rule that is off is not there, as one that does not apply to the mode is not.
+export type ModeRules = { respawnTicks?: number; scoreLimit?: number; captureTicks?: number; loseItemsOnDeath?: true }
 
 export function modeRules(rules: LobbyRules, mode: GameMode): ModeRules {
   const limit = rules.scoreLimits[mode]
@@ -215,6 +226,7 @@ export function modeRules(rules: LobbyRules, mode: GameMode): ModeRules {
     respawnTicks: rules.respawnSeconds * GAME_TPS,
     ...(limit > 0 ? { scoreLimit: limit } : {}),
     ...(mode === 'koth' ? { captureTicks: rules.captureSeconds * GAME_TPS } : {}),
+    ...(mode === 'core' && rules.loseItemsOnDeath ? { loseItemsOnDeath: true as const } : {}),
   }
 }
 
@@ -302,7 +314,14 @@ export function createModeSetup(
       ...withRules,
     }
   }
-  if (mode === 'core') return { kind: 'core', teams: rankTeams(teams), ...withRules }
+  if (mode === 'core') {
+    return {
+      kind: 'core',
+      teams: rankTeams(teams),
+      ...(rules.loseItemsOnDeath ? { loseItemsOnDeath: true as const } : {}),
+      ...withRules,
+    }
+  }
   return { kind: 'deathmatch', ...withRules }
 }
 

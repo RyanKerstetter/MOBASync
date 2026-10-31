@@ -28,8 +28,10 @@ import {
   hillOwner,
   hillPresence,
   ITEM_SLOT_NAMES,
+  itemAttackSpeedBonus,
   itemTotals,
   meetsRequirement,
+  namedStatusTicksLeft,
   NOT_IN_SHOP,
   quantizeDirection,
   Simulator,
@@ -134,13 +136,19 @@ export type RenderedCharacter =
     deadForSeconds?: number
     // Markers on this character by key, such as 'curse' stacks.
     stacks: Record<string, number>
+    // The bar over a champion that shows how long one of its statuses has left, such as a rage (see `ChampionMeterDef`): how full it is, from 0 to 1, and its
+    // colour. Only there while it has any left.
+    meter?: { fraction: number; color: string }
     hasted: boolean
     slowed: boolean
     rooted: boolean
     stunned: boolean
     burning: boolean
+    poisoned: boolean
     blinded: boolean
     silenced: boolean
+    // Unable to start an auto attack (see `disarm`).
+    disarmed: boolean
     // Dodging every auto attack aimed at it.
     dodging: boolean
     // What it is in the middle of, if anything: an auto attack or an ability, windup or backswing.
@@ -153,11 +161,27 @@ export type RenderedEntity = SimEntity & {
   position: Vector2
   // The circle's radius, or for a box the radius that encloses it. Only circles are drawn from it.
   radius: number
-  visual: 'bolt' | 'field' | 'telegraph'
+  visual: 'bolt' | 'field' | 'telegraph' | 'flash'
   color?: string
   box?: BoxShape
   // How far through its lifetime it is, from 0 to 1. A telegraph fills in as this grows.
   progress: number
+}
+// What is said of a character that has been clicked on (see `getInspection`).
+export type Inspection = {
+  id: number
+  // A player's name, or a monster's or a turret's.
+  name: string
+  // The champion a player is, which its name does not say. Left out for anything that is not a player.
+  championName?: string
+  // How it stands to the local champion: it is it, on its team, or against it (a monster is against everyone).
+  relation: 'you' | 'ally' | 'enemy'
+  // Left out where there is none to show: a turret has no level, and nor has a player in a game with no levels.
+  level?: number
+  health: { hp: number; maxHp: number; shield: number }
+  stats: ChampionStats
+  // What a player carries, in a game with items.
+  items?: Inventory
 }
 export type AbilityCooldown = {
   slot: number
@@ -611,6 +635,46 @@ export class ClientGameState {
       .sort((left, right) => left.distance - right.distance)[0]?.character
   }
 
+  // The living character that is seen under a point, whoever it is on: the click that looks at someone (`getInspection`), where the click that
+  // attacks (`getEnemyNear`) picks enemies only. The one nearest the point wins, and one that is not seen is not there to be picked.
+  getCharacterNear(
+    point: Vector2,
+    now = performance.now(),
+    characters: readonly RenderedCharacter[] = this.getCharacters(now),
+  ): RenderedCharacter | undefined {
+    return characters
+      .filter((character) => !character.dead && this.canSee(character))
+      .map((character) => ({
+        character,
+        distance: Math.hypot(character.position.x - point.x, character.position.y - point.y),
+      }))
+      .filter(({ character, distance }) => distance <= character.champion.radius + 6)
+      .sort((left, right) => left.distance - right.distance)[0]?.character
+  }
+
+  // What to say of a character that has been clicked on, as of the frame being drawn: who it is, how it stands, its stats at its level with what its items and
+  // its statuses add to them, and for a player in a game with items, what it carries. It is the same for anyone, the local champion, a teammate or an enemy:
+  // every page has every character's frame. The page asks only for one that is seen (see `getCharacterNear`).
+  getInspection(character: RenderedCharacter, now = performance.now()): Inspection | undefined {
+    const sim = this.simulator.characters.get(character.id)
+    const state = this.getSnapshotAtEstimatedTick(now).get(character.id)
+    if (!sim || !state) return undefined
+    const items = state.getItems()
+    const level = state.getLevel()
+    const localTeam = this.localCharacterId === undefined ? undefined : this.simulator.characters.get(this.localCharacterId)?.team
+    return {
+      id: character.id,
+      name: character.name ?? `Player ${character.id}`,
+      ...(character.player ? { championName: sim.champion.name } : {}),
+      relation: character.id === this.localCharacterId ? 'you' : character.team === localTeam ? 'ally' : 'enemy',
+      // A player's level is shown where there are levels (as it is over its head); a monster's always is, since it grows by what it kills.
+      ...(character.monster ? { level } : character.level !== undefined ? { level: character.level } : {}),
+      health: { hp: character.health?.hp ?? 0, maxHp: character.health?.maxHp ?? 0, shield: character.totalShield },
+      stats: withStatBuffs(withItems(sim.champion.statsAt(level), items), state.getStatuses()),
+      ...(character.player && this.simulator.hasEconomy ? { items } : {}),
+    }
+  }
+
   // The living enemy that is seen nearest a point, which is where the mouse is: the one Space attacks. It is the enemy nearest
   // the point, not the one nearest the local champion, and however far from either. One out of reach is walked up
   // to and attacked, as when it is right-clicked. Two as near as each other: the first, which is the same for
@@ -670,10 +734,10 @@ export class ClientGameState {
     return this.getSnapshotAtEstimatedTick(now).get(this.localCharacterId)?.getAttackTarget()
   }
 
-  // How far the controlled champion is from being able to attack again, from 0 to 1. A swing spends the attack as soon as it starts, so the bar
-  // is empty for its whole windup, and it fills from the moment the hit lands (or the shot leaves) until the next swing can start, which is
-  // `nextAttackTick`, set as the swing lands. What it fills over is the wait the frame says it set, so a change of attack speed during
-  // the wait does not move the bar.
+  // How far the controlled champion is from being able to attack again, from 0 to 1. A swing spends the attack when its hit lands (or its shot leaves),
+  // and not when it starts: a windup that is cut short spends nothing. So the bar is empty as the hit lands and fills from then until the next swing can
+  // start, which is `nextAttackTick`, set as the swing lands, and it stays as it was while a swing winds up, so a swing that is cancelled does not
+  // move it. What it fills over is the wait the frame says it set, so a change of attack speed during the wait does not move the bar.
   getAttackCooldownProgress(now = performance.now()): number {
     const localCharacterId = this.localCharacterId
     const champion = localCharacterId === undefined
@@ -682,7 +746,6 @@ export class ClientGameState {
     if (localCharacterId === undefined || !champion) return 1
     const snapshot = this.getSnapshotAtEstimatedTick(now)
     const local = snapshot.get(localCharacterId)
-    if (local?.getAction()?.kind === 'attack') return 0
     const cooldown = local?.getCooldown()
     if (!cooldown) return 1
     const ticksRemaining = this.fractionalTicksRemaining(snapshot.tick, cooldown.ticksRemaining, now)
@@ -693,7 +756,8 @@ export class ClientGameState {
       const statuses = local?.getStatuses() ?? []
       const level = local?.getLevel() ?? 1
       const itemSpeed = itemTotals(local?.getItems()).attackSpeed ?? 0
-      total = champion.attackCooldownTicksWith(statuses, level, itemSpeed) - champion.attackWindupTicksWith(statuses, level, itemSpeed)
+      const itemSpeedBonus = itemAttackSpeedBonus(local?.getItems())
+      total = champion.attackCooldownTicksWith(statuses, level, itemSpeed, itemSpeedBonus) - champion.attackWindupTicksWith(statuses, level, itemSpeed, itemSpeedBonus)
     }
     return Math.max(0, Math.min(1, 1 - ticksRemaining / Math.max(1, total)))
   }
@@ -963,6 +1027,11 @@ export class ClientGameState {
       const health = state?.getHealthState()
       const statuses = state?.getStatuses() ?? []
       const mind = state?.getAi()
+      // How much of a meter is left is read at the estimated tick, not the frame's, so a bar runs down smoothly between frames.
+      const meterDef = character.champion.meter
+      const meterLeft = meterDef && health?.deathTick === undefined
+        ? namedStatusTicksLeft(statuses, character.id, meterDef.status, this.estimateTick(now))
+        : 0
       characters.push({
         id: character.id,
         ...(character.player ? { player: { ...character.player } } : {}),
@@ -988,17 +1057,20 @@ export class ClientGameState {
         ...(health ? { health } : {}),
         totalShield: state?.getShield() ?? 0,
         stacks: countMarkers(state?.getMarkers() ?? []),
+        ...(meterDef && meterLeft > 0 ? { meter: { fraction: Math.min(1, meterLeft / meterDef.ticks), color: meterDef.color } } : {}),
         hasted: hasStatus(statuses, 'haste'),
         slowed: hasStatus(statuses, 'slow'),
         rooted: hasStatus(statuses, 'root'),
         stunned: hasStatus(statuses, 'stun'),
         burning: hasStatus(statuses, 'burn'),
+        poisoned: hasStatus(statuses, 'poison'),
         blinded: hasStatus(statuses, 'blind'),
         silenced: hasStatus(statuses, 'silence'),
+        disarmed: hasStatus(statuses, 'disarm'),
         dodging: hasStatus(statuses, 'dodge'),
         ...this.getActionView(snapshot, state, now),
         attackRange: character.champion.attackRangeWith(statuses, itemTotals(state?.getItems()).attackRange ?? 0),
-        attackCooldownTicks: character.champion.attackCooldownTicksWith(statuses, state?.getLevel() ?? 1, itemTotals(state?.getItems()).attackSpeed ?? 0),
+        attackCooldownTicks: character.champion.attackCooldownTicksWith(statuses, state?.getLevel() ?? 1, itemTotals(state?.getItems()).attackSpeed ?? 0, itemAttackSpeedBonus(state?.getItems())),
         ...this.getRenderedCharacterView(character.id, now, snapshot),
       })
     }
@@ -1019,10 +1091,15 @@ export class ClientGameState {
       // heading for the part of a tick the frame is ahead, so it glides instead of stepping.
       const ahead = def?.homing && entity.position ? Math.max(0, renderTick - snapshot.tick) / GAME_TPS : 0
       const position = entityPosAt(entity, renderTick)
+      // One held on its owner is drawn where the owner is drawn, which is not quite where the frame has it (the champion on screen is extrapolated, or smoothed),
+      // so it is centred on what is seen. If the owner is dead it stays where the frame left it.
+      const owner = def?.attached ? this.getRenderedCharacterView(entity.ownerId, now, snapshot) : undefined
       return def
         ? [{
           ...entity,
-          position: { x: position.x + entity.velocity.x * ahead, y: position.y + entity.velocity.y * ahead },
+          position: owner && !owner.dead
+            ? { ...owner.position }
+            : { x: position.x + entity.velocity.x * ahead, y: position.y + entity.velocity.y * ahead },
           radius: def.box ? Math.hypot(def.box.halfLength, def.box.halfWidth) : def.radius,
           visual: def.visual ?? 'bolt',
           // It runs one more tick than its lifetime, which is when its expiry effects fire.

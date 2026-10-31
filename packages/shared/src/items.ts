@@ -1,9 +1,11 @@
+import { GAME_TPS } from './constants.js'
+import { describeItemEffects, itemEffectProblem, type CarriedEffect, type ItemEffect } from './item-effects.js'
 import type { ChampionStats } from './stats.js'
 
 // Items: what a player buys with gold to make their champion stronger. A champion has eight slots, one for each kind of item, and carries at most one
-// item in each: to buy another of that kind, the one in the slot has to be sold first. What an item does today is give its stats (flat amounts added
-// to the champion's own, see `withItems`); an item is a plain record, so what it will do tomorrow (an effect when an attack lands, an ability) is a
-// field added to `ItemDef` and read in the one place the rest of the game already asks what a character is carrying (`itemsOf` in the simulator).
+// item in each: to buy another of that kind, the one in the slot has to be sold first. What an item does is give its stats (flat amounts added
+// to the champion's own, see `withItems`) and, for some, its effects (see item-effects.ts): more damage, lifesteal, a poison on its attacks. An item is a
+// plain record, so an effect is a field of `ItemDef`, read where the simulator asks what a character is carrying (`itemEffects`).
 //
 // What a champion carries is in its frame (`GameFrameCharacter.items`), and so is its gold, because what it carries changes what a frame works out (its
 // damage, its health, how fast it walks), so every peer has to have it on the same tick and an order that arrives late has to take it back with the
@@ -25,6 +27,9 @@ export const ITEM_SLOT_NAMES: Readonly<Record<ItemSlot, string>> = {
   pet: 'Pet',
   potion: 'Potion',
 }
+
+// The slots whose item a champion keeps when it dies in a game where a death costs the rest (the lobby's "lose items on death": see `LobbyRules`).
+export const KEPT_ON_DEATH: readonly ItemSlot[] = ['pet']
 
 // How much of what an item cost is paid back when it is sold: 0.7 is 70%. This is the one place to change it (the shop and the simulator both
 // read it from here). The price is rounded down to a whole number of gold.
@@ -50,6 +55,8 @@ export interface ItemDef {
   icon?: string
   // What it adds to its carrier.
   stats?: ItemStats
+  // What it does besides: see `ItemEffect`. What it says in a tooltip is worked out from these (`Item.description`), so there is no text to keep in step with them.
+  effects?: readonly ItemEffect[]
 }
 
 export class Item {
@@ -59,6 +66,9 @@ export class Item {
   readonly cost: number
   readonly icon: string
   readonly stats: Readonly<ItemStats>
+  readonly effects: readonly ItemEffect[]
+  // What its effects do and what they scale with, in words: nothing for an item that only adds its stats.
+  readonly description: string
 
   constructor(def: ItemDef) {
     const fail = (problem: string): never => {
@@ -75,12 +85,19 @@ export class Item {
       stats[stat as ItemStat] = amount
     }
     if (stats.maxHp !== undefined && !Number.isInteger(stats.maxHp)) fail('needs a maxHp that is a whole number, as health is')
+    const effects = (def.effects ?? []).map((effect) => ({ ...effect }))
+    for (const effect of effects) {
+      const problem = itemEffectProblem(effect)
+      if (problem) fail(problem)
+    }
     this.id = def.id
     this.name = def.name
     this.slot = def.slot
     this.cost = def.cost
     this.icon = def.icon ?? def.id
     this.stats = stats
+    this.effects = effects
+    this.description = describeItemEffects(effects)
   }
 }
 
@@ -119,6 +136,23 @@ export function itemTotals(inventory: Inventory | undefined, lookup: (id: string
   return totals
 }
 
+// The effects of everything in an inventory, each with the item it is from, in the order of the slots. An id that is not an item has none.
+export function itemEffects(inventory: Inventory | undefined, lookup: (id: string) => Item | undefined = getItem): CarriedEffect[] {
+  const carried: CarriedEffect[] = []
+  for (const slot of ITEM_SLOTS) {
+    const id = inventory?.[slot]
+    const item = id === undefined ? undefined : lookup(id)
+    if (item) for (const effect of item.effects) carried.push({ itemId: item.id, effect })
+  }
+  return carried
+}
+
+// How much more attack speed the items in an inventory give, as a share of the attack speed (0.15 is 15% more), on top of what they add to it flat. It is
+// worked out where the attack speed is (`withItems`, and `Champion.attackCooldownTicksWith`), since a share of it depends on what it is.
+export function itemAttackSpeedBonus(inventory: Inventory | undefined, lookup?: (id: string) => Item | undefined): number {
+  return itemEffects(inventory, lookup).reduce((total, { effect }) => (effect.kind === 'attackSpeed' ? total + effect.bonus : total), 0)
+}
+
 // A champion's stats with what its items add to them.
 export function withItems(stats: ChampionStats, inventory: Inventory | undefined, lookup?: (id: string) => Item | undefined): ChampionStats {
   const totals = itemTotals(inventory, lookup)
@@ -126,7 +160,7 @@ export function withItems(stats: ChampionStats, inventory: Inventory | undefined
     ...stats,
     maxHp: Math.round(stats.maxHp + (totals.maxHp ?? 0)),
     attackDamage: stats.attackDamage + (totals.attackDamage ?? 0),
-    attackSpeed: stats.attackSpeed + (totals.attackSpeed ?? 0),
+    attackSpeed: (stats.attackSpeed + (totals.attackSpeed ?? 0)) * (1 + itemAttackSpeedBonus(inventory, lookup)),
     resistance: stats.resistance + (totals.resistance ?? 0),
     haste: stats.haste + (totals.haste ?? 0),
     arcane: stats.arcane + (totals.arcane ?? 0),
@@ -140,11 +174,16 @@ export function withItems(stats: ChampionStats, inventory: Inventory | undefined
 // The items there are, to be tuned: the cost and stats here are filler, to try the shop with. An item is added by adding it to this list, with a
 // picture in res/shop_icons (named for its `icon`, or its id). Some in each slot. (A pet and a potion are carried like the rest: what they add is
 // their stats, for now.)
+//
+// The weapons have effects (see item-effects.ts), whose tooltip is worked out from them. The notes after them are what each was written from. The ones the
+// notes left out are guesses, to be tuned: how long the Tonfa's move speed lasts, and how much a poison does and for how long. The range the notes
+// give the Short Bow, the Crossbow, the Poisoned Crossbow and the Sniper Rifle is not an effect here: it is in their stats, whatever those say.
+const seconds = (value: number): number => Math.round(value * GAME_TPS)
 const ITEM_DEFS: readonly ItemDef[] = [
   // Boots
-  { id: 'worn-boots', name: 'Worn Boots', slot: 'boots', cost: 30, icon: 'boots', stats: { moveSpeed: 8 } },
-  { id: 'steel-boots', name: 'Steel Boots', slot: 'boots', cost: 60, stats: { moveSpeed: 12, resistance: 15 } },
-  { id: 'rocket-boots', name: 'Rocket Boots', slot: 'boots', cost: 120, stats: { moveSpeed: 16, haste: 20 } },
+  { id: 'worn-boots', name: 'Worn Boots', slot: 'boots', cost: 40, icon: 'boots', stats: { moveSpeed: 8 } },
+  { id: 'steel-boots', name: 'Steel Boots', slot: 'boots', cost: 120, stats: { moveSpeed: 12 } },   // Bonus 15 % damage reduction
+  { id: 'rocket-boots', name: 'Rocket Boots', slot: 'boots', cost: 120, stats: { moveSpeed: 20} },
   // Chest
   { id: 'leather-armor', name: 'Leather Armor', slot: 'chest', cost: 40, stats: { maxHp: 150, resistance: 8 } },
   { id: 'bronze-armor', name: 'Bronze Armor', slot: 'chest', cost: 80, stats: { maxHp: 300, resistance: 16 } },
@@ -170,38 +209,38 @@ const ITEM_DEFS: readonly ItemDef[] = [
   { id: 'plate-helm', name: 'Plate Helm', slot: 'head', cost: 150, stats: { maxHp: 300, resistance: 20 } },
   { id: 'golden-helmet', name: 'Golden Helmet', slot: 'head', cost: 500, stats: { maxHp: 500, resistance: 25 } },
   // Weapon
-  { id: 'wand', name: 'Wand', slot: 'weapon', cost: 40, stats: { arcane: 25 } },                              // Abilities do 10% bonus damage
-  { id: 'dagger', name: 'Quick Dagger', slot: 'weapon', cost: 40, stats: { attackSpeed: 0.1 } },              // Gain a 15% attack speed bonus
-  { id: 'bow', name: 'Short Bow', slot: 'weapon', cost: 40, stats: { attackRange: 20 } },                     // Gain 10 attack range
-  { id: 'sword', name: 'Iron Sword', slot: 'weapon', cost: 40, stats: { attackDamage: 5 } },                  // Attacks do 10% bonus damage
-  { id: 'tome', name: 'Tome', slot: 'weapon', cost: 45, stats: { arcane: 10, haste:15 } },                    // Every 5 seconds gain a 1x arcane bonus damage applied on the next ability that does damage. 
+  { id: 'wand', name: 'Wand', slot: 'weapon', cost: 40, stats: { arcane: 25 }, effects: [{ kind: 'abilityDamage', bonus: 0.1 }] },                              // Abilities do 10% bonus damage
+  { id: 'dagger', name: 'Quick Dagger', slot: 'weapon', cost: 40, stats: { attackSpeed: 0.1 }, effects: [{ kind: 'attackSpeed', bonus: 0.15 }] },              // Gain a 15% attack speed bonus
+  { id: 'bow', name: 'Short Bow', slot: 'weapon', cost: 40, stats: { attackRange: 20 } },                     // Gain 20 attack range
+  { id: 'sword', name: 'Iron Sword', slot: 'weapon', cost: 40, stats: { attackDamage: 5 }, effects: [{ kind: 'attackDamage', bonus: 0.15 }] },                  // Attacks do 15% bonus damage
+  { id: 'tome', name: 'Tome', slot: 'weapon', cost: 45, stats: { arcane: 10, haste:15 }, effects: [{ kind: 'chargedAbility', arcane: 1, cooldownTicks: seconds(5) }] },                    // Every 5 seconds gain a 1x arcane bonus damage applied on the next ability that does damage. 
 
 
-  { id: 'jambiya', name: 'Jambiya', slot: 'weapon', cost: 80, stats: { attackSpeed: 0.25, attackDamage: 10 } }, // Gain 10% lifesteal on attacks
-  { id: 'tonfa', name: 'Tonfa', slot: 'weapon', cost: 80, stats: { attackDamage: 16, haste: 10 } },             // Attacks do 
-  { id: 'staff', name: 'Staff', slot: 'weapon', cost: 75, stats: { arcane: 40 } },                              // Attacks give 10% movement speed bonus.
-  { id: 'mace', name: 'Mace', slot: 'weapon', cost: 90, stats: { attackDamage: 16, maxHp: 200 } },              // Attacks do 20% bonus damage
-  { id: 'poisoned-dagger', name: 'Poisoned Dagger', slot: 'weapon', cost: 70, stats: { attackSpeed: 0.3, attackDamage: 18 } }, // Attacks apply a poison. Poison scales with .1 arcane 
+  { id: 'jambiya', name: 'Jambiya', slot: 'weapon', cost: 80, stats: { attackSpeed: 0.25, attackDamage: 10 }, effects: [{ kind: 'lifesteal', on: 'attacks', fraction: 0.1 }] }, // Gain 10% lifesteal on attacks
+  { id: 'tonfa', name: 'Tonfa', slot: 'weapon', cost: 80, stats: { attackDamage: 16, haste: 10 }, effects: [{ kind: 'attackMoveSpeed', fraction: 0.1, ticks: seconds(2) }] },             // Attacks give 10% movement speed bonus.
+  { id: 'staff', name: 'Staff', slot: 'weapon', cost: 75, stats: { arcane: 40 }, effects: [{ kind: 'openingAttack', attackDamage: 1, cooldownTicks: seconds(10) }] },                              // First attack on an enemy does 100% ad more damage. 10 second cooldown.
+  { id: 'mace', name: 'Mace', slot: 'weapon', cost: 90, stats: { attackDamage: 16, maxHp: 200 }, effects: [{ kind: 'attackDamage', bonus: 0.3 }] },              // Attacks do 30% bonus damage
+  { id: 'poisoned-dagger', name: 'Poisoned Dagger', slot: 'weapon', cost: 70, stats: { attackSpeed: 0.3, attackDamage: 18 }, effects: [{ kind: 'poison', damagePerSecond: 10, arcane: 0.2, ticks: seconds(3) }] }, // Attacks apply a poison. Poison scales with .1 arcane 
 
-  { id: 'light-staff', name: 'Staff of Light', slot: 'weapon', cost: 155, stats: { arcane: 40, haste: 15 } },     // Abilties do 30% bonus damage
-  { id: 'nunchucks', name: 'Nunchucks', slot: 'weapon', cost: 160, stats: { attackDamage: 18, resistance: 16 } }, // Gain 30% attack speed bonus.
-  { id: 'scythe', name: 'Scythe', slot: 'weapon', cost: 165, stats: { attackDamage: 36 } },                       // Gain 20% lifesteal on attacks.
+  { id: 'light-staff', name: 'Staff of Light', slot: 'weapon', cost: 155, stats: { arcane: 40, haste: 15 }, effects: [{ kind: 'abilityDamage', bonus: 0.3 }] },     // Abilties do 30% bonus damage
+  { id: 'nunchucks', name: 'Nunchucks', slot: 'weapon', cost: 160, stats: { attackDamage: 18, resistance: 16 }, effects: [{ kind: 'attackSpeed', bonus: 0.3 }] }, // Gain 30% attack speed bonus.
+  { id: 'scythe', name: 'Scythe', slot: 'weapon', cost: 165, stats: { attackDamage: 36 }, effects: [{ kind: 'lifesteal', on: 'attacks', fraction: 0.2 }] },                       // Gain 20% lifesteal on attacks.
   { id: 'crossbow', name: 'Crossbow', slot: 'weapon', cost: 170, stats: { attackRange: 25} },                     // Gain 25 attack range
   
-  { id: 'hammer', name: 'War Hammer', slot: 'weapon', cost: 155, stats: { attackDamage: 24, maxHp: 120 } },       // Negate 30% of resists on attacks
-  { id: 'battle-axe', name: 'Battle Axe', slot: 'weapon', cost: 160, stats: { attackDamage: 20, haste: 20 } },    // Attacks do 30% bonus damage
-  { id: 'life-staff', name: 'Staff of Life', slot: 'weapon', cost: 160, stats: { arcane: 40, maxHp: 200 } },      // Gain 15% lifesteal on abilities.
-  { id: 'dark-staff', name: 'Dark Staff', slot: 'weapon', cost: 160, stats: { arcane: 60 } },                     // Attacks gain a .6x arcane multiplier. so with 60ad and 80arcane you would do 60 + 48 = 108 damage on attack.
+  { id: 'hammer', name: 'War Hammer', slot: 'weapon', cost: 155, stats: { attackDamage: 24, maxHp: 120 }, effects: [{ kind: 'resistancePierce', fraction: 0.3 }] },       // Negate 30% of resists on attacks
+  { id: 'battle-axe', name: 'Battle Axe', slot: 'weapon', cost: 160, stats: { attackDamage: 20, haste: 20 }, effects: [{ kind: 'attackDamage', bonus: 0.45 }] },    // Attacks do 45% bonus damage
+  { id: 'life-staff', name: 'Staff of Life', slot: 'weapon', cost: 160, stats: { arcane: 40, maxHp: 200 }, effects: [{ kind: 'lifesteal', on: 'abilities', fraction: 0.15 }] },      // Gain 15% lifesteal on abilities.
+  { id: 'dark-staff', name: 'Dark Staff', slot: 'weapon', cost: 160, stats: { arcane: 60 }, effects: [{ kind: 'attackArcane', ratio: 0.6 }] },                     // Attacks gain a .6x arcane multiplier. so with 60ad and 80arcane you would do 60 + 48 = 108 damage on attack.
 
 
-  { id: 'cursed-scythe', name: 'Cursed Scythe', slot: 'weapon', cost: 280, stats: { attackDamage: 50, arcane: 80 } }, // Gain 30% lifesteal on attacks
-  { id: 'cursed-tome', name: 'Cursed Tome', slot: 'weapon', cost: 300, stats: { arcane: 120 } },                      // Gain 30% lifesteal on abilities.
-  { id: 'holy-tome', name: 'Holy Tome', slot: 'weapon', cost: 290, stats: { arcane: 60, maxHp: 200 } },               // Abilities do 50% bonus damage
-  { id: 'infused-dagger', name: 'Infused Dagger', slot: 'weapon', cost: 300, stats: { attackSpeed: 0.4, attackDamage: 24 } }, // Gain 30% attacks speed bonus and attacks do 6% current hp damage.
-  { id: 'poisoned-crossbow', name: 'Poisoned Crossbow', slot: 'weapon', cost: 300, icon: 'poisoned_crossbow', stats: { attackDamage: 18, attackRange: 30, attackSpeed: 0.2 } }, // Gain 30 attack range and Attacks apply a poison. Poison scales with .1 arcane 
-  { id: 'machine-gun', name: 'Machine Gun', slot: 'weapon', cost: 300, stats: { attackSpeed: 0.6, attackDamage: 8 } },// Gain 50% attack speed bonus
-  { id: 'infused-axe', name: 'Infused Axe', slot: 'weapon', cost: 300, stats: { attackDamage: 38, haste: 38 } },      // Basic attacks do 60% bonus damage
-  { id: 'infused-staff', name: 'Infused Staff', slot: 'weapon', cost: 300, stats: { arcane: 70, haste: 36 } },        // Negate 50% of resists on attack.
+  { id: 'cursed-scythe', name: 'Cursed Scythe', slot: 'weapon', cost: 280, stats: { attackDamage: 50, arcane: 80 }, effects: [{ kind: 'lifesteal', on: 'attacks', fraction: 0.3 }] }, // Gain 30% lifesteal on attacks
+  { id: 'cursed-tome', name: 'Cursed Tome', slot: 'weapon', cost: 300, stats: { arcane: 120 }, effects: [{ kind: 'abilityDamage', bonus: 0.5 }] },                    // Abilities do 50% bonus damage     
+  { id: 'holy-tome', name: 'Holy Tome', slot: 'weapon', cost: 290, stats: { arcane: 60, maxHp: 200 }, effects: [{ kind: 'lifesteal', on: 'abilities', fraction: 0.3 }] },   // Gain 30% lifesteal on abilities.
+  { id: 'infused-dagger', name: 'Infused Dagger', slot: 'weapon', cost: 300, stats: { attackSpeed: 0.4, attackDamage: 24 }, effects: [{ kind: 'attackSpeed', bonus: 0.3 }, { kind: 'currentHealthDamage', fraction: 0.06 }] }, // Gain 30% attacks speed bonus and attacks do 6% current hp damage.
+  { id: 'poisoned-crossbow', name: 'Poisoned Crossbow', slot: 'weapon', cost: 300, icon: 'poisoned_crossbow', stats: { attackDamage: 18, attackRange: 30, attackSpeed: 0.2 }, effects: [{ kind: 'poison', damagePerSecond: 10, arcane: 0.2, ticks: seconds(3) }] }, // Gain 30 attack range and Attacks apply a poison. Poison scales with .2 arcane 
+  { id: 'machine-gun', name: 'Machine Gun', slot: 'weapon', cost: 300, stats: { attackSpeed: 0.6, attackDamage: 8 }, effects: [{ kind: 'attackSpeed', bonus: 0.5 }] },// Gain 50% attack speed bonus
+  { id: 'infused-axe', name: 'Infused Axe', slot: 'weapon', cost: 300, stats: { attackDamage: 38, haste: 38 }, effects: [{ kind: 'attackDamage', bonus: 0.6 }] },      // Basic attacks do 60% bonus damage
+  { id: 'infused-staff', name: 'Infused Staff', slot: 'weapon', cost: 300, stats: { arcane: 70, haste: 36 }, effects: [{ kind: 'openingAttack', attackDamage: 2, healMissingHealth: 0.1, cooldownTicks: seconds(10) }] },        // First attack on an enemy does 200% ad more damage and heals for 10% missing hp. 10 second cooldown.
   { id: 'sniper', name: 'Sniper Rifle', slot: 'weapon', cost: 350, stats: { attackDamage: 24, attackRange: 40 } },    // Gain 40 attack range
   // Accessory
   { id: 'scroll', name: 'Scroll', slot: 'accessory', cost: 35, stats: { arcane: 12, haste: 4 } },

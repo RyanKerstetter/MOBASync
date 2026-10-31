@@ -1,4 +1,5 @@
 import {
+  abilityIconName,
   getItem,
   ITEM_SLOT_NAMES,
   ITEM_SLOTS,
@@ -7,6 +8,7 @@ import {
 } from '../../../../packages/shared/src/index.ts'
 import { createAbilityIcon } from './ability-icon.ts'
 import { abilityIconUrl } from './ability-icon-urls.ts'
+import { abilityTooltip } from './ability-tooltip.ts'
 import { generalIconUrl } from './general-icon-urls.ts'
 import { itemIconUrl } from './item-icon-urls.ts'
 import type { ItemTooltipController } from './item-tooltip.ts'
@@ -64,6 +66,8 @@ type HudSlot = {
   key: HTMLElement
   name: HTMLElement
   time: HTMLElement
+  // What the slot shows now, which its tooltip is told from.
+  view?: AbilitySlotView
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, ...children: Node[]): HTMLElementTagNameMap[K] {
@@ -169,6 +173,21 @@ export function createHudView(container: HTMLElement, handlers?: HudHandlers) {
   container.appendChild(root)
   const slots: HudSlot[] = []
   const statCells: Array<{ label: HTMLElement; value: HTMLElement }> = []
+  // What an ability's tooltip is told from besides the ability: the champion's stats, level and health as the last update said (until the first, it has no tooltip).
+  let championStats: PlayerStats | undefined
+  let championLevel = 1
+  let championHealth = 0
+  const tooltipOf = (slot: HudSlot) => {
+    if (!slot.view || !championStats) return undefined
+    return abilityTooltip(slot.view.abilityId, {
+      key: slot.view.key,
+      cooldownTicks: slot.view.cooldownTicks,
+      stats: championStats,
+      level: championLevel,
+      health: championHealth,
+    })
+  }
+  let shownAbilityTips = ''
 
   return {
     update(input: HudInput): void {
@@ -179,6 +198,7 @@ export function createHudView(container: HTMLElement, handlers?: HudHandlers) {
         shopPanel.hidden = !input.economy
       }
       if (input.progress) {
+        championLevel = input.progress.level
         const readout = progressReadout(input.progress)
         level.textContent = readout.level
         // The bar fills upward from the level at its foot.
@@ -211,6 +231,7 @@ export function createHudView(container: HTMLElement, handlers?: HudHandlers) {
         }
       }
       if (input.stats) {
+        championStats = input.stats
         const rows = statRows(input.stats)
         while (statCells.length < rows.length) {
           const cell = { label: element('dt', 'hud-stat-label'), value: element('dd', 'hud-stat-value') }
@@ -223,6 +244,7 @@ export function createHudView(container: HTMLElement, handlers?: HudHandlers) {
         })
       }
       if (input.health) {
+        championHealth = input.health.hp
         const readout = healthReadout(input.health)
         healthFill.style.width = `${readout.healthPercent}%`
         healthShield.style.left = `${readout.healthPercent}%`
@@ -240,17 +262,19 @@ export function createHudView(container: HTMLElement, handlers?: HudHandlers) {
           time: element('span', 'hud-slot-time'),
         }
         slot.root.append(slot.icons, slot.key, slot.name, slot.time)
+        handlers?.tooltip.bind(slot.root, () => tooltipOf(slot))
         abilities.append(slot.root)
         slots.push(slot)
       }
       slots.forEach((slot, index) => {
         const view = input.abilities[index]
         slot.root.hidden = view === undefined
+        slot.view = view
         if (!view) return
         if (slot.iconAbilityId !== view.abilityId) {
-          const grey = createAbilityIcon(view.abilityId, abilityIconUrl)
+          const grey = createAbilityIcon(abilityIconName(view.abilityId), abilityIconUrl)
           grey.classList.add('is-grey')
-          const colour = createAbilityIcon(view.abilityId, abilityIconUrl)
+          const colour = createAbilityIcon(abilityIconName(view.abilityId), abilityIconUrl)
           colour.classList.add('is-colour')
           slot.icons.replaceChildren(grey, colour)
           slot.iconAbilityId = view.abilityId
@@ -262,6 +286,12 @@ export function createHudView(container: HTMLElement, handlers?: HudHandlers) {
         slot.name.textContent = view.abilityId
         slot.time.textContent = view.secondsLeft
       })
+      // A tooltip that is up is written again when what it says has changed (a level, an item, haste, or the ability on the key).
+      const tips = JSON.stringify(slots.map(tooltipOf))
+      if (tips !== shownAbilityTips) {
+        shownAbilityTips = tips
+        handlers?.tooltip.refresh()
+      }
     },
     destroy(): void {
       root.remove()

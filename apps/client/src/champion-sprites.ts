@@ -147,6 +147,38 @@ const trinketmaster: SpriteSet = {
   },
 }
 
+// The hammer and the chain: placeholders too, the Swordsman's sheets and the Trinketmaster's copied into their own folders, with the same frame size, place in
+// the frame and timings as the champions they were copied from, until they have art of their own.
+const hammer: SpriteSet = {
+  frameWidth: 32,
+  frameHeight: 32,
+  anchor: { x: 14, y: 24 },
+  scale: 3,
+  facing: 1,
+  clips: {
+    idle: { url: new URL('../../../res/champion/hammer/Idle.png', import.meta.url).href, frames: 4, fps: 6, loop: true },
+    walk: { url: new URL('../../../res/champion/hammer/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
+    attack: { url: new URL('../../../res/champion/hammer/Attack_1.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 3 },
+    cast: { url: new URL('../../../res/champion/hammer/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
+    dead: { url: new URL('../../../res/champion/hammer/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
+  },
+}
+
+const chain: SpriteSet = {
+  frameWidth: 32,
+  frameHeight: 32,
+  anchor: { x: 14, y: 24 },
+  scale: 3,
+  facing: 1,
+  clips: {
+    idle: { url: new URL('../../../res/champion/chain/Idle.png', import.meta.url).href, frames: 4, fps: 6, loop: true },
+    walk: { url: new URL('../../../res/champion/chain/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
+    attack: { url: new URL('../../../res/champion/chain/Attack_2.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 3 },
+    cast: { url: new URL('../../../res/champion/chain/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
+    dead: { url: new URL('../../../res/champion/chain/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
+  },
+}
+
 const capricorn: SpriteSet = {
   frameWidth: 32,
   frameHeight: 32,
@@ -290,6 +322,8 @@ export const championSprites: Readonly<Record<string, SpriteSet>> = {
   cursebearer,
   ninja,
   trinketmaster,
+  hammer,
+  chain,
   capricorn,
   soldier,
   grenadier,

@@ -5,6 +5,8 @@ type EntityActor = {
   node: Container
   // A telegraph's inner disc, which swells to the full circle as the warning runs out.
   fill?: Graphics
+  // A flash, which is brightest as it appears and fades away as it runs out its lifetime.
+  fades?: true
 }
 
 // Everything abilities and autos put in the world. Some of it lies on the ground under the
@@ -27,12 +29,32 @@ export class EntityLayer {
       const actor = this.actors.get(entity.id) ?? this.addActor(entity)
       actor.node.position.set(entity.position.x, entity.position.y)
       actor.fill?.scale.set(entity.progress)
+      // It falls away fast, so it reads as a flash and not as a field that is there for a while.
+      if (actor.fades) actor.node.alpha = (1 - entity.progress) ** 2
     }
   }
 
   private addActor(entity: RenderedEntity): EntityActor {
     const node = new Container()
     let fill: Graphics | undefined
+    if (entity.visual === 'flash') {
+      // The instant something goes off: its whole shape, filled bright and edged hard, on the ground under the champions so it never hides them.
+      const color = entity.color ?? '#ffffff'
+      const shape = new Graphics()
+      if (entity.box) {
+        const { halfLength, halfWidth } = entity.box
+        shape.rect(-halfLength, -halfWidth, halfLength * 2, halfWidth * 2)
+        node.rotation = Math.atan2(entity.facing?.y ?? 0, entity.facing?.x ?? 1)
+      } else {
+        shape.circle(0, 0, entity.radius)
+      }
+      node.addChild(shape.fill({ color, alpha: 0.5 }).stroke({ color, width: 5, alpha: 1 }))
+      node.alpha = (1 - entity.progress) ** 2
+      this.ground.addChild(node)
+      const actor: EntityActor = { node, fades: true }
+      this.actors.set(entity.id, actor)
+      return actor
+    }
     if (entity.visual === 'telegraph' && !entity.box) {
       // An outline of where it will land, with a disc growing inside it until it goes off.
       const color = entity.color ?? '#ff6b4a'

@@ -684,7 +684,8 @@ function assertBarFollows(rows: readonly BarRow[], swing: Swing): void {
   const at = (tick: number): BarRow => rows.find((row) => row.tick === tick) as BarRow
   // The swing has to be one the old bar would have got wrong: its hit comes a good way into the attack.
   assert.ok((swing.launch - swing.start) / (swing.ready - swing.start) > SWING_SHARE - 0.1, 'the windup is a good share of the attack')
-  for (let tick = swing.start; tick < swing.launch; tick += 1) assert.equal(at(tick).bar, 0, `empty while it winds up (tick ${tick})`)
+  // Nothing is spent until the hit lands, so the bar is as it was while the swing winds up (the wait before it is over, so it is full).
+  for (let tick = swing.start; tick < swing.launch; tick += 1) assert.equal(at(tick).bar, 1, `full while it winds up (tick ${tick})`)
   assert.ok(at(swing.launch).bar < 0.01, `empty as the hit lands: ${at(swing.launch).bar}`)
   let last = 0
   for (let tick = swing.launch; tick < swing.ready; tick += 1) {
@@ -696,7 +697,7 @@ function assertBarFollows(rows: readonly BarRow[], swing: Swing): void {
   assert.ok(last > 0.9, 'and is nearly full when the next swing can begin')
 }
 
-test('the attack bar is empty while a swing winds up, and empty again as the hit lands, and then fills until the next swing can begin', () => {
+test('the attack bar is full while a swing winds up, and empty as the hit lands, and then fills until the next swing can begin', () => {
   const rows = barRows(barDuel(), 2 * swinger.attackCooldownTicks + 10)
   const swings = swingsIn(rows)
   assert.ok(swings.length >= 2, 'it keeps swinging')
@@ -715,17 +716,15 @@ test('the attack bar starts from empty at a hit however fast the attack is, thou
   for (const swing of swings.slice(0, 3)) assertBarFollows(rows, swing)
 })
 
-test('a swing that is cut short spends nothing, so the bar is full again', () => {
+test('a swing that is cut short spends nothing, so the bar never moves: it does not drop to empty and come back', () => {
   // It is told to walk half way through the windup.
   const walkAt = 1 + Math.floor(swinger.attackWindupTicks / 2)
   const last = walkAt + swinger.attackCooldownTicks
   const rows = barRows(barDuel([{ id: 'walk', seq: 2, tick: walkAt, type: 'move', target: BAR_AT }]), last)
   const at = (tick: number): BarRow => rows.find((row) => row.tick === tick) as BarRow
-  assert.equal(at(walkAt - 1).swinging, true)
-  assert.equal(at(walkAt - 1).bar, 0, 'empty while it winds up')
-  assert.equal(at(walkAt + 2).swinging, false)
-  assert.equal(at(walkAt + 2).bar, 1, 'and full when it was stopped before the hit')
-  assert.equal(at(last).bar, 1)
+  assert.equal(at(walkAt - 1).swinging, true, 'it was winding up')
+  assert.equal(at(walkAt + 2).swinging, false, 'and was stopped before the hit')
+  assert.deepEqual(rows.filter((row) => row.bar !== 1).map((row) => row.tick), [], 'the bar was full the whole time')
 })
 
 test('the wait the bar fills over travels in a checkpoint, so a client that joins in the middle of it draws the same bar', () => {

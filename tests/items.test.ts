@@ -3,8 +3,10 @@ import { existsSync } from 'node:fs'
 import test from 'node:test'
 import { ServerGameState } from '../apps/server/src/game-state.ts'
 import {
+  applyRulesChange,
   buyProblem,
   damage,
+  defaultRules,
   enemiesInRadius,
   GAME_RESPAWN_TICKS,
   GAME_STARTING_GOLD,
@@ -17,7 +19,9 @@ import {
   ITEM_STAT_KEYS,
   itemsForSlot,
   items,
+  KEPT_ON_DEATH,
   itemTotals,
+  modeRules,
   PLAYER_KILL_REWARD,
   sellValue,
   scaled,
@@ -26,9 +30,10 @@ import {
   withItems,
   type ChampionStats,
   type Inventory,
+  type ModeSetup,
   type Vector2,
 } from '../packages/shared/src/index.ts'
-import { defineAbility, defineChampion, defineItem, defineMonster, economySimulator } from './fixtures.ts'
+import { defineAbility, defineChampion, defineItem, defineMonster, ECONOMY_MODE, economySimulator } from './fixtures.ts'
 import { testSpawns } from './test-spawns.ts'
 
 // Items (see items.ts): eight slots with one item in each, bought and sold with gold by orders, adding their stats to the champion that carries them.
@@ -399,6 +404,103 @@ test('what a champion has comes back with it when it respawns, and the health is
   assert.equal(simulator.at(back).get(2)?.isDead(), false, 'back')
   assert.deepEqual([maxHp(simulator, back, 2), hp(simulator, back, 2)], [400, 400])
   assert.deepEqual(carried(simulator, back, 2), { chest: plate.id })
+})
+
+// ---------------------------------------------------------------------------- losing items on death
+
+// The rule is on in a game of core destruction (see `LobbyRules.loseItemsOnDeath`).
+const LOSING: ModeSetup = { kind: 'core', teams: [1, 2], loseItemsOnDeath: true }
+const keeper = defineItem({ id: 't-keeper', name: 'Test Keeper', slot: 'pet', cost: part(0.2), stats: { moveSpeed: 10 } })
+
+// Player 1 and player 2 (`glass`, who goes down in one hit of 100, or a hit of the fighter with the blade, in two).
+function deathGame(setup: ModeSetup, bought: Array<[number, string[]]>): Simulator {
+  const simulator = new Simulator(undefined, setup)
+  simulator.addPlayer(1, 'p1', 'One', { x: 600, y: 700 }, fighter, 1)
+  simulator.addPlayer(2, 'p2', 'Two', { x: 700, y: 700 }, glass, 2)
+  for (const [id, itemIds] of bought) itemIds.forEach((itemId, index) => simulator.addOrder(id, buy(1 + index, itemId)))
+  return simulator
+}
+
+test('a champion that dies where the rule is on loses its items but for its pet, and is not paid for them', () => {
+  assert.deepEqual([...KEPT_ON_DEATH], ['pet'], 'the pet is what is kept')
+  // The fighter has the blade, so its one hit of 150 is all that the glass champion with a plate has (100 and 50) to take.
+  const simulator = deathGame(LOSING, [[1, [blade.id]], [2, [plate2.id, treads.id, scope.id, keeper.id]]])
+  simulator.addOrder(1, attack(10, 2))
+  run(simulator, 1, 9)
+  const before = carried(simulator, 9, 2) as Inventory
+  assert.deepEqual(Object.keys(before).sort(), ['accessory', 'boots', 'chest', 'pet'], 'it has one of each, to lose')
+  const goldBefore = gold(simulator, 9, 2)
+  assert.equal(maxHp(simulator, 9, 2), 100 + (plate2.stats.maxHp ?? 0))
+  run(simulator, 10, 20)
+  assert.equal(simulator.at(20).get(2)?.isDead(), true, 'killed')
+  const kept = Object.fromEntries(Object.entries(before).filter(([slot]) => KEPT_ON_DEATH.includes(slot as never)))
+  assert.deepEqual(carried(simulator, 20, 2), kept, 'what is left is the pet')
+  assert.equal(gold(simulator, 20, 2), goldBefore, 'lost, not sold')
+  assert.equal(maxHp(simulator, 20, 2), 100, 'and the health they added goes with them')
+  assert.deepEqual(carried(simulator, 20, 1), { weapon: blade.id }, 'the killer keeps what it has')
+})
+
+test('a champion that dies with nothing but a pet, or with nothing, has nothing more to lose', () => {
+  const simulator = deathGame(LOSING, [[2, [keeper.id]]])
+  simulator.addOrder(1, attack(10, 2))
+  run(simulator, 1, 20)
+  assert.equal(simulator.at(20).get(2)?.isDead(), true)
+  assert.deepEqual(carried(simulator, 20, 2), { pet: keeper.id })
+  const bare = deathGame(LOSING, [])
+  bare.addOrder(1, attack(10, 2))
+  run(bare, 1, 20)
+  assert.equal(bare.at(20).get(2)?.isDead(), true)
+  assert.deepEqual(carried(bare, 20, 2), {}, 'and the frame has no items to say it had')
+})
+
+test('where the rule is off, which is how every game is unless the leader says, a champion keeps its items when it dies', () => {
+  const simulator = deathGame(ECONOMY_MODE, [[2, [treads.id, scope.id, keeper.id]]])
+  simulator.addOrder(1, attack(10, 2))
+  run(simulator, 1, 9)
+  const before = carried(simulator, 9, 2)
+  run(simulator, 10, 20)
+  assert.equal(simulator.at(20).get(2)?.isDead(), true, 'killed')
+  assert.deepEqual(carried(simulator, 20, 2), before)
+  assert.equal(simulator.losesItemsOnDeath, false)
+})
+
+test('what a champion has lost comes back if a late order means it did not die, as everything a death does does', () => {
+  const build = (): Simulator => {
+    const simulator = deathGame(LOSING, [[2, [treads.id, scope.id, keeper.id]]])
+    simulator.addOrder(1, attack(12, 2))
+    return simulator
+  }
+  // With the ward bought on tick 8 the hit on 12 is half, and the glass champion lives.
+  const straight = build()
+  straight.addOrder(2, buy(8, ward.id))
+  straight.advanceTo(24)
+  const late = build()
+  late.advanceTo(16)
+  assert.equal(late.at(16).get(2)?.isDead(), true, 'it died without the ward')
+  assert.deepEqual(carried(late, 16, 2), { pet: keeper.id }, 'and lost its items')
+  assert.equal(late.addOrder(2, buy(8, ward.id)), true, 'an order for a tick that has been worked out already')
+  late.advanceTo(24)
+  assert.equal(late.at(24).get(2)?.isDead(), false, 'it lives')
+  assert.deepEqual(Object.keys(carried(late, 24, 2) as Inventory).sort(), ['accessory', 'back', 'boots', 'pet'], 'with all it had')
+  assert.equal(JSON.stringify(late.at(24).toData()), JSON.stringify(straight.at(24).toData()))
+})
+
+test('a game the server starts has the rule when the lobby\'s rules say so, for the mode that has items', () => {
+  const players = [{ id: 'a', name: 'Ann', team: 1 }, { id: 'b', name: 'Bob', team: 2 }]
+  const hearts = { id: 'hearts', spawns: testSpawns, terrain: new Terrain({ width: 2400, height: 1400 }), flags: [], cores: [{ x: 120, y: 600 }, { x: 430, y: 480 }] }
+  const started = (loseItemsOnDeath: boolean): ServerGameState => {
+    const state = new ServerGameState([])
+    const rules = applyRulesChange(defaultRules(), { loseItemsOnDeath })
+    state.beginSelection(players, hearts, 'core', modeRules(rules, 'core'))
+    for (const player of players) {
+      state.pickChampion(player.id, fighter.id)
+      state.lockChampion(player.id)
+    }
+    state.begin(players)
+    return state
+  }
+  assert.equal(started(true).simulator.losesItemsOnDeath, true)
+  assert.equal(started(false).simulator.losesItemsOnDeath, false)
 })
 
 // ---------------------------------------------------------------------------- the same on every peer

@@ -16,15 +16,17 @@ import {
   ATTACK_SOURCE_PREFIX,
   getDashDef,
   getEntityDef,
+  ITEM_SOURCE_PREFIX,
   mark,
   runEffects,
   self,
   type GameEvent,
   type SimContext,
 } from './effects.js'
+import { effectsOfKind } from './item-effects.js'
 import { advanceObjective, initialObjective, modeHasEconomy, type ObjectiveCore, type ObjectiveUnit } from './modes.js'
 import { getCharacterChampion, monsters, type Monster } from './monsters.js'
-import { buyProblem, getItem, ITEM_SLOTS, itemTotals, sellValue, withItems, type Inventory } from './items.js'
+import { buyProblem, getItem, ITEM_SLOTS, itemAttackSpeedBonus, itemEffects, itemTotals, KEPT_ON_DEATH, sellValue, withItems, type Inventory } from './items.js'
 import { GAME_STARTING_GOLD, levelForXp, monsterLevelAfterKill, monsterXpAt, PLAYER_KILL_REWARD, type Resources } from './progression.js'
 import { inOwnShop, mayShop, SHOP_HEAL_AMOUNT, shopHealsOn, type ShopZone } from './shops.js'
 import { hastedCooldownTicks, statMultiplier, withStatBuffs, type ChampionStats } from './stats.js'
@@ -561,6 +563,12 @@ export class Simulator {
     return modeHasEconomy(this.setup.kind)
   }
 
+  // Whether a player that dies in this game loses its items but for the slots it keeps (`KEPT_ON_DEATH`): a rule of core destruction, which the lobby sets
+  // (see `LobbyRules`). Its gold is kept, and a dead champion can shop (`canShop`), so it can buy again before it is back.
+  get losesItemsOnDeath(): boolean {
+    return this.setup.kind === 'core' && this.setup.loseItemsOnDeath === true
+  }
+
   // Whether a character that is where a frame has it can buy and sell now: a champion that is dead can, and a living one must be in a shop of its team
   // (any place, if the game has no shops). It is the rule `buy` and `sell` orders are done by, and what the page asks before it sends one.
   canShop(characterId: number, frame: GameTickSnapshot): boolean {
@@ -929,13 +937,13 @@ export class Simulator {
       this.ground,
     )
 
-    // Burning characters take their burn on every pulse tick, as damage from whoever lit them.
+    // Burning and poisoned characters take their burn or poison on every pulse tick, as damage from whoever lit or poisoned them.
     if (tick % GAME_BURN_PULSE_TICKS === 0) {
       for (const character of characters) {
         const state = states.get(character.id)
         if (!state || !isAlive(state)) continue
         for (const status of state.statuses) {
-          if (status.kind !== 'burn') continue
+          if (status.kind !== 'burn' && status.kind !== 'poison') continue
           context.emitEvent({
             type: 'damage',
             id: `${status.id}:pulse:t${tick}`,
@@ -943,6 +951,7 @@ export class Simulator {
             ownerId: status.ownerId,
             targetId: character.id,
             amount: status.amount,
+            overTime: true,
           })
         }
       }
@@ -1304,7 +1313,8 @@ export class Simulator {
         continue
       }
       state.movement = undefined
-      if (tick >= state.nextAttackTick) this.beginAttack(context, character, state, lock, states, tick)
+      // A disarmed character walks up to its target and waits there, and swings the moment the disarm is over, if the attack is ready.
+      if (tick >= state.nextAttackTick && !isDisarmed(state.statuses)) this.beginAttack(context, character, state, lock, states, tick)
     }
   }
 
@@ -1318,7 +1328,7 @@ export class Simulator {
     tick: number,
   ): void {
     // The windup is a share of the whole attack, so it is as long as the attack speed it has now makes it.
-    const launchTick = tick + character.champion.attackWindupTicksWith(state.statuses, levelOfState(state), itemTotals(state.items).attackSpeed ?? 0)
+    const launchTick = tick + character.champion.attackWindupTicksWith(state.statuses, levelOfState(state), itemTotals(state.items).attackSpeed ?? 0, itemAttackSpeedBonus(state.items))
     state.action = {
       kind: 'attack',
       orderId: lock.orderId,
@@ -1432,7 +1442,7 @@ export class Simulator {
         state.action = undefined
         return
       }
-      state.nextAttackTick = action.startTick + character.champion.attackCooldownTicksWith(state.statuses, levelOfState(state), itemTotals(state.items).attackSpeed ?? 0)
+      state.nextAttackTick = action.startTick + character.champion.attackCooldownTicksWith(state.statuses, levelOfState(state), itemTotals(state.items).attackSpeed ?? 0, itemAttackSpeedBonus(state.items))
       state.attackLaunchTick = tick
       // A blind attacker swings at nothing: the windup and cooldown are spent, but nothing lands
       // and no shot leaves. A shot already in the air is unaffected.
@@ -1508,6 +1518,12 @@ export class Simulator {
       if (tick < entity.startTick) {
         remaining.push(entity)
         continue
+      }
+      // One held on its owner is put on it before anything else, so that what it does as its lifetime runs out is done where the owner stands now. If the
+      // owner is gone it stays where it was.
+      if (def.attached) {
+        const holder = states.get(entity.ownerId)
+        if (holder && isAlive(holder)) entity.position = { ...holder.position }
       }
       if (entity.lifetimeTicks !== undefined && tick > entity.startTick + entity.lifetimeTicks) {
         if (def.onExpire) {
@@ -1672,6 +1688,105 @@ export class Simulator {
     return hastedCooldownTicks(def.cooldownTicks, statsOfState(this.characters.get(characterId), state)?.haste ?? 0)
   }
 
+  // What the effects of the items carried by whoever did a hit (see item-effects.ts) make of it before it lands: the damage it does, the share of the target's
+  // resistance it does not meet, and the health the carrier gets back from it whatever it does (`heal`). A hit that does nothing, or is an item's own (a poison's
+  // pulse), is left as it is. An effect with a cooldown keeps it in the carrier's frame with the cooldowns of its abilities, under the item's id, so it is
+  // taken back with the rest of the frame when an order arrives late; the cooldown starts on the hit that uses it, and a death clears it.
+  private itemStrike(
+    event: DamageEvent,
+    target: GameFrameCharacter,
+    states: ReadonlyMap<number, GameFrameCharacter>,
+    tick: number,
+  ): { amount: number; pierce: number; heal: number } {
+    const plain = { amount: event.amount, pierce: 0, heal: 0 }
+    const source = damageSource(event)
+    const owner = this.characters.get(event.ownerId)
+    const carrier = states.get(event.ownerId)
+    if (source === 'item' || !owner || !carrier || !isAlive(carrier) || !(event.amount > 0)) return plain
+    const carried = itemEffects(carrier.items)
+    const stats = carried.length > 0 ? statsOfState(owner, carrier) : undefined
+    if (!stats) return plain
+    const spend = (itemId: string, kind: string, cooldownTicks: number): boolean => {
+      const key = `item:${itemId}:${kind}`
+      if ((carrier.cooldowns[key] ?? 0) > tick) return false
+      carrier.cooldowns[key] = tick + cooldownTicks
+      return true
+    }
+    let amount = event.amount
+    let pierce = 0
+    let heal = 0
+    if (source === 'attack') {
+      for (const { effect } of effectsOfKind(carried, 'attackArcane')) amount += effect.ratio * stats.arcane
+      for (const { effect } of effectsOfKind(carried, 'currentHealthDamage')) amount += effect.fraction * (target.health?.hp ?? 0)
+      for (const { itemId, effect } of effectsOfKind(carried, 'openingAttack')) {
+        if (!spend(itemId, effect.kind, effect.cooldownTicks)) continue
+        amount += effect.attackDamage * stats.attackDamage
+        const missing = carrier.health ? carrier.health.maxHp - carrier.health.hp : 0
+        heal += Math.round(missing * (effect.healMissingHealth ?? 0))
+      }
+      // The bonuses add up, and are of everything the hit does.
+      amount *= 1 + effectsOfKind(carried, 'attackDamage').reduce((total, { effect }) => total + effect.bonus, 0)
+      pierce = Math.min(1, effectsOfKind(carried, 'resistancePierce').reduce((total, { effect }) => total + effect.fraction, 0))
+    } else {
+      // The charge is for the next hit of an ability, not for a burn that goes on.
+      if (!event.overTime) {
+        for (const { itemId, effect } of effectsOfKind(carried, 'chargedAbility')) {
+          if (spend(itemId, effect.kind, effect.cooldownTicks)) amount += effect.arcane * stats.arcane
+        }
+      }
+      amount *= 1 + effectsOfKind(carried, 'abilityDamage').reduce((total, { effect }) => total + effect.bonus, 0)
+    }
+    return { amount, pierce, heal }
+  }
+
+  // What the effects of the items carried by whoever did a hit do once it has landed, from the damage it dealt (`dealt`, after the target's resistance): the
+  // carrier heals (lifesteal, and the `heal` that `itemStrike` worked out), a poison is put on the target, and an attack that landed quickens the carrier.
+  // Both statuses are named for the carrier and the item, so another hit renews them instead of adding another.
+  private itemAftermath(
+    event: DamageEvent,
+    target: GameFrameCharacter,
+    states: ReadonlyMap<number, GameFrameCharacter>,
+    tick: number,
+    dealt: number,
+    heal: number,
+  ): void {
+    const source = damageSource(event)
+    const owner = this.characters.get(event.ownerId)
+    const carrier = states.get(event.ownerId)
+    if (source === 'item' || !owner || !carrier || !isAlive(carrier) || !(event.amount > 0)) return
+    const carried = itemEffects(carrier.items)
+    if (carried.length === 0) return
+    const on = source === 'attack' ? 'attacks' : 'abilities'
+    let healed = heal
+    for (const { effect } of effectsOfKind(carried, 'lifesteal')) {
+      if (effect.on === on) healed += Math.round(dealt * effect.fraction)
+    }
+    healCharacter(carrier, healed)
+    if (source !== 'attack') return
+    const statusFor = (itemId: string, kind: 'haste' | 'poison', ticks: number, amount: number) => ({
+      id: `${ITEM_SOURCE_PREFIX}${event.ownerId}:${itemId}:${kind}`,
+      kind,
+      rootId: event.rootId,
+      ownerId: event.ownerId,
+      startTick: tick,
+      endTick: tick + ticks,
+      amount,
+    })
+    for (const { itemId, effect } of effectsOfKind(carried, 'attackMoveSpeed')) {
+      const status = statusFor(itemId, 'haste', effect.ticks, effect.fraction)
+      carrier.statuses = [...carrier.statuses.filter((existing) => existing.id !== status.id), status]
+    }
+    // A structure takes no poison, and nor does one that this hit took the last health of (it is not marked dead until the tick's damage is done).
+    if (this.characters.get(event.targetId)?.structure || !((target.health?.hp ?? 0) > 0)) return
+    const arcane = statsOfState(owner, carrier)?.arcane ?? 0
+    for (const { itemId, effect } of effectsOfKind(carried, 'poison')) {
+      const perPulse = Math.max(0, Math.round((effect.damagePerSecond + effect.arcane * arcane) * GAME_BURN_PULSE_TICKS / GAME_TPS))
+      if (perPulse === 0) continue
+      const status = statusFor(itemId, 'poison', effect.ticks, perPulse)
+      target.statuses = [...target.statuses.filter((existing) => existing.id !== status.id), status]
+    }
+  }
+
   private applyWrites(
     context: TickContext,
     states: ReadonlyMap<number, GameFrameCharacter>,
@@ -1736,7 +1851,12 @@ export class Simulator {
         if (isStructure(event.targetId) && (!event.id.startsWith(ATTACK_SOURCE_PREFIX) || shielded.has(event.targetId))) continue
         if (state) {
           const hadHealth = (state.health?.hp ?? 0) > 0
-          applyDamage(state, event.amount, tick, statsOfState(this.characters.get(event.targetId), state)?.resistance ?? 0)
+          // What the items of whoever did it make of the hit before it lands (more damage, a share of the resistance not met), and what they do after it (heal,
+          // poison, quicken), from what it did.
+          const strike = this.itemStrike(event, state, states, tick)
+          const resistance = statsOfState(this.characters.get(event.targetId), state)?.resistance ?? 0
+          const dealt = applyDamage(state, strike.amount, tick, resistance * (1 - strike.pierce))
+          this.itemAftermath(event, state, states, tick, dealt, strike.heal)
           if (hadHealth && state.health?.hp === 0) killers.set(event.targetId, event.ownerId)
           // A monster that is minding its own business and is hurt by an enemy knows who to go after.
           if (state.ai?.mode === 'idle' && event.amount > 0) {
@@ -1793,6 +1913,9 @@ export class Simulator {
       if (!health || health.deathTick !== undefined || health.hp > 0) continue
       const killerId = killers.get(state.characterId)
       killCharacter(state, tick)
+      // The items go on the tick of the death, in the frame like everything else a death does, so a late order that undoes it gives them back.
+      const victim = this.characters.get(state.characterId)
+      if (victim?.player && this.losesItemsOnDeath) loseItems(victim, state)
       deaths.push({
         tick,
         victimId: state.characterId,
@@ -1946,6 +2069,19 @@ function copyItems(items: GameFrameCharacter['items']): Record<string, string> {
   return copy
 }
 
+// Takes what the character carries away, but for the slots it keeps on a death (`KEPT_ON_DEATH`). It is not paid for them: they are lost, not sold. The
+// maximum health goes down by what they added, as in a sale.
+function loseItems(character: SimCharacter, state: GameFrameCharacter): void {
+  if (!state.items) return
+  const kept = copyItems(state.items)
+  for (const slot of ITEM_SLOTS) {
+    if (!KEPT_ON_DEATH.includes(slot)) delete kept[slot]
+  }
+  if (Object.keys(kept).length > 0) state.items = kept
+  else delete state.items
+  refitHealth(character, state)
+}
+
 // Sets the character's maximum health to what its stats say now, its level and its items, and moves the health it has by as much: more for what was
 // gained, and less for what was lost, though never to nothing for one that is alive. That is not damage or a heal, so the health's sequence is left as
 // it was. A character that is dead has none to move.
@@ -1975,17 +2111,34 @@ function gainExperience(character: SimCharacter, state: GameFrameCharacter, amou
   refitHealth(character, state)
 }
 
-// Takes the damage off the health. What is taken is the damage less what the character's resistance takes off it (see `statReduction`)
-// and less what its resist statuses take, which add up to at most 90%, and both act before shields.
-function applyDamage(state: GameFrameCharacter, amount: number, tick: number, resistanceStat = 0): void {
+type DamageEvent = Extract<GameEvent, { type: 'damage' }>
+
+// What did the damage: an auto attack, an item (a poison it left), or else an ability (a burn it lit is one too).
+function damageSource(event: DamageEvent): 'attack' | 'item' | 'ability' {
+  if (event.id.startsWith(ATTACK_SOURCE_PREFIX)) return 'attack'
+  return event.id.startsWith(ITEM_SOURCE_PREFIX) ? 'item' : 'ability'
+}
+
+// Gives the character health back, up to the most it can have. One that is dead, or has no health left, has none to give.
+function healCharacter(state: GameFrameCharacter, amount: number): void {
   const health = state.health
-  if (!health || health.deathTick !== undefined) return
+  if (!health || !(amount > 0) || health.deathTick !== undefined || health.hp <= 0) return
+  health.hp = Math.min(health.maxHp, health.hp + amount)
+}
+
+// Takes the damage off the health, and says how much it was: the damage less what the character's resistance takes off it (see `statReduction`)
+// and less what its resist statuses take, which add up to at most 90%, and both act before shields. Shields take what they can of that, and what
+// they take was dealt all the same.
+function applyDamage(state: GameFrameCharacter, amount: number, tick: number, resistanceStat = 0): number {
+  const health = state.health
+  if (!health || health.deathTick !== undefined) return 0
   const resistance = Math.min(0.9, state.statuses.reduce(
     (total, status) => status.kind === 'resist' ? total + status.amount : total,
     0,
   ))
   let remaining = Math.max(0, Math.round(amount * (1 - resistance) * statMultiplier(resistanceStat)))
-  if (remaining === 0) return
+  const dealt = remaining
+  if (remaining === 0) return 0
   // Shield statuses absorb first, soonest-expiring first.
   const shields = state.statuses
     .filter((status) => status.kind === 'shield')
@@ -2000,6 +2153,7 @@ function applyDamage(state: GameFrameCharacter, amount: number, tick: number, re
   health.hp = Math.max(0, health.hp - remaining)
   health.hpSeq += 1
   health.finalizedTick = tick
+  return dealt
 }
 
 // Whoever has no health left is dead: it stops what it was doing and is a ghost until it respawns.
@@ -2055,6 +2209,11 @@ function isStunned(statuses: readonly Status[]): boolean {
 // A silence stops starting an ability and nothing else.
 function isSilenced(statuses: readonly Status[]): boolean {
   return statuses.some((status) => status.kind === 'silence')
+}
+
+// A disarm stops starting an auto attack and nothing else.
+function isDisarmed(statuses: readonly Status[]): boolean {
+  return statuses.some((status) => status.kind === 'disarm')
 }
 
 // Haste bonuses add together; only the strongest slow applies; the slow scales the hasted speed.

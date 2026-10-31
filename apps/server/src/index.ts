@@ -582,6 +582,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     const changed: LogFields = {}
     if (lobby.rules.respawnSeconds !== before.respawnSeconds) changed.respawnSeconds = lobby.rules.respawnSeconds
     if (lobby.rules.captureSeconds !== before.captureSeconds) changed.captureSeconds = lobby.rules.captureSeconds
+    if (lobby.rules.loseItemsOnDeath !== before.loseItemsOnDeath) changed.loseItemsOnDeath = lobby.rules.loseItemsOnDeath
     for (const mode of Object.keys(lobby.rules.scoreLimits) as GameMode[]) {
       if (lobby.rules.scoreLimits[mode] !== before.scoreLimits[mode]) changed[`${mode}Limit`] = lobby.rules.scoreLimits[mode]
     }

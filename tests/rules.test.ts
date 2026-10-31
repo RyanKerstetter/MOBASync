@@ -113,6 +113,56 @@ test('a game is given its mode\'s limit, with 0 meaning there is none, and the r
   assert.deepEqual(createModeSetup('deathmatch', [1, 2], NO_OBJECTIVES), { kind: 'deathmatch' }, 'with no rules, none are set')
 })
 
+// ---------------------------------------------------------------------------- losing items on death
+
+const CORES = { flags: [], cores: [{ x: 100, y: 100 }, { x: 900, y: 100 }] }
+
+test('losing items on death is off by default, and is a rule that is on or off', () => {
+  assert.equal(defaultRules().loseItemsOnDeath, false)
+  assert.deepEqual(readRulesChange({ loseItemsOnDeath: true }), { change: { loseItemsOnDeath: true } })
+  assert.deepEqual(readRulesChange({ loseItemsOnDeath: false }), { change: { loseItemsOnDeath: false } }, 'off is a change like on')
+  for (const bad of ['yes', 1, 0, null]) {
+    const read = readRulesChange({ loseItemsOnDeath: bad })
+    assert.ok('problem' in read, `${String(bad)} was refused`)
+    assert.match('problem' in read ? read.problem : '', /must be on or off/)
+  }
+  const on = applyRulesChange(defaultRules(), { loseItemsOnDeath: true })
+  assert.equal(on.loseItemsOnDeath, true)
+  assert.equal(applyRulesChange(on, { respawnSeconds: 9 }).loseItemsOnDeath, true, 'a change to something else leaves it as it was')
+  assert.equal(applyRulesChange(on, { loseItemsOnDeath: false }).loseItemsOnDeath, false)
+  assert.equal(defaultRules().loseItemsOnDeath, false, 'and the defaults are not changed by it')
+})
+
+test('a game of core destruction is given the rule when it is on, and no other game is, nor one with it off', () => {
+  const on = applyRulesChange(defaultRules(), { loseItemsOnDeath: true })
+  assert.equal(modeRules(on, 'core').loseItemsOnDeath, true)
+  for (const mode of ['deathmatch', 'koth', 'ctf'] as const) assert.equal('loseItemsOnDeath' in modeRules(on, mode), false, `not for ${mode}`)
+  assert.equal('loseItemsOnDeath' in modeRules(defaultRules(), 'core'), false, 'off is not there, so what a game is by default is as it was')
+  assert.deepEqual(createModeSetup('core', [1, 2], CORES, modeRules(on, 'core')), {
+    kind: 'core',
+    teams: [1, 2],
+    loseItemsOnDeath: true,
+    respawnTicks: RESPAWN_SECONDS.default * GAME_TPS,
+  })
+  assert.deepEqual(createModeSetup('core', [1, 2], CORES, modeRules(defaultRules(), 'core')), {
+    kind: 'core',
+    teams: [1, 2],
+    respawnTicks: RESPAWN_SECONDS.default * GAME_TPS,
+  })
+})
+
+test('the rule is in the snapshot of a game that has it, and a snapshot with it is read back with it', () => {
+  const setup = createModeSetup('core', [1, 2], CORES, modeRules(applyRulesChange(defaultRules(), { loseItemsOnDeath: true }), 'core'))
+  const snapshot = new Simulator(Terrain.plain(), setup).snapshot()
+  assert.equal(snapshot.mode?.kind === 'core' && snapshot.mode.loseItemsOnDeath, true)
+  const read = GameSnapshotSchema.parse(JSON.parse(JSON.stringify(snapshot)))
+  assert.equal(read.mode?.kind === 'core' && read.mode.loseItemsOnDeath, true)
+  const restored = new Simulator()
+  restored.replaceFromSnapshot(read)
+  assert.equal(restored.losesItemsOnDeath, true, 'a page that joins the game gets the rule with it')
+  assert.equal(new Simulator(Terrain.plain(), createModeSetup('core', [1, 2], CORES)).losesItemsOnDeath, false)
+})
+
 // ---------------------------------------------------------------------------- kills, and winning
 
 test('a team scores for each kill its players make, and has no state until there is one', () => {

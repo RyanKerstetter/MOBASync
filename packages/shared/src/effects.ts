@@ -72,7 +72,9 @@ export interface SimWriter {
 export interface SimContext extends SimReader, SimWriter {}
 
 export type GameEvent =
-  | { type: 'damage'; id: string; rootId: string; ownerId: number; targetId: number; amount: number }
+  // `overTime` is the pulse of a burn or a poison, the damage that a status does while it lasts: what an item says of the damage an ability does counts it, but
+  // what an item does for the next hit of one does not (see `ITEM_SOURCE_PREFIX`).
+  | { type: 'damage'; id: string; rootId: string; ownerId: number; targetId: number; amount: number; overTime?: true }
   | { type: 'reset-attack-timer'; id: string; rootId: string; ownerId: number; unitId: number }
   // Takes health straight off, ignoring shields and resistance, and never the last point.
   | { type: 'lose-health'; id: string; rootId: string; ownerId: number; unitId: number; amount: number }
@@ -92,6 +94,10 @@ export type GameEvent =
 // made from them; an ability's start with 'c:'. It is how an effect knows whether its damage is an auto's, which is physical, or an
 // ability's, which is magic (see `damage`).
 export const ATTACK_SOURCE_PREFIX = 'a:'
+
+// What an item leaves behind (a poison, a burst of move speed) is named with this, so the damage it does later is neither an attack's nor an ability's,
+// and the items that act on those do not act on it.
+export const ITEM_SOURCE_PREFIX = 'i:'
 
 // 2. Provenance: plain data, built by whoever runs the effects.
 export interface EffectSource {
@@ -170,9 +176,14 @@ interface EntityDefBase {
   // damping below 2 * sqrt(stiffness) lets it swing past the rest point and back. Its own `speed`
   // must be 0; its velocity is the spring's, and it is stored on the entity with its position.
   follow?: { stiffness: number; damping: number; offset?: Vector2 }
-  // How the client draws it: a small bolt (default), a large translucent field, or a warning
-  // circle that fills in as the entity runs out its lifetime (a telegraph).
-  visual?: 'bolt' | 'field' | 'telegraph'
+  // The entity is held exactly on its owner: at the start of every tick, before anything else it does (its lifetime running out included), it is put on the point the
+  // owner stands on, so it is centred on it and never lags behind it, where `follow` hangs on a spring. A circle or a rectangle round the owner, such as a charge that
+  // is to land on whoever is near him when it is full. Its own `speed` must be 0, and it stays where it was if its owner is gone.
+  attached?: boolean
+  // How the client draws it: a small bolt (default), a large translucent field, a warning
+  // circle that fills in as the entity runs out its lifetime (a telegraph), or a bright flash that
+  // is brightest as it appears and fades away over its lifetime (for the instant something goes off).
+  visual?: 'bolt' | 'field' | 'telegraph' | 'flash'
   // Client-only fill colour for the drawing, for example '#6dd39b'.
   color?: string
 }
@@ -200,6 +211,62 @@ export function runEffects<C>(effects: readonly Effect<C>[], sim: C, src: Effect
 // hurt, push or disable only ever reach enemies, and the "allies" selectors reach teammates.
 export function areEnemies(left: SimCharacter, right: SimCharacter): boolean {
   return left.team !== right.team
+}
+
+// Descriptions: what an effect or an amount can say about itself without being run. The constructors below that make a number a player would want to read
+// (`damage`, `burn`, `scaled`, `linear`) note what they were made from, and `describeEffect` and `describeAmount` give it back. The tooltips over the abilities are
+// told from it (see ability-info.ts), so a number that is retuned is retuned in its tooltip too, with nothing written twice. Whatever notes nothing is not described.
+
+// The stats an amount can grow with (see `Scaling`), in the order they are told.
+export const SCALING_KEYS = ['arcane', 'attackDamage', 'maxHealth', 'health', 'level'] as const satisfies readonly (keyof Scaling)[]
+
+// What an amount is made of: `base`, plus `perStack` for each stack it counts and `perMissingHealth` for each point of health the target is missing, plus the
+// caster's stats times `ratios`.
+export type AmountInfo = {
+  base: number
+  perStack: number
+  perMissingHealth: number
+  ratios: Scaling
+}
+
+// An effect of any kind, to hold the ones an effect runs without saying what they run on.
+export type AnyEffect = (sim: never, src: EffectSource) => void
+
+// What can be said of an effect: the number it deals, the entity it sends out, the dash it starts, or the two lists it chooses between.
+export type EffectInfo =
+  | { kind: 'damage' | 'burn'; amount: AmountInfo | undefined }
+  | { kind: 'spawn'; def: EntityDef }
+  | { kind: 'dash'; def: DashDef }
+  | { kind: 'branch'; then: readonly AnyEffect[]; otherwise: readonly AnyEffect[] }
+
+type Note = EffectInfo | { kind: 'amount'; info: AmountInfo } | { kind: 'stacks' } | { kind: 'missing-health' }
+
+const notes = new WeakMap<object, Note>()
+
+function noted<T extends object>(thing: T, note: Note): T {
+  notes.set(thing, note)
+  return thing
+}
+
+export function describeEffect(effect: object): EffectInfo | undefined {
+  const note = notes.get(effect)
+  return note && note.kind !== 'amount' && note.kind !== 'stacks' && note.kind !== 'missing-health' ? note : undefined
+}
+
+// What an amount is made of, or nothing if it is made of something that is not told (a number worked out from the fight, say).
+export function describeAmount(amount: Amount): AmountInfo | undefined {
+  if (typeof amount === 'number') return { base: amount, perStack: 0, perMissingHealth: 0, ratios: {} }
+  const note = notes.get(amount)
+  return note?.kind === 'amount' ? note.info : undefined
+}
+
+function addRatios(left: Scaling, right: Scaling): Scaling {
+  const sum: Scaling = {}
+  for (const key of SCALING_KEYS) {
+    const total = (left[key] ?? 0) + (right[key] ?? 0)
+    if (total) sum[key] = total
+  }
+  return sum
 }
 
 // Selectors
@@ -232,6 +299,23 @@ export const aimPoint = (): Anchor => (_sim, src) =>
 export const ownEntity = (defId: string): Anchor => (sim, src) => {
   const position = sim.entitiesOf(src.ownerId, defId)[0]?.position
   return position && { ...position }
+}
+
+// The point on the line from the caster to the unit hit that is just short of the caster: touching it, with `gap` to spare. It is where something dragged to
+// the caster comes to rest, beside it and not on top of it. Nothing if the unit is that close already, so it is not pushed away.
+export const besideOwner = (gap = 0): Anchor => (sim, src) => {
+  if (src.subject === null) return undefined
+  const owner = sim.character(src.ownerId)
+  const unit = sim.character(src.subject)
+  const from = sim.posAt(src.ownerId, src.tick)
+  const at = sim.posAt(src.subject, src.tick)
+  if (!owner || !unit || !from || !at) return undefined
+  const dx = at.x - from.x
+  const dy = at.y - from.y
+  const distance = Math.sqrt(dx * dx + dy * dy)
+  const rest = owner.champion.radius + unit.champion.radius + gap
+  if (distance <= rest) return undefined
+  return { x: from.x + dx / distance * rest, y: from.y + dy / distance * rest }
 }
 
 export const alliesInRadius = (r: number, center: Anchor = castOrigin()): Selector => (sim, src) => {
@@ -322,7 +406,7 @@ export const fromAttack = (src: EffectSource): boolean => src.id.startsWith(ATTA
 export const damage = (
   amount: Amount,
   to: Selector = subject(),
-): Effect<SimReader & Pick<SimWriter, 'emitEvent'>> => (sim, src) => {
+): Effect<SimReader & Pick<SimWriter, 'emitEvent'>> => noted((sim, src) => {
   for (const targetId of to(sim, src)) {
     // An amount that depends on the target (stacks on it) is read for each target in turn.
     const value = resolveAmount(amount, sim, { ...src, subject: targetId })
@@ -335,7 +419,7 @@ export const damage = (
       amount: value,
     })
   }
-}
+}, { kind: 'damage', amount: describeAmount(amount) })
 
 export const slow = (
   fraction: Amount,
@@ -461,50 +545,73 @@ export const scaled = (
     [ratios.health, health()],
     [ratios.level, level()],
   ]
-  return (sim, src) =>
+  const amount = (sim: SimReader, src: EffectSource): number =>
     sources.reduce((sum, [ratio, source]) => (ratio ? sum + ratio * source(sim, src) : sum), resolveAmount(base, sim, src))
+  const info = describeAmount(base)
+  return info ? noted(amount, { kind: 'amount', info: { ...info, ratios: addRatios(info.ratios, ratios) } }) : amount
 }
 
 // Counts the owner's markers with this key on the first selected unit.
 export const stacks = (
   key: string,
   on: Selector = subject(),
-): ((sim: SimReader, src: EffectSource) => number) => (sim, src) => {
+): ((sim: SimReader, src: EffectSource) => number) => noted((sim, src) => {
   const [unitId] = on(sim, src)
   return unitId === undefined ? 0 : sim.markersOn(unitId, key, src.ownerId).length
-}
+}, { kind: 'stacks' })
 
 // base + each * of: scales an effect by another amount, such as a stack count.
 export const linear = (
   base: Amount,
   each: number,
   of: Amount,
-): ((sim: SimReader, src: EffectSource) => number) => (sim, src) =>
-  resolveAmount(base, sim, src) + each * resolveAmount(of, sim, src)
+): ((sim: SimReader, src: EffectSource) => number) => {
+  const amount = (sim: SimReader, src: EffectSource): number => resolveAmount(base, sim, src) + each * resolveAmount(of, sim, src)
+  const info = describeAmount(base)
+  // Only a plain number, a count of stacks or the health a target is missing can be told; anything else leaves the amount undescribed.
+  const counts = typeof of === 'number' ? 'number' : notes.get(of)?.kind
+  if (!info || !(counts === 'number' || counts === 'stacks' || counts === 'missing-health')) return amount
+  return noted(amount, {
+    kind: 'amount',
+    info: {
+      ...info,
+      base: info.base + (typeof of === 'number' ? each * of : 0),
+      perStack: info.perStack + (counts === 'stacks' ? each : 0),
+      perMissingHealth: info.perMissingHealth + (counts === 'missing-health' ? each : 0),
+    },
+  })
+}
 
 export const when = <C extends SimReader>(
   condition: (sim: C, src: EffectSource) => boolean,
   then: readonly Effect<C>[],
   otherwise: readonly Effect<C>[] = [],
-): Effect<C> => (sim, src) => {
+): Effect<C> => noted((sim, src) => {
   runEffects(condition(sim, src) ? then : otherwise, sim, src)
-}
+}, { kind: 'branch', then, otherwise })
+
+// The ID of a status that has a name (`named`): the owner's and the name's, whatever cast or attack gives it. Giving it again renews that one status instead
+// of adding a second, however it is given, and `prolong` can find it by the name. (Every other status is named for the cast or attack that gave it.)
+const namedStatusId = (src: EffectSource, name: string, kind: string): string => `${src.ownerId}:${name}:${kind}`
 
 // `shared` makes every haste of that name from the same cast one status per unit, so several
 // overlapping sources of one cast (the segments of a trail) refresh it instead of adding up.
+// `named` makes it the owner's status of that name (see `namedStatusId`).
 // With `fades`, the bonus starts at `fraction` and dies away in a straight line to nothing over the
 // duration, instead of holding steady until it ends.
 export const haste = (
   fraction: Amount,
   durationTicks: number,
   to: Selector = self(),
-  options: { shared?: string; fades?: boolean } = {},
+  options: { shared?: string; named?: string; fades?: boolean } = {},
 ): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
   const amount = Math.max(0, resolveAmount(fraction, sim, src))
   if (amount === 0) return
   for (const unitId of to(sim, src)) {
     sim.addStatus(unitId, {
-      id: options.shared === undefined ? `${src.id}:haste` : `${src.rootId}:haste:${options.shared}`,
+      id: options.named !== undefined
+        ? namedStatusId(src, options.named, 'haste')
+        : options.shared === undefined ? `${src.id}:haste` : `${src.rootId}:haste:${options.shared}`,
       kind: 'haste',
       rootId: src.rootId,
       ownerId: src.ownerId,
@@ -525,7 +632,7 @@ export const burn = (
   damagePerSecond: Amount,
   durationTicks: number,
   to: Selector = subject(),
-): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
+): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => noted((sim, src) => {
   for (const unitId of to(sim, src)) {
     const perPulse = Math.max(0, Math.round(
       resolveAmount(damagePerSecond, sim, { ...src, subject: unitId }) * GAME_BURN_PULSE_TICKS / GAME_TPS,
@@ -541,19 +648,20 @@ export const burn = (
       amount: perPulse,
     })
   }
-}
+}, { kind: 'burn', amount: describeAmount(damagePerSecond) })
 
-// Damage resistance as a fraction (0.3 = takes 30% less). Resistances add, up to 90%.
+// Damage resistance as a fraction (0.3 = takes 30% less). Resistances add, up to 90%. `named` makes it the owner's status of that name (see `namedStatusId`).
 export const resist = (
   fraction: Amount,
   durationTicks: number,
   to: Selector = self(),
+  options: { named?: string } = {},
 ): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
   const amount = Math.max(0, Math.min(1, resolveAmount(fraction, sim, src)))
   if (amount === 0) return
   for (const unitId of to(sim, src)) {
     sim.addStatus(unitId, {
-      id: `${src.id}:resist`,
+      id: options.named === undefined ? `${src.id}:resist` : namedStatusId(src, options.named, 'resist'),
       kind: 'resist',
       rootId: src.rootId,
       ownerId: src.ownerId,
@@ -566,18 +674,20 @@ export const resist = (
 
 // Adds `amount` to one of the stats a unit has (the same points an item adds) while the status lasts: attack damage, attack speed (attacks a
 // second), resistance, haste (ability haste, not move speed; see `haste` above for that) or arcane. Buffs to the same stat from different
-// sources add together; one from the same source refreshes.
+// sources add together; one from the same source refreshes. `named` makes it the owner's status of that name (see `namedStatusId`), so every attack
+// that gives it renews the one buff: that is how a buff that is worked out afresh each time and grows with a count (`stacks`) is given.
 export const statBuff = (
   stat: BuffableStat,
   amount: Amount,
   durationTicks: number,
   to: Selector = self(),
+  options: { named?: string } = {},
 ): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
   const value = Math.max(0, resolveAmount(amount, sim, src))
   if (value === 0) return
   for (const unitId of to(sim, src)) {
     sim.addStatus(unitId, {
-      id: `${src.id}:stat:${stat}`,
+      id: options.named === undefined ? `${src.id}:stat:${stat}` : namedStatusId(src, options.named, `stat:${stat}`),
       kind: 'stat',
       stat,
       rootId: src.rootId,
@@ -586,6 +696,37 @@ export const statBuff = (
       endTick: src.tick + durationTicks,
       amount: value,
     })
+  }
+}
+
+// How many ticks are left, at `tick`, of the statuses that `ownerId` has given a unit under this name (`named`): the longest of them, or 0 for none. It is what a
+// meter over a champion is drawn from (see `ChampionMeterDef`), so the page does not need to know how the statuses are named.
+export function namedStatusTicksLeft(
+  statuses: readonly Pick<Status, 'id' | 'endTick'>[],
+  ownerId: number,
+  name: string,
+  tick: number,
+): number {
+  const prefix = `${ownerId}:${name}:`
+  return statuses.reduce((left, status) => status.id.startsWith(prefix) ? Math.max(left, status.endTick - tick) : left, 0)
+}
+
+// Makes every status the owner has given a unit under this name (`named`, on `haste`, `resist` and `statBuff`) last `ticks` longer, though never longer than
+// `longest` ticks from now: a buff that grows as it is used, such as a rage that each auto feeds. A unit without the status is left as it is, so an
+// effect that feeds a rage does not start one. They all end together, as they began.
+export const prolong = (
+  name: string,
+  ticks: number,
+  longest: number,
+  to: Selector = self(),
+): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
+  const prefix = `${src.ownerId}:${name}:`
+  for (const unitId of to(sim, src)) {
+    for (const status of sim.statusesOn(unitId)) {
+      if (!status.id.startsWith(prefix)) continue
+      const endTick = Math.min(status.endTick + ticks, src.tick + longest)
+      if (endTick > status.endTick) sim.addStatus(unitId, { ...status, endTick })
+    }
   }
 }
 
@@ -629,11 +770,11 @@ export const heal = (
 // How much health the first selected unit is missing, for damage that grows as a target weakens.
 export const missingHealth = (
   on: Selector = subject(),
-): ((sim: SimReader, src: EffectSource) => number) => (sim, src) => {
+): ((sim: SimReader, src: EffectSource) => number) => noted((sim, src) => {
   const [unitId] = on(sim, src)
   const health = unitId === undefined ? undefined : sim.healthOf(unitId)
   return health ? health.maxHp - health.hp : 0
-}
+}, { kind: 'missing-health' })
 
 // Whether the hit unit is within `range` of the one dealing the damage, for effects that change
 // with distance such as an attack that hits harder up close.
@@ -651,8 +792,10 @@ export const subjectWithin = (range: number) => (sim: SimReader, src: EffectSour
 // and interrupts a windup. Neither stops a dash that is already under way. A blind lets the
 // unit walk, attack and cast as usual, but its auto attacks miss: the windup and the cooldown are
 // spent and nothing lands or launches. A silence stops casting abilities, and nothing else: the
-// unit can still walk, attack, and finish a cast it had already begun.
-const crowdControl = (kind: 'root' | 'stun' | 'blind' | 'silence') => (
+// unit can still walk, attack, and finish a cast it had already begun. A disarm is the other way
+// round: it stops starting an auto attack, and nothing else. The unit can still walk, cast, and go
+// after its target (it waits in reach, and attacks once the disarm is over).
+const crowdControl = (kind: 'root' | 'stun' | 'blind' | 'silence' | 'disarm') => (
   durationTicks: number,
   to: Selector = subject(),
 ): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
@@ -673,6 +816,7 @@ export const root = crowdControl('root')
 export const stun = crowdControl('stun')
 export const blind = crowdControl('blind')
 export const silence = crowdControl('silence')
+export const disarm = crowdControl('disarm')
 
 // Teleports the units to a point, at once: a blink. They are there on the next frame, with
 // nothing in between to hit them or be hit, and a root does not hold them. A character in the
@@ -815,31 +959,39 @@ export function getDashDef(id: string): DashDef | undefined {
 // itself runs in the simulator at a fixed speed. A dash shoves the characters in its way along unless
 // it is `through`, which passes through them. With `toward`, it goes to that anchor instead, such as
 // an entity the caster left behind; with nothing there, it does not dash. With `on`, the dash has
-// effects of its own, run as it goes (`DashDef`), for the caster's dash only.
+// effects of its own, run as it goes (`DashDef`), for the caster's dash only. With `over`, the dash takes that many ticks however far it goes (a jump, which comes
+// down when its warning runs out), so its speed is worked out from its distance and `speed` is not used. The ticks can be worked out from the cast, for a jump
+// that takes longer the farther it goes.
 export const dash = (
   speed: number,
   maxDistance: number,
   to: Selector = self(),
-  options: { toward?: Anchor; through?: boolean; on?: DashDef } = {},
+  options: { toward?: Anchor; through?: boolean; on?: DashDef; over?: number | ((sim: SimReader, src: EffectSource) => number) } = {},
 ): Effect<SimReader & Pick<SimWriter, 'startDash'>> => {
+  if (typeof options.over === 'number' && !(options.over > 0 && Number.isFinite(options.over))) {
+    throw new Error('A dash that takes a set time needs a number of ticks above 0.')
+  }
   const def = options.on
   if (def) {
     const registered = dashDefs.get(def.id)
     if (registered && registered !== def) throw new Error(`Dash definition "${def.id}" is already registered.`)
     dashDefs.set(def.id, def)
   }
-  return (sim, src) => {
+  const effect: Effect<SimReader & Pick<SimWriter, 'startDash'>> = (sim, src) => {
     for (const unitId of to(sim, src)) {
       const from = sim.posAt(unitId, src.tick)
       if (!from) continue
       const end = dashEnd(sim, src, from, maxDistance, options.toward)
       if (!end) continue
-      sim.startDash(unitId, end, speed, {
+      const travel = Math.sqrt((end.x - from.x) ** 2 + (end.y - from.y) ** 2)
+      const ticks = typeof options.over === 'function' ? Math.max(1, options.over(sim, src)) : options.over
+      sim.startDash(unitId, end, ticks === undefined ? speed : travel * GAME_TPS / ticks, {
         ...(options.through ? { through: true } : {}),
         ...(def ? { contact: { defId: def.id, origin: { ...src.at }, sourceId: src.id, orderId: src.rootId } } : {}),
       })
     }
   }
+  return def ? noted(effect, { kind: 'dash', def }) : effect
 }
 
 // The units dodge every auto attack aimed at them while it lasts: the swing, and any shot that
@@ -966,11 +1118,17 @@ export const spawnEntity = (
     // Where to spawn instead of the cast origin, for example `aimPoint()`.
     at?: Anchor
     onePerOwner?: boolean
+    // How many ticks this one lasts, worked out as it is spawned, instead of the definition's `lifetimeTicks`: a warning that lasts as long as the jump to
+    // it does, which depends on how far it was aimed. (Not for one that lands at its aim, which lasts as long as it takes to get there.)
+    lifetime?: (sim: SimReader, src: EffectSource) => number
   } = {},
 ): Effect<SimReader & Pick<SimWriter, 'addEntity'>> => {
   const registered = entityDefs.get(def.id)
   if (registered && registered !== def) {
     throw new Error(`Entity definition "${def.id}" is already registered.`)
+  }
+  if (options.lifetime && def.landAtAim) {
+    throw new Error(`Entity definition "${def.id}" lands at its aim, so it lasts as long as the flight does and has no lifetime to set.`)
   }
   if (def.lifetimeTicks === undefined && !def.landAtAim && !def.stayWhile && !def.homing) {
     throw new Error(`Entity definition "${def.id}" needs lifetimeTicks, landAtAim, stayWhile or homing.`)
@@ -999,11 +1157,14 @@ export const spawnEntity = (
   if (def.follow && (def.speed !== 0 || def.landAtAim)) {
     throw new Error(`Entity definition "${def.id}" follows its owner, so it needs a speed of 0.`)
   }
+  if (def.attached && (def.speed !== 0 || def.landAtAim || def.homing || def.follow)) {
+    throw new Error(`Entity definition "${def.id}" is held on its owner, so it needs a speed of 0, and cannot land at an aim, home, or follow.`)
+  }
   if (options.line && (def.speed !== 0 || def.landAtAim)) {
     throw new Error(`Entity definition "${def.id}" must be stationary to be laid along a line.`)
   }
   entityDefs.set(def.id, def)
-  return (sim, src) => {
+  const spawn: Effect<SimReader & Pick<SimWriter, 'addEntity'>> = (sim, src) => {
     const origin = options.at ? options.at(sim, src) : { ...src.at }
     if (!origin) return
     // A homing entity chases the unit it was aimed at, or the one that fired it.
@@ -1059,7 +1220,7 @@ export const spawnEntity = (
         // on its first step.
         const dir = aimed ?? (def.homing ? { x: 0, y: 0 } : undefined)
         if (!dir) return
-        lifetimeTicks = def.lifetimeTicks
+        lifetimeTicks = options.lifetime ? Math.max(1, Math.round(options.lifetime(sim, src))) : def.lifetimeTicks
         velocity = { x: dir.x * def.speed, y: dir.y * def.speed }
         if (def.stopsAtWalls && lifetimeTicks !== undefined) {
           lifetimeTicks = Math.min(lifetimeTicks, ticksBeforeWall(sim.terrain, place.at, velocity, def.radius ?? 0))
@@ -1080,6 +1241,7 @@ export const spawnEntity = (
       })
     }
   }
+  return noted(spawn, { kind: 'spawn', def })
 }
 
 // How many whole ticks a body of this radius can fly from `from` at `velocity` (per second) before
