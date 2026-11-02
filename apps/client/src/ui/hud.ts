@@ -1,4 +1,4 @@
-import { GAME_TPS, statReduction, type ChampionStats } from '../../../../packages/shared/src/index.ts'
+import { clamp, GAME_TPS, statReduction, type ChampionStats } from '../../../../packages/shared/src/index.ts'
 import { layoutHealthBar } from '../render/health-bar.ts'
 
 export type AbilitySlotView = {
@@ -29,7 +29,7 @@ export function abilitySlotViews(
       key: keyLabel(slot),
       abilityId,
       cooldownTicks,
-      filled: ready || cooldownTicks <= 0 ? 1 : Math.max(0, Math.min(1, 1 - remaining / cooldownTicks)),
+      filled: ready || cooldownTicks <= 0 ? 1 : clamp(1 - remaining / cooldownTicks, 0, 1),
       ready,
       // Under ten seconds a tenth is worth showing; above, whole seconds are plenty.
       secondsLeft: ready ? '' : seconds < 10 ? seconds.toFixed(1) : String(Math.ceil(seconds)),
@@ -83,7 +83,7 @@ export function progressReadout(progress: {
   const whole = (amount: number): string => String(Math.max(0, Math.floor(amount)))
   return {
     level: String(progress.level),
-    xpPercent: Math.max(0, Math.min(1, progress.fraction)) * 100,
+    xpPercent: clamp(progress.fraction, 0, 1) * 100,
     gold: whole(progress.gold),
     shards: whole(progress.shards),
   }

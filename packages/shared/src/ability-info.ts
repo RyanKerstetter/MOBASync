@@ -1,9 +1,21 @@
 import type { AbilityDef } from './abilities.js'
+import { GAME_TPS } from './constants.js'
 import { describeEffect, SCALING_KEYS, type AmountInfo, type AnyEffect, type Scaling } from './effects.js'
 
-// What an ability puts a number on that a player wants to read, found by looking through its effects (see "Descriptions" in effects.ts): the damage it deals, and
-// the damage a second it burns for. It is found in the ability itself, so it is the ability's own number, and retuning the ability retunes this.
-export type AbilityNumber = { kind: 'damage' | 'burn'; amount: AmountInfo }
+// What an ability puts a number on that a player wants to read, found by looking through its effects (see "Descriptions" in effects.ts): the damage it deals, the
+// damage a second it burns for, the health it gives back and the shield it gives. It is found in the ability itself, so it is the ability's own number, and retuning the
+// ability retunes this. `perSecond` is a heal that a pulse repeats (a bot that heals every half second), told as what it comes to in a second.
+export type AbilityNumber = { kind: 'damage' | 'burn' | 'heal' | 'shield'; amount: AmountInfo; perSecond?: true }
+
+// An amount as many times over as there are of it in a second.
+function times(amount: AmountInfo, factor: number): AmountInfo {
+  const ratios: AmountInfo['ratios'] = {}
+  for (const key of SCALING_KEYS) {
+    const ratio = amount.ratios[key]
+    if (ratio) ratios[key] = ratio * factor
+  }
+  return { base: amount.base * factor, perStack: amount.perStack * factor, perMissingHealth: amount.perMissingHealth * factor, ratios }
+}
 
 const found = new WeakMap<AbilityDef, readonly AbilityNumber[]>()
 
@@ -22,30 +34,36 @@ function collect(def: AbilityDef): AbilityNumber[] {
   const numbers: AbilityNumber[] = []
   const told = new Set<string>()
   const visited = new Set<object>()
-  const walk = (effects: readonly AnyEffect[] | undefined): void => {
+  // `rate` is how many times a second what is walked is run, for what a pulse does, so the health it gives back is told for a second.
+  const walk = (effects: readonly AnyEffect[] | undefined, rate?: number): void => {
     for (const effect of effects ?? []) {
       const info = describeEffect(effect)
       if (!info) continue
       switch (info.kind) {
         case 'damage':
-        case 'burn': {
+        case 'burn':
+        case 'heal':
+        case 'shield': {
           if (!info.amount) break
-          const key = JSON.stringify([info.kind, info.amount])
+          // Only a heal is told for a second: a burn is already, a shield does not repeat, and the damage of a pulse is told as it is, for each.
+          const repeats = rate !== undefined && info.kind === 'heal'
+          const amount = repeats ? times(info.amount, rate) : info.amount
+          const key = JSON.stringify([info.kind, amount, repeats])
           if (told.has(key)) break
           told.add(key)
-          numbers.push({ kind: info.kind, amount: info.amount })
+          numbers.push({ kind: info.kind, amount, ...(repeats ? { perSecond: true as const } : {}) })
           break
         }
         case 'branch':
-          walk(info.then)
-          walk(info.otherwise)
+          walk(info.then, rate)
+          walk(info.otherwise, rate)
           break
         case 'spawn':
           if (visited.has(info.def)) break
           visited.add(info.def)
           walk(info.def.onHit)
           walk(info.def.onTick)
-          walk(info.def.onPulse)
+          walk(info.def.onPulse, info.def.pulseEveryTicks ? GAME_TPS / info.def.pulseEveryTicks : undefined)
           walk(info.def.onExpire)
           walk(info.def.pickup)
           break

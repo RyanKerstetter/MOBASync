@@ -11,7 +11,7 @@ import {
 import type { ItemTooltip, StatLine } from './shop.ts'
 
 // What the box over an ability on the HUD says, as plain data for the same box the items use (see `ItemTooltip`): its name and its key, a line on what it does,
-// the damage it does for the champion as it is now with what that is made of, and its cooldown with the haste taken off. The numbers are read from the
+// the damage it does (and the heal and the shield) for the champion as it is now with what that is made of, and its cooldown with the haste taken off. The numbers are read from the
 // ability itself (see `abilityNumbers`), so they are always the ability's own.
 
 // What the champion is now. `cooldownTicks` is the ability's whole cooldown with the champion's haste taken off, which the cooldown that is running was started at.
@@ -31,7 +31,7 @@ const RATIO_NAMES: Readonly<Record<'arcane' | 'attackDamage' | 'maxHealth' | 'he
   health: 'Health',
 }
 
-const KIND_LABELS = { damage: 'Damage', burn: 'Burn' } as const
+const KIND_LABELS = { damage: 'Damage', burn: 'Burn', heal: 'Heal', shield: 'Shield' } as const
 
 // 0.8 is "80%" and 0.06 is "6%".
 const percent = (ratio: number): string => `${Number((ratio * 100).toFixed(1))}%`
@@ -66,12 +66,12 @@ export function abilityTooltip(abilityId: string, input: AbilityTooltipInput): I
     health: input.health,
     level: input.level,
   }
-  const lines: StatLine[] = abilityNumbers(def).map(({ kind, amount }) => {
+  const lines: StatLine[] = abilityNumbers(def).map(({ kind, amount, perSecond }) => {
     const value = String(Math.round(amountValue(amount, caster)))
     const detail = amountFormula(amount)
     return {
       label: KIND_LABELS[kind],
-      value: kind === 'burn' ? `${value}/s` : value,
+      value: kind === 'burn' || perSecond ? `${value}/s` : value,
       ...(detail === undefined ? {} : { detail }),
     }
   })

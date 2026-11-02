@@ -8,6 +8,7 @@ import {
   type Champion,
 } from '../../../packages/shared/src/index.ts'
 import { createAbilityIcon, type AbilityIconUrl } from './ui/ability-icon.ts'
+import { element, requireElement } from './ui/dom.ts'
 
 export type SelectPlayer = { id: string; name: string; team?: number }
 export type SelectionEntry = { playerId: string; championId: string; locked: boolean }
@@ -45,9 +46,7 @@ type ChampionSelectOptions = {
 const abilityKeys = ['Q', 'W', 'E', 'R']
 
 function requiredElement<T extends HTMLElement>(root: HTMLElement, selector: string): T {
-  const element = root.querySelector<T>(selector)
-  if (!element) throw new Error(`The champion select page is missing the required element: ${selector}`)
-  return element
+  return requireElement<T>(root, selector, 'champion select')
 }
 
 function statRows(champion: Champion): Array<[string, string]> {
@@ -86,25 +85,16 @@ export function createChampionSelect({ root, abilityIconUrl, onPick, onLock, onB
   const cards = new Map<string, { button: HTMLButtonElement; picks: HTMLElement }>()
 
   for (const champion of champions.values()) {
-    const item = document.createElement('li')
-    const button = document.createElement('button')
+    const picks = element('span', 'champion-picks')
+    const button = element('button', 'champion-card', element('strong', '', champion.name), element('span', '', champion.description), picks)
     button.type = 'button'
-    button.className = 'champion-card'
-    const name = document.createElement('strong')
-    name.textContent = champion.name
-    const summary = document.createElement('span')
-    summary.textContent = champion.description
-    const picks = document.createElement('span')
-    picks.className = 'champion-picks'
-    button.append(name, summary, picks)
     button.addEventListener('click', () => {
       if (localLocked) return
       optimisticChampionId = champion.id
       render(lastState)
       onPick(champion.id)
     })
-    item.append(button)
-    grid.append(item)
+    grid.append(element('li', '', button))
     cards.set(champion.id, { button, picks })
   }
 
@@ -114,47 +104,21 @@ export function createChampionSelect({ root, abilityIconUrl, onPick, onLock, onB
   backButton.addEventListener('click', onBack)
 
   function renderDetails(champion: Champion): void {
-    details.replaceChildren()
-    const heading = document.createElement('h3')
-    heading.textContent = champion.name
-    const blurb = document.createElement('p')
-    blurb.textContent = champion.description
-
-    const stats = document.createElement('dl')
-    for (const [label, value] of statRows(champion)) {
-      const term = document.createElement('dt')
-      term.textContent = label
-      const definition = document.createElement('dd')
-      definition.textContent = value
-      stats.append(term, definition)
-    }
-
-    const abilityHeading = document.createElement('h4')
-    abilityHeading.textContent = 'Abilities'
-    const abilities = document.createElement('ul')
+    const stats = element('dl', '', ...statRows(champion).flatMap(([label, value]) => [element('dt', '', label), element('dd', '', value)]))
+    const abilities = element('ul')
     if (champion.passive) {
-      const item = document.createElement('li')
-      const name = document.createElement('strong')
-      name.textContent = 'P · Passive'
-      const detail = document.createElement('span')
-      detail.textContent = champion.passive
-      item.append(name, detail)
-      abilities.append(item)
+      abilities.append(element('li', '', element('strong', '', 'P · Passive'), element('span', '', champion.passive)))
     }
     champion.abilities.forEach((abilityId, slot) => {
-      const item = document.createElement('li')
-      const name = document.createElement('strong')
-      name.className = 'ability-title'
-      name.append(
+      const name = element(
+        'strong',
+        'ability-title',
         createAbilityIcon(abilityIconName(abilityId), abilityIconUrl),
-        document.createTextNode(`${abilityKeys[slot] ?? slot + 1} · ${abilityName({ id: abilityId, ...abilityDefs.get(abilityId) })}`),
+        `${abilityKeys[slot] ?? slot + 1} · ${abilityName({ id: abilityId, ...abilityDefs.get(abilityId) })}`,
       )
-      const detail = document.createElement('span')
-      detail.textContent = abilityDescription(abilityId)
-      item.append(name, detail)
-      abilities.append(item)
+      abilities.append(element('li', '', name, element('span', '', abilityDescription(abilityId))))
     })
-    details.append(heading, blurb, stats, abilityHeading, abilities)
+    details.replaceChildren(element('h3', '', champion.name), element('p', '', champion.description), stats, element('h4', '', 'Abilities'), abilities)
   }
 
   function render(state: ChampionSelectState): void {
@@ -188,29 +152,21 @@ export function createChampionSelect({ root, abilityIconUrl, onPick, onLock, onB
     // Who is picking what, a group for each team under a heading with its colour and name.
     playerList.replaceChildren()
     for (const group of groupPlayersByTeam(state.players)) {
-      const section = document.createElement('li')
-      section.className = 'team-group'
-      const members = document.createElement('ul')
+      const section = element('li', 'team-group')
       if (group.team !== undefined) {
         const team = getTeam(group.team)
-        const heading = document.createElement('span')
-        heading.className = 'team-heading'
-        const swatch = document.createElement('span')
-        swatch.className = 'team-swatch'
+        const swatch = element('span', 'team-swatch')
         swatch.style.background = team.color
         swatch.setAttribute('aria-hidden', 'true')
-        heading.append(swatch, document.createTextNode(`${team.name} team`))
-        section.append(heading)
+        section.append(element('span', 'team-heading', swatch, `${team.name} team`))
       }
-      for (const player of group.players) {
+      section.append(element('ul', '', ...group.players.map((player) => {
         const entry = entries.get(player.id)
         const championName = entry ? champions.get(entry.championId)?.name ?? entry.championId : 'Choosing'
-        const item = document.createElement('li')
-        item.textContent = `${player.name}${player.id === state.localPlayerId ? ' (you)' : ''} — ${championName}, ${entry?.locked ? 'locked in' : 'choosing'}`
+        const item = element('li', '', `${player.name}${player.id === state.localPlayerId ? ' (you)' : ''} — ${championName}, ${entry?.locked ? 'locked in' : 'choosing'}`)
         item.classList.toggle('is-locked', Boolean(entry?.locked))
-        members.append(item)
-      }
-      section.append(members)
+        return item
+      })))
       playerList.append(section)
     }
 

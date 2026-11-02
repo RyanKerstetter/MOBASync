@@ -1,4 +1,5 @@
 import { beyondMinCastRange, getAbilityDef, withinCastRange, type AbilityDef } from './abilities.js'
+import { clamp, directionTo, distanceBetween } from './geometry.js'
 import type { AiState, CastTarget, Vector2 } from './index.js'
 import type { Monster } from './monsters.js'
 
@@ -62,12 +63,6 @@ export type AiDecision = {
   reset: boolean
 }
 
-const distance = (left: Vector2, right: Vector2): number => {
-  const dx = right.x - left.x
-  const dy = right.y - left.y
-  return Math.sqrt(dx * dx + dy * dy)
-}
-
 // How far a monster has to walk to get from one place to another: the way round the walls, which is what a range means
 // to something that has to go there (Infinity if there is no way). It has to be a function of the walls, which never change
 // in a game, and nothing else, as the rest of `think` is. The straight line, which is the default, is the same with no walls.
@@ -78,13 +73,13 @@ export function think(
   body: AiBody,
   state: AiState,
   others: readonly AiOther[],
-  walk: WalkDistance = distance,
+  walk: WalkDistance = distanceBetween,
 ): AiDecision {
   const profile = monster.ai
   const enemies = others
     .filter((other) => other.alive && other.team !== body.team && other.id !== body.id)
     .sort((left, right) => left.id - right.id)
-  const fromHome = distance(body.position, body.home)
+  const fromHome = distanceBetween(body.position, body.home)
   const atHome = fromHome <= profile.homeRadius
 
   // How far it has to walk to someone, if that is within `range` (Infinity if it is not, and for a range that is nothing, which
@@ -93,7 +88,7 @@ export function think(
   // for each.
   const walked = new Map<number, number>()
   const walkTo = (enemy: AiOther, range: number): number => {
-    if (!(range > 0) || distance(body.position, enemy.position) > range) return Infinity
+    if (!(range > 0) || distanceBetween(body.position, enemy.position) > range) return Infinity
     let far = walked.get(enemy.id)
     if (far === undefined) {
       far = walk(body.position, enemy.position)
@@ -170,7 +165,7 @@ export function think(
 // The first of the monster's ability rules that can be cast at this target now.
 function chooseCast(monster: Monster, body: AiBody, target: AiOther): AiOrder | undefined {
   if (body.silenced) return undefined
-  const away = distance(body.position, target.position)
+  const away = distanceBetween(body.position, target.position)
   for (const rule of monster.ai.abilities) {
     const def = getAbilityDef(rule.abilityId)
     if (!def || !body.ready(def.id)) continue
@@ -186,21 +181,21 @@ function chooseCast(monster: Monster, body: AiBody, target: AiOther): AiOrder | 
 // direction is worked out with a square root and a division alone, so every peer gets the same bits; the
 // order a player's page sends is quantised for the same reason.
 export function aimAt(def: AbilityDef, from: Vector2, target: AiOther): CastTarget | undefined {
-  const away = distance(from, target.position)
+  const away = distanceBetween(from, target.position)
   switch (def.targeting) {
     case 'none':
       return { mode: 'none' }
     case 'unit':
       return withinCastRange(from, target.position, def.range) ? { mode: 'unit', unitId: target.id } : undefined
-    case 'direction':
-      return away === 0
-        ? undefined
-        : { mode: 'direction', dir: { x: (target.position.x - from.x) / away, y: (target.position.y - from.y) / away } }
+    case 'direction': {
+      const dir = directionTo(from, target.position)
+      return dir && { mode: 'direction', dir }
+    }
     case 'point': {
       // At the target, held between the nearest and the furthest the ability can be aimed.
       const minRange = def.minRange ?? 0
       if (away === 0) return minRange > 0 ? undefined : { mode: 'point', point: { ...target.position } }
-      const held = Math.max(minRange, Math.min(def.range, away))
+      const held = clamp(away, minRange, def.range)
       const scale = held / away
       const point = { x: from.x + (target.position.x - from.x) * scale, y: from.y + (target.position.y - from.y) * scale }
       return beyondMinCastRange(from, point, minRange) && withinCastRange(from, point, def.range)

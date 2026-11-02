@@ -1,5 +1,6 @@
 export type StatusFlags = {
   stunned: boolean
+  feared: boolean
   rooted: boolean
   silenced: boolean
   disarmed: boolean
@@ -9,12 +10,14 @@ export type StatusFlags = {
   slowed: boolean
   hasted: boolean
   dodging: boolean
+  invisible: boolean
 }
 
-// What is affecting a champion, as words, the most disabling first: stun, then root, then silence,
-// disarm, blind, burn, poison, slow, haste and dodge. A dead champion shows none.
+// What is affecting a champion, as words, the most disabling first: stun, then fear, root, silence,
+// disarm, blind, burn, poison, slow, haste, dodge and invisible. A dead champion shows none.
 const LABELS: Array<[flag: keyof StatusFlags, text: string]> = [
   ['stunned', 'stunned'],
+  ['feared', 'feared'],
   ['rooted', 'rooted'],
   ['silenced', 'silenced'],
   ['disarmed', 'disarmed'],
@@ -24,6 +27,7 @@ const LABELS: Array<[flag: keyof StatusFlags, text: string]> = [
   ['slowed', 'slowed'],
   ['hasted', 'hasted'],
   ['dodging', 'dodging'],
+  ['invisible', 'invisible'],
 ]
 
 export function statusLabels(character: StatusFlags & { dead: boolean }): string[] {

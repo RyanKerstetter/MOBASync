@@ -290,6 +290,7 @@ function readGameMap(id: string): GameMap {
       width: layout.terrain.width,
       height: layout.terrain.height,
       walls: layout.terrain.walls.length,
+      bushes: layout.terrain.bushes.length,
       monsters: layout.monsters.length,
       turrets: layout.turrets.length,
     })
@@ -486,6 +487,16 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
   }
   // Who a request is from, for what the log says about it.
   const nameOf = (sessionId: string): string | undefined => lobby.players.get(sessionId)?.name
+  // The answer to nearly every request: the lobby as it now is.
+  const reply = (status = 200, extra: Record<string, unknown> = {}): void => sendJson(response, status, { lobby: toPublicLobby(lobby), ...extra })
+  // How the leader sets up the next game, which can only be done before it starts (`refusal` says so once it has): the request's body and who sent it.
+  const leaderChange = async (refusal: string): Promise<{ body: Record<string, unknown>; sessionId: string }> => {
+    const body = await readJson(request)
+    const sessionId = requireBodySessionId(body)
+    requireLeader(lobby, sessionId)
+    if (lobby.game.status !== 'idle') throw new HttpError(409, refusal)
+    return { body, sessionId }
+  }
   if (isAction('join')) {
     const playerRequest = getPlayerRequest(await readJson(request))
     if (lobby.game.status !== 'idle') {
@@ -497,8 +508,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     }
     const player = upsertPlayer(lobby, playerRequest.sessionId, playerRequest.name)
     log.info(rejoining ? 'player rejoined' : 'player joined', { lobby: lobby.code, name: player.name, players: playerCount(lobby) })
-    sendJson(response, 200, { lobby: toPublicLobby(lobby), player })
-    return
+    return reply(200, { player })
   }
 
   // A player picks the team they will play on, until the game starts.
@@ -514,19 +524,13 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       throw new HttpError(409, `That team is full. A team holds at most ${GAME_MAX_TEAM_SIZE} players.`)
     }
     player.team = body.team
-    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
-    return
+    return reply()
   }
 
   // The leader picks the map the next game is played on, until the game starts. A mode the map has nothing for
   // is dropped for the fallback one (team deathmatch), since it could not be played.
   if (isAction('map')) {
-    const body = await readJson(request)
-    const sessionId = requireBodySessionId(body)
-    requireLeader(lobby, sessionId)
-    if (lobby.game.status !== 'idle') {
-      throw new HttpError(409, 'The map cannot be changed once the game is starting.')
-    }
+    const { body, sessionId } = await leaderChange('The map cannot be changed once the game is starting.')
     const map = isMapId(body.map) ? maps.get(body.map, { fresh: true }) : undefined
     if (!map) throw new HttpError(400, 'Pick a map from the list.')
     if (map.problem) throw new HttpError(409, `${map.name} cannot be played on: ${map.problem}`)
@@ -542,38 +546,26 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
         ...(lobby.mode !== before.mode ? { mode: lobby.mode, modeWas: before.mode } : {}),
       })
     }
-    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
-    return
+    return reply()
   }
 
   // The leader picks how the next game is played, until the game starts. The mode has to be one the map can be
   // played in.
   if (isAction('mode')) {
-    const body = await readJson(request)
-    const sessionId = requireBodySessionId(body)
-    requireLeader(lobby, sessionId)
-    if (lobby.game.status !== 'idle') {
-      throw new HttpError(409, 'The game mode cannot be changed once the game is starting.')
-    }
+    const { body, sessionId } = await leaderChange('The game mode cannot be changed once the game is starting.')
     if (!isGameMode(body.mode)) throw new HttpError(400, 'Pick a game mode from the list.')
     const map = maps.get(lobby.mapId)
     const problem = map ? modeSupportProblem(body.mode, map) : undefined
     if (problem) throw new HttpError(409, problem)
     if (lobby.mode !== body.mode) log.info('mode changed', { lobby: lobby.code, by: nameOf(sessionId), mode: body.mode, modeWas: lobby.mode })
     lobby.mode = body.mode
-    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
-    return
+    return reply()
   }
 
   // The leader sets the rules of the next game, until the game starts: how long a champion stays dead, and
   // the score a team wins at in each mode.
   if (isAction('rules')) {
-    const body = await readJson(request)
-    const sessionId = requireBodySessionId(body)
-    requireLeader(lobby, sessionId)
-    if (lobby.game.status !== 'idle') {
-      throw new HttpError(409, 'The rules cannot be changed once the game is starting.')
-    }
+    const { body, sessionId } = await leaderChange('The rules cannot be changed once the game is starting.')
     const read = readRulesChange(body)
     if ('problem' in read) throw new HttpError(400, read.problem)
     const before = lobby.rules
@@ -583,12 +575,12 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     if (lobby.rules.respawnSeconds !== before.respawnSeconds) changed.respawnSeconds = lobby.rules.respawnSeconds
     if (lobby.rules.captureSeconds !== before.captureSeconds) changed.captureSeconds = lobby.rules.captureSeconds
     if (lobby.rules.loseItemsOnDeath !== before.loseItemsOnDeath) changed.loseItemsOnDeath = lobby.rules.loseItemsOnDeath
+    if (lobby.rules.gold !== before.gold) changed.gold = lobby.rules.gold
     for (const mode of Object.keys(lobby.rules.scoreLimits) as GameMode[]) {
       if (lobby.rules.scoreLimits[mode] !== before.scoreLimits[mode]) changed[`${mode}Limit`] = lobby.rules.scoreLimits[mode]
     }
     if (Object.keys(changed).length > 0) log.info('rules changed', { lobby: lobby.code, by: nameOf(sessionId), ...changed })
-    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
-    return
+    return reply()
   }
 
   // A player goes back to the lobby from the game, leaving the others to play on. Nothing happens for one who
@@ -599,8 +591,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       log.info('player left game', { lobby: lobby.code, name: player.name, playersLeft: lobby.game.playingPlayerIds.length })
     }
     closeGameIfEmpty(lobby)
-    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
-    return
+    return reply()
   }
 
   // The leader ends the game for everyone, with the score as it stands (the team ahead wins, which is kept on
@@ -617,15 +608,11 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       announceResult(lobby, result, nameOf(sessionId))
       lobby.game.close()
     } else log.info('game closed', { lobby: lobby.code, reason: 'the leader closed it', by: nameOf(sessionId) })
-    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
-    return
+    return reply()
   }
 
   if (isAction('start')) {
-    const body = await readJson(request)
-    const sessionId = requireBodySessionId(body)
-    requireLeader(lobby, sessionId)
-    if (lobby.game.status !== 'idle') throw new HttpError(409, 'A game is already starting or running.')
+    const { sessionId } = await leaderChange('A game is already starting or running.')
     // The map is read again for every game, so what it has, and where teams start, is asked of the map as it is now.
     const map = readGameMap(lobby.mapId)
     const problem = lobby.game.modeProblem(lobby.players.values(), lobby.mode, map)
@@ -644,8 +631,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       map: lobby.mapId,
       players: describePlayers(lobby),
     })
-    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
-    return
+    return reply()
   }
 
   if (isAction('pick')) {
@@ -657,8 +643,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     if (!lobby.game.pickChampion(sessionId, body.championId)) {
       throw new HttpError(409, 'Your champion is locked in or champion select is not open.')
     }
-    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
-    return
+    return reply()
   }
 
   if (isAction('lock')) {
@@ -668,8 +653,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       throw new HttpError(409, 'Champion select is not open.')
     }
     beginGameWhenAllLocked(lobby)
-    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
-    return
+    return reply()
   }
 
   if (isAction('cancel-start')) {
@@ -687,8 +671,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     if (wasStarting) {
       emitToRoom(lobby.code, 'game:cancelled', { message: 'A player cancelled game start.' }, { reliable: true })
     }
-    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
-    return
+    return reply()
   }
 
   if (isAction('messages')) {
@@ -711,8 +694,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     })
     lobby.nextMessageId += 1
     if (lobby.messages.length > 100) lobby.messages.shift()
-    sendJson(response, 201, { lobby: toPublicLobby(lobby) })
-    return
+    return reply(201)
   }
 
   if (isAction('leader')) {
@@ -723,8 +705,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     if (!lobby.players.has(targetSessionId)) throw new HttpError(404, 'Player is no longer in this lobby.')
     lobby.leaderId = targetSessionId
     log.info('leader changed', { lobby: lobby.code, leader: nameOf(targetSessionId), by: nameOf(sessionId) })
-    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
-    return
+    return reply()
   }
 
   if (request.method === 'POST' && pathParts.length === 5 && pathParts[3] === 'players' && pathParts[4] === 'kick') {
@@ -737,23 +718,19 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       throw new HttpError(404, 'Player is no longer in this lobby.')
     }
     advanceGameStart(lobby)
-    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
-    return
+    return reply()
   }
 
   if (request.method === 'GET' && pathParts.length === 3) {
     requireMember(lobby, requireSessionId(url)).lastSeen = Date.now()
-    sendJson(response, 200, { lobby: toPublicLobby(lobby) })
-    return
+    return reply()
   }
 
   if (pathParts.length === 4 && pathParts[3] === 'player') {
     if (request.method === 'PATCH') {
       const playerRequest = getPlayerRequest(await readJson(request))
       requireMember(lobby, playerRequest.sessionId)
-      const player = upsertPlayer(lobby, playerRequest.sessionId, playerRequest.name)
-      sendJson(response, 200, { lobby: toPublicLobby(lobby), player })
-      return
+      return reply(200, { player: upsertPlayer(lobby, playerRequest.sessionId, playerRequest.name) })
     }
 
     if (request.method === 'DELETE') {

@@ -131,6 +131,24 @@ test('a jump across the map is not a walk, and a dead champion does not walk', (
   assert.equal(dying.update({ position: { x: 102, y: 100 }, dead: true, now: 16 }, clips)?.key, 'idle', 'with no dead clip, it stands')
 })
 
+test('coming back to life a short way from where it died is not a walk, and does not turn it round', () => {
+  // Nearer than the most a step can be (a respawn is a jump, however short: a monster that died near its post comes back at it), and to the left of where it died.
+  const died = { x: 300, y: 100 }
+  const back = { x: died.x - 66, y: died.y }
+  const animator = new CharacterAnimator()
+  animator.update({ position: died, dead: false, now: 0 }, clips)
+  // The frame it dies on can still be drawn gliding the last bit to where it fell, to the left here and more than a turn's worth: that does not turn it round.
+  animator.update({ position: { x: died.x - 2 * TURN_DISTANCE, y: died.y }, dead: true, now: 16 }, clips)
+  animator.update({ position: { x: died.x - 2 * TURN_DISTANCE, y: died.y }, dead: true, now: 32 }, clips)
+
+  const alive = animator.update({ position: back, dead: false, now: 48 }, clips)
+  assert.equal(alive?.key, 'idle', 'it stands up where it comes back, and does not walk')
+  assert.equal(alive?.facing, 1, 'facing the way it did')
+  assert.equal(animator.update({ position: back, dead: false, now: 64 }, clips)?.key, 'idle')
+  // And it walks again as soon as it moves.
+  assert.equal(animator.update({ position: { x: back.x - 2, y: back.y }, dead: false, now: 80 }, clips)?.key, 'walk')
+})
+
 const attack: AnimationClip = { frames: 4, fps: 12, loop: false, syncToAction: true }
 
 test('an attack clip is spread over the attack, so its last frame is the hit however long the windup', () => {

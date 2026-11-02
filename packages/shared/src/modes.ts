@@ -5,6 +5,7 @@ import {
   GAME_RESPAWN_TICKS,
   GAME_TPS,
 } from './constants.js'
+import { distanceBetween } from './geometry.js'
 import { rankTeams } from './spawns.js'
 import type { GameMode, HillArea, ModeSetup, ObjectiveState, Vector2 } from './index.js'
 
@@ -28,7 +29,9 @@ import type { GameMode, HillArea, ModeSetup, ObjectiveState, Vector2 } from './i
 //   It can also be played by one team alone, with nobody to beat: no team is ever the last standing, and the game ends only when its players have left.
 //
 // Only core destruction has an economy (`GameModeDef.economy`): experience and levels, gold and the shop, and shards. In the others a kill is a kill on
-// the scoreboard and nothing else: nobody levels, earns or buys, whatever they kill, and every champion is at level 1 all game.
+// the scoreboard and nothing else: nobody levels, earns or buys, whatever they kill, and every champion is at level 1 all game. The lobby can take the gold out of
+// core destruction (`LobbyRules.gold`): then a kill pays experience and nothing else, nobody starts with any, and there is no shop to spend it in, so the levels are
+// all that makes a champion stronger.
 //
 // How long a champion stays dead, and the score a team wins at, are the lobby leader's to set (`LobbyRules`).
 // They are part of what the game is played for (`ModeSetup`), so every peer respawns champions on the same
@@ -142,6 +145,8 @@ export type LobbyRules = {
   // Only core destruction has a use for it, the one mode with items: a champion that dies loses what it carries, but for what is in the slots it keeps
   // (`KEPT_ON_DEATH`, the pet). Its gold is kept, so it can buy again. Off by default.
   loseItemsOnDeath: boolean
+  // Only core destruction has a use for it too: whether a kill pays gold and there is a shop to spend it in. Off, the levels are all there is. On by default.
+  gold: boolean
   scoreLimits: Record<GameMode, number>
 }
 
@@ -154,6 +159,7 @@ export function defaultRules(): LobbyRules {
     respawnSeconds: RESPAWN_SECONDS.default,
     captureSeconds: CAPTURE_SECONDS.default,
     loseItemsOnDeath: false,
+    gold: true,
     scoreLimits: Object.fromEntries(GAME_MODES.map((mode) => [mode.id, mode.defaultLimit])) as Record<GameMode, number>,
   }
 }
@@ -163,6 +169,7 @@ export type RulesChange = {
   respawnSeconds?: number
   captureSeconds?: number
   loseItemsOnDeath?: boolean
+  gold?: boolean
   scoreLimits?: Partial<Record<GameMode, number>>
 }
 
@@ -190,6 +197,10 @@ export function readRulesChange(raw: unknown): { change: RulesChange } | { probl
     if (typeof body.loseItemsOnDeath !== 'boolean') return { problem: 'Losing items on death must be on or off.' }
     change.loseItemsOnDeath = body.loseItemsOnDeath
   }
+  if (body.gold !== undefined) {
+    if (typeof body.gold !== 'boolean') return { problem: 'Gold must be on or off.' }
+    change.gold = body.gold
+  }
   if (body.scoreLimits !== undefined) {
     const limits = typeof body.scoreLimits === 'object' && body.scoreLimits !== null ? body.scoreLimits as Record<string, unknown> : undefined
     if (!limits) return { problem: 'The score limits must say which mode each is for.' }
@@ -211,14 +222,16 @@ export function applyRulesChange(rules: LobbyRules, change: RulesChange): LobbyR
     respawnSeconds: change.respawnSeconds ?? rules.respawnSeconds,
     captureSeconds: change.captureSeconds ?? rules.captureSeconds,
     loseItemsOnDeath: change.loseItemsOnDeath ?? rules.loseItemsOnDeath,
+    gold: change.gold ?? rules.gold,
     scoreLimits: { ...rules.scoreLimits, ...change.scoreLimits },
   }
 }
 
 // What the simulator is given of the rules for a game of this mode: how many ticks a champion stays dead, the
 // score to win at if there is one, for king of the hill how many ticks it takes to fill the bar, and for core destruction
-// whether a death costs a champion its items. A rule that is off is not there, as one that does not apply to the mode is not.
-export type ModeRules = { respawnTicks?: number; scoreLimit?: number; captureTicks?: number; loseItemsOnDeath?: true }
+// whether a death costs a champion its items, and whether there is no gold. A rule that is off is not there, as one that does not apply to the mode is not (gold is on
+// unless it says `noGold`, so a game that is not told is as it always was).
+export type ModeRules = { respawnTicks?: number; scoreLimit?: number; captureTicks?: number; loseItemsOnDeath?: true; noGold?: true }
 
 export function modeRules(rules: LobbyRules, mode: GameMode): ModeRules {
   const limit = rules.scoreLimits[mode]
@@ -227,6 +240,8 @@ export function modeRules(rules: LobbyRules, mode: GameMode): ModeRules {
     ...(limit > 0 ? { scoreLimit: limit } : {}),
     ...(mode === 'koth' ? { captureTicks: rules.captureSeconds * GAME_TPS } : {}),
     ...(mode === 'core' && rules.loseItemsOnDeath ? { loseItemsOnDeath: true as const } : {}),
+    // Only a rules object that says so is without gold: one with no word of it is a game with gold.
+    ...(mode === 'core' && rules.gold === false ? { noGold: true as const } : {}),
   }
 }
 
@@ -319,6 +334,7 @@ export function createModeSetup(
       kind: 'core',
       teams: rankTeams(teams),
       ...(rules.loseItemsOnDeath ? { loseItemsOnDeath: true as const } : {}),
+      ...(rules.noGold ? { noGold: true as const } : {}),
       ...withRules,
     }
   }
@@ -566,7 +582,7 @@ function stepFlags(state: FlagsState, setups: readonly { team: number; home: Vec
     return flag.carrierId === undefined && home !== undefined && flag.position.x === home.x && flag.position.y === home.y
   }
   const touches = (unit: ObjectiveUnit, at: Vector2): boolean =>
-    Math.hypot(unit.position.x - at.x, unit.position.y - at.y) <= GAME_FLAG_RADIUS + unit.radius
+    distanceBetween(unit.position, at) <= GAME_FLAG_RADIUS + unit.radius
   const ordered = [...units].sort((left, right) => left.id - right.id)
   const living = ordered.filter((unit) => unit.alive)
 

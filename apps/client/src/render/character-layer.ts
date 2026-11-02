@@ -1,5 +1,5 @@
 import { Container, Graphics, Text, type RenderLayer } from 'pixi.js'
-import { getTeam } from '../../../../packages/shared/src/index.ts'
+import { clamp, getTeam } from '../../../../packages/shared/src/index.ts'
 import { CharacterSprite, teamVariant, type LoadedSpriteSet, type SheetPainter } from '../character-sprite.ts'
 import type { RenderedCharacter } from '../game-state.ts'
 import { ATTACK_BAR_HEIGHT, attackBarTop, meterBarTop, METER_BAR_HEIGHT } from './bar-layout.ts'
@@ -35,6 +35,9 @@ type Actor = {
   meterBar: Graphics
   cooldownBar: Graphics
 }
+
+// How faint a champion is drawn while it is invisible, to those who can see it.
+export const INVISIBLE_ALPHA = 0.4
 
 // The health bar over each champion, in world units. A tick marks every HEALTH_TICK_EVERY health,
 // and a bigger one every HEALTH_MAJOR_TICK_EVERY.
@@ -118,7 +121,8 @@ export class CharacterLayer {
       actor.overlay.position.set(character.position.x, character.position.y)
       // A death leaves no bars until the respawn: a faint ghost for a circle, and for a sprite its
       // death animation at full strength, ending lying down.
-      actor.node.alpha = actor.overlay.alpha = character.dead && !actor.sprite ? 0.25 : 1
+      // An invisible one that is drawn at all (its own team sees it, an enemy does not: see `TeamVision`) is drawn faintly.
+      actor.node.alpha = actor.overlay.alpha = character.dead && !actor.sprite ? 0.25 : character.invisible ? INVISIBLE_ALPHA : 1
       actor.healthBar.visible = !character.dead
       actor.label.position.set(0, -above - 25)
       drawHealthBar(actor.healthBar, -above - 20, {
@@ -295,7 +299,7 @@ function drawBar(graphics: Graphics, y: number, fraction: number, fillColor: str
   graphics.clear()
     .rect(-width / 2, y, width, height)
     .fill({ color: '#101827' })
-    .rect(-width / 2, y, width * Math.max(0, Math.min(1, fraction)), height)
+    .rect(-width / 2, y, width * clamp(fraction, 0, 1), height)
     .fill({ color: fillColor })
 }
 

@@ -1,4 +1,5 @@
 import { getGameMode, getTeam, type GameResult } from '../../../../packages/shared/src/index.ts'
+import { element } from './dom.ts'
 import { resultHeadline } from './results.ts'
 
 type ResultsOptions = {
@@ -9,29 +10,19 @@ type ResultsOptions = {
 // The screen over the game when it is over: the result in big words, how each team scored, how each player
 // did, and the way back to the lobby. The game behind it stops taking orders (see `game.ts`).
 export function createResultsView(container: HTMLElement, { onReturn }: ResultsOptions) {
-  const root = document.createElement('div')
-  root.className = 'game-results'
-  root.hidden = true
-  const panel = document.createElement('div')
-  panel.className = 'results-panel'
+  const title = element('h2', 'results-title')
+  const subtitle = element('p', 'results-subtitle')
+  const teams = element('ol', 'results-teams')
+  teams.setAttribute('aria-label', 'Team scores')
+  const players = element('table', 'results-players')
+  const back = element('button', 'results-return', 'Return to lobby')
+  back.type = 'button'
+  back.addEventListener('click', onReturn)
+  const panel = element('div', 'results-panel', title, subtitle, teams, players, back)
   panel.setAttribute('role', 'dialog')
   panel.setAttribute('aria-label', 'Game results')
-  const title = document.createElement('h2')
-  title.className = 'results-title'
-  const subtitle = document.createElement('p')
-  subtitle.className = 'results-subtitle'
-  const teams = document.createElement('ol')
-  teams.className = 'results-teams'
-  teams.setAttribute('aria-label', 'Team scores')
-  const players = document.createElement('table')
-  players.className = 'results-players'
-  const back = document.createElement('button')
-  back.type = 'button'
-  back.className = 'results-return'
-  back.textContent = 'Return to lobby'
-  back.addEventListener('click', onReturn)
-  panel.append(title, subtitle, teams, players, back)
-  root.append(panel)
+  const root = element('div', 'game-results', panel)
+  root.hidden = true
   container.appendChild(root)
 
   return {
@@ -45,43 +36,24 @@ export function createResultsView(container: HTMLElement, { onReturn }: ResultsO
       subtitle.textContent = headline.subtitle
       const scoreName = getGameMode(result.mode).scoreName
       teams.replaceChildren(...result.teams.map(({ team, score }) => {
-        const item = document.createElement('li')
+        const swatch = element('span', 'results-swatch')
+        swatch.setAttribute('aria-hidden', 'true')
+        const points = element('span', 'results-score', String(score))
+        points.title = scoreName
+        const item = element('li', '', swatch, element('span', 'results-team', getTeam(team).name), points)
         item.classList.toggle('is-winner', team === result.winner)
         item.classList.toggle('is-local', team === localTeam)
         item.style.setProperty('--team-color', getTeam(team).color)
-        const swatch = document.createElement('span')
-        swatch.className = 'results-swatch'
-        swatch.setAttribute('aria-hidden', 'true')
-        const name = document.createElement('span')
-        name.className = 'results-team'
-        name.textContent = getTeam(team).name
-        const points = document.createElement('span')
-        points.className = 'results-score'
-        points.textContent = String(score)
-        points.title = scoreName
-        item.append(swatch, name, points)
         return item
       }))
-      const head = document.createElement('thead')
-      const headRow = document.createElement('tr')
-      for (const text of ['Player', 'Kills']) {
-        const cell = document.createElement('th')
-        cell.textContent = text
-        headRow.append(cell)
-      }
-      head.append(headRow)
-      const body = document.createElement('tbody')
-      for (const player of result.players) {
-        const row = document.createElement('tr')
-        row.classList.toggle('has-left', player.left === true)
-        const name = document.createElement('td')
-        name.textContent = player.left ? `${player.name} (left)` : player.name
+      const head = element('thead', '', element('tr', '', ...['Player', 'Kills'].map((text) => element('th', '', text))))
+      const body = element('tbody', '', ...result.players.map((player) => {
+        const name = element('td', '', player.left ? `${player.name} (left)` : player.name)
         name.style.color = getTeam(player.team).color
-        const kills = document.createElement('td')
-        kills.textContent = String(player.kills)
-        row.append(name, kills)
-        body.append(row)
-      }
+        const row = element('tr', '', name, element('td', '', String(player.kills)))
+        row.classList.toggle('has-left', player.left === true)
+        return row
+      }))
       players.replaceChildren(head, body)
       root.hidden = false
     },

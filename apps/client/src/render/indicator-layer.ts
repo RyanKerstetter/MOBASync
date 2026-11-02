@@ -6,11 +6,18 @@ import type { CastPreview, RenderedCharacter } from '../game-state.ts'
 // A ground target whose ability gives no indicator size is marked with a small ring this big.
 const CAST_INDICATOR_MARKER_RADIUS = 6
 
+// The colour of the ring on an enemy that an ability aimed at it would walk up to before casting.
+export const OUT_OF_REACH_COLOR = '#ffb347'
+
+// The colour of the ring that shows what an invisible champion's being seen will reach.
+export const REVEAL_RING_COLOR = '#8e6bd9'
+
 export type IndicatorInput = {
   characters: readonly RenderedCharacter[]
   // Where the controlled champion is drawn, and how far its attack reaches. Absent while it is dead
-  // or not in the game, when there is no ring to draw.
-  local?: { position: Vector2; attackRange: number }
+  // or not in the game, when there is no ring to draw. With `revealRadius`, it is invisible, and what it does on being seen reaches this far round it
+  // (see `ChampionDef.leaveInvisibilityRadius`), which is drawn as a ring whatever the graphics menu says: it is not scenery but what the champion is about to do.
+  local?: { position: Vector2; attackRange: number; revealRadius?: number }
   // Whether to draw the ring round the controlled champion that shows how far its attacks reach (the graphics menu). It is drawn unless this says not.
   showAttackRange?: boolean
   // What the ability being aimed would do if its key were let go now.
@@ -29,11 +36,14 @@ export class IndicatorLayer {
   private readonly castIndicator = new Graphics()
   private readonly attackMarkers = new Graphics()
   private readonly selection = new Graphics()
+  // How far what an invisible champion does on being seen reaches, round it: after the others, so they keep their places in the layer.
+  private readonly revealRing = new Graphics()
 
   constructor() {
     this.attackRange.alpha = 0.3
     this.attackRange.visible = false
-    this.view.addChild(this.attackRange, this.castIndicator, this.attackMarkers, this.selection)
+    this.revealRing.visible = false
+    this.view.addChild(this.attackRange, this.castIndicator, this.attackMarkers, this.selection, this.revealRing)
   }
 
   update(input: IndicatorInput): void {
@@ -48,6 +58,19 @@ export class IndicatorLayer {
     this.drawCastIndicator(input.castPreview, input.local?.position, input.characters)
     this.drawAttackMarkers(input.attackMarkers, input.characters)
     this.drawSelection(input.selectedId, input.characters)
+    this.drawRevealRing(input.local)
+  }
+
+  // A violet ring, the colour of the mark that a fear leaves, as far out as the champion's reach on being seen, filled faintly so it reads as the ground it covers.
+  private drawRevealRing(local: IndicatorInput['local']): void {
+    this.revealRing.clear()
+    const radius = local?.revealRadius
+    this.revealRing.visible = local !== undefined && radius !== undefined
+    if (!local || radius === undefined) return
+    this.revealRing
+      .circle(local.position.x, local.position.y, radius)
+      .fill({ color: REVEAL_RING_COLOR, alpha: 0.08 })
+      .stroke({ color: REVEAL_RING_COLOR, width: 2, alpha: 0.7 })
   }
 
   // A pale ring just outside the body, so which one the panel is about can be told at a glance.
@@ -85,6 +108,18 @@ export class IndicatorLayer {
       // The band is as wide as what the ability fires; the line down its middle is the aim.
       const width = preview.indicator?.width
       if (width) indicator.moveTo(from.x, from.y).lineTo(end.x, end.y).stroke({ color, width, alpha: 0.18 })
+      // A cone (a spread of knives) is a wedge, from the caster out to the ability's range, opening by twice its half angle.
+      const half = preview.indicator?.coneHalfAngle
+      if (half && preview.range > 0) {
+        const heading = Math.atan2(target.dir.y, target.dir.x)
+        indicator
+          .moveTo(from.x, from.y)
+          .lineTo(from.x + Math.cos(heading - half) * preview.range, from.y + Math.sin(heading - half) * preview.range)
+          .arc(from.x, from.y, preview.range, heading - half, heading + half)
+          .closePath()
+          .fill({ color, alpha: 0.18 })
+          .stroke({ color, width: 2, alpha: 0.6 })
+      }
       indicator.moveTo(from.x, from.y).lineTo(end.x, end.y).stroke({ color, width: 2, alpha: 0.7 })
     } else if (target?.mode === 'point') {
       // A dash is drawn as the way it will go, a line from the caster to the point, as well as the point.
@@ -110,11 +145,11 @@ export class IndicatorLayer {
       }
     } else if (target?.mode === 'unit') {
       const unit = characters.find((character) => character.id === target.unitId)
-      // Red when the enemy is past the ability's reach, so the ring tells whether it will cast.
+      // Amber when the enemy is past the ability's reach, so the ring tells whether it will cast at once or walk up to the enemy first.
       if (unit) {
         indicator
           .circle(unit.position.x, unit.position.y, unit.champion.radius + 7)
-          .stroke({ color: preview.outOfRange ? '#ff6b6b' : color, width: 3, alpha: 0.9 })
+          .stroke({ color: preview.outOfRange ? OUT_OF_REACH_COLOR : color, width: 3, alpha: 0.9 })
       }
     }
   }

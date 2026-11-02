@@ -2,7 +2,16 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { CastControl, DEFAULT_CAST_MODE } from '../apps/client/src/cast-control.ts'
 import { CAST_MODE_LABELS, EFFECT_LABELS, menuFooter, menuTabs, type MenuItem, type MenuTab } from '../apps/client/src/game-menu.ts'
-import { DEFAULT_SETTINGS, loadSettings, saveSettings, type GameSettings } from '../apps/client/src/game-settings.ts'
+import {
+  CLICK_RADIUS_STEP,
+  DEFAULT_CLICK_RADIUS,
+  DEFAULT_SETTINGS,
+  loadSettings,
+  MAX_CLICK_RADIUS,
+  readClickRadius,
+  saveSettings,
+  type GameSettings,
+} from '../apps/client/src/game-settings.ts'
 import { DEFAULT_EFFECTS, EFFECT_KEYS, readEffects } from '../apps/client/src/render/effect-settings.ts'
 
 function fakeStorage(initial?: string) {
@@ -17,10 +26,12 @@ function fakeStorage(initial?: string) {
 
 // A menu made over a state the tests can see: what the game would hold, and what the menu has been asked to do to it.
 function harness(extra: { sprites?: { pickFolder: () => void; reset: () => void } } = {}) {
-  const state = { castMode: DEFAULT_CAST_MODE, effects: { ...DEFAULT_EFFECTS }, debugView: false, diagnostics: true }
+  const state = { castMode: DEFAULT_CAST_MODE, clickRadius: DEFAULT_CLICK_RADIUS, effects: { ...DEFAULT_EFFECTS }, debugView: false, diagnostics: true }
   const tabs = menuTabs({
     getCastMode: () => state.castMode,
     setCastMode: (mode) => { state.castMode = mode },
+    getClickRadius: () => state.clickRadius,
+    setClickRadius: (radius) => { state.clickRadius = radius },
     getEffect: (effect) => state.effects[effect],
     setEffect: (effect, on) => { state.effects[effect] = on },
     getDebugView: () => state.debugView,
@@ -35,6 +46,8 @@ const tabOf = (tabs: readonly MenuTab[], id: string): MenuTab => tabs.find((tab)
 const itemsOf = (tab: MenuTab): MenuItem[] => tab.sections.flatMap((section) => section.items)
 type Toggle = Extract<MenuItem, { kind: 'toggle' }>
 const toggles = (tab: MenuTab): Toggle[] => itemsOf(tab).filter((item): item is Toggle => item.kind === 'toggle')
+type Choice = Extract<MenuItem, { kind: 'choice' }>
+type Slider = Extract<MenuItem, { kind: 'slider' }>
 
 // ---------------------------------------------------------------------------- the tabs
 
@@ -88,26 +101,46 @@ test('a switch shows whether its effect is on, and turning it sets that effect a
 
 // ---------------------------------------------------------------------------- controls
 
+test('the Controls tab has the casting and the targeting, in sections of their own', () => {
+  const { tabs } = harness()
+  assert.deepEqual(tabOf(tabs, 'controls').sections.map((section) => section.title), ['Casting', 'Targeting'])
+})
+
 test('the cast mode is on the Controls tab as a choice of every mode, with the current one selected', () => {
   const { tabs } = harness()
-  const [castMode, ...rest] = itemsOf(tabOf(tabs, 'controls'))
-  assert.equal(rest.length, 0, 'it is the only control so far')
-  assert.equal(castMode.kind, 'choice')
-  assert.equal(castMode.kind === 'choice' && castMode.label, 'Cast mode')
-  assert.deepEqual(
-    castMode.kind === 'choice' ? castMode.options.map((option) => option.value) : [],
-    Object.keys(CAST_MODE_LABELS),
-    'one option for every cast mode there is',
-  )
-  assert.equal(castMode.kind === 'choice' && castMode.get(), DEFAULT_CAST_MODE)
+  const controls = itemsOf(tabOf(tabs, 'controls'))
+  const choices = controls.filter((item): item is Choice => item.kind === 'choice')
+  assert.equal(choices.length, 1, 'the only choice')
+  const [castMode] = choices
+  assert.equal(castMode.label, 'Cast mode')
+  assert.deepEqual(castMode.options.map((option) => option.value), Object.keys(CAST_MODE_LABELS), 'one option for every cast mode there is')
+  assert.equal(castMode.get(), DEFAULT_CAST_MODE)
 })
 
 test('choosing a cast mode in the menu sets it', () => {
   const { state, tabs } = harness()
-  const [castMode] = itemsOf(tabOf(tabs, 'controls'))
-  if (castMode.kind === 'choice') castMode.set('quick')
+  const castMode = itemsOf(tabOf(tabs, 'controls')).find((item): item is Choice => item.kind === 'choice') as Choice
+  castMode.set('quick')
   assert.equal(state.castMode, 'quick')
-  assert.equal(castMode.kind === 'choice' && castMode.get(), 'quick', 'and the menu shows it')
+  assert.equal(castMode.get(), 'quick', 'and the menu shows it')
+})
+
+test('the click radius is a slider on the Controls tab from none to the most, saying what it does and starting at the default', () => {
+  const { state, tabs } = harness()
+  const sliders = itemsOf(tabOf(tabs, 'controls')).filter((item): item is Slider => item.kind === 'slider')
+  assert.equal(sliders.length, 1)
+  const [radius] = sliders
+  assert.equal(radius.label, 'Click radius')
+  assert.deepEqual([radius.min, radius.max, radius.step, radius.unit], [0, MAX_CLICK_RADIUS, CLICK_RADIUS_STEP, 'px'])
+  assert.ok((radius.description ?? '').length > 0 && (radius.description ?? '').length < 100, 'a line on what it does')
+  assert.equal(radius.get(), state.clickRadius)
+  assert.equal(radius.get(), DEFAULT_CLICK_RADIUS)
+
+  radius.set(MAX_CLICK_RADIUS)
+  assert.equal(state.clickRadius, MAX_CLICK_RADIUS)
+  assert.equal(radius.get(), MAX_CLICK_RADIUS, 'and the menu shows it')
+  assert.ok(DEFAULT_CLICK_RADIUS >= radius.min && DEFAULT_CLICK_RADIUS <= radius.max, 'the default is one the slider can show')
+  assert.equal((MAX_CLICK_RADIUS - radius.min) % radius.step, 0, 'and the most is a step it can land on')
 })
 
 test('changing the cast mode takes effect from the next key press and drops an aim in progress', () => {
@@ -154,7 +187,12 @@ test('settings are kept, and a missing, damaged or odd stored value is the defau
   const storage = fakeStorage()
   assert.deepEqual(loadSettings(storage), DEFAULT_SETTINGS, 'nothing stored')
 
-  const chosen: GameSettings = { castMode: 'quick', effects: { turretRanges: false, selfAttackRange: true, shopGlow: false }, diagnostics: false }
+  const chosen: GameSettings = {
+    castMode: 'quick',
+    effects: { turretRanges: false, selfAttackRange: true, shopGlow: false },
+    clickRadius: DEFAULT_CLICK_RADIUS + CLICK_RADIUS_STEP,
+    diagnostics: false,
+  }
   saveSettings(chosen, storage)
   assert.deepEqual(loadSettings(storage), chosen, 'what was saved comes back')
 
@@ -165,8 +203,8 @@ test('settings are kept, and a missing, damaged or odd stored value is the defau
   assert.deepEqual(loadSettings(undefined), DEFAULT_SETTINGS, 'and with no storage at all')
 })
 
-test('every effect is on by default, and each stored value is read alone: a damaged one costs only itself', () => {
-  for (const effect of EFFECT_KEYS) assert.equal(DEFAULT_EFFECTS[effect], true, `${effect} is on until it is turned off`)
+test('every effect is off by default, and each stored value is read alone: a damaged one costs only itself', () => {
+  for (const effect of EFFECT_KEYS) assert.equal(DEFAULT_EFFECTS[effect], false, `${effect} is off until it is turned on`)
   assert.deepEqual(readEffects(undefined), DEFAULT_EFFECTS)
   assert.deepEqual(readEffects('on'), DEFAULT_EFFECTS)
   assert.deepEqual(readEffects(null), DEFAULT_EFFECTS)
@@ -197,6 +235,21 @@ test('the settings that come back are the player\'s own copy: changing them neve
 test('a settings file from before the effects were added keeps its cast mode and has every effect on', () => {
   const older = loadSettings(fakeStorage('{"castMode":"quick"}'))
   assert.deepEqual(older, { ...DEFAULT_SETTINGS, castMode: 'quick' })
+})
+
+test('the click radius is kept whole and between none and the most, and anything that is not a number is the default', () => {
+  assert.equal(readClickRadius(0), 0, 'none is a choice')
+  assert.equal(readClickRadius(MAX_CLICK_RADIUS), MAX_CLICK_RADIUS)
+  assert.equal(readClickRadius(DEFAULT_CLICK_RADIUS + 0.4), DEFAULT_CLICK_RADIUS, 'rounded to whole pixels')
+  assert.equal(readClickRadius(-5), 0, 'not below none')
+  assert.equal(readClickRadius(MAX_CLICK_RADIUS + 500), MAX_CLICK_RADIUS, 'nor above the most')
+  for (const odd of [undefined, null, '12', Number.NaN, Number.POSITIVE_INFINITY, [3], { value: 3 }]) {
+    assert.equal(readClickRadius(odd), DEFAULT_CLICK_RADIUS, `${JSON.stringify(odd)} is not an answer`)
+  }
+  // And it is read alone: a damaged one costs only itself.
+  const older = loadSettings(fakeStorage('{"castMode":"quick","clickRadius":"wide"}'))
+  assert.deepEqual(older, { ...DEFAULT_SETTINGS, castMode: 'quick' })
+  assert.equal(loadSettings(fakeStorage('{"clickRadius":0}')).clickRadius, 0, 'and none, which is falsy, is kept')
 })
 
 test('storage that refuses to save does not stop the game', () => {

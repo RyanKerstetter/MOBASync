@@ -72,6 +72,17 @@ const wall = (x: number, y: number, width: number, height: number, extra: Record
   ...extra,
 })
 // Every spawn point a map needs, in the arena at map pixels (slot * 20, number * 20) from its corner.
+// A bush in map pixels from the arena's corner.
+const bush = (x: number, y: number, width: number, height: number, extra: Record<string, unknown> = {}) => ({
+  id: nextId++,
+  name: '',
+  type: 'bush',
+  x: ARENA_AT.x + x,
+  y: ARENA_AT.y + y,
+  width,
+  height,
+  ...extra,
+})
 const allSpawns = () => Array.from({ length: GAME_MAX_PLAYERS }, (_, slot) =>
   Array.from({ length: spawnPointsNeeded(slot + 1) }, (_, place) =>
     spawn(slot + 1, place + 1, ARENA_AT.x + (slot + 1) * 20, ARENA_AT.y + (place + 1) * 20))).flat()
@@ -192,6 +203,60 @@ test('a wall that is not a plain rectangle is not played on', () => {
   ]) {
     assert.match(problemsOf(mapWith([arena(), ...allSpawns(), crooked])), /wall object \d+ is not a plain rectangle/)
   }
+})
+
+// A distance in map pixels, as world units once drawn: each edge is rounded to a whole unit, so a size is the difference of two rounded edges.
+const world = (pixels: number): number => Math.round(pixels * GAME_ART_SCALE)
+
+test('bushes are read in world units from the corner of the arena, and stop nothing', () => {
+  const layout = readMapLayout(mapWith([arena(), ...allSpawns(), bush(600, 300, 40, 30), bush(100.2, 200.4, 50, 50)]))
+  assert.deepEqual(layout.terrain.bushes, [
+    { x: world(100.2), y: world(200.4), width: world(150.2) - world(100.2), height: world(250.4) - world(200.4) },
+    { x: world(600), y: world(300), width: world(640) - world(600), height: world(330) - world(300) },
+  ].sort((left, right) => left.y - right.y || left.x - right.x), 'in the ground\'s fixed order')
+  assert.equal(layout.terrain.walls.length, 0, 'they are not walls')
+  const inside = { x: world(620), y: world(315) }
+  assert.deepEqual(layout.terrain.resolve(inside, 20), inside, 'a champion can stand in one')
+  assert.equal(layout.terrain.bushAt(inside) !== undefined, true)
+  assert.deepEqual(layout.terrain.path({ x: world(580), y: world(315) }, { x: world(660), y: world(315) }, 20), [{ x: world(660), y: world(315) }], 'and walks straight through')
+})
+
+test('a map with no bushes has none, and the ground it sends is as it was', () => {
+  const layout = readMapLayout(mapWith([arena(), ...allSpawns(), wall(600, 300, 40, 30)]))
+  assert.deepEqual(layout.terrain.bushes, [])
+  assert.equal('bushes' in layout.terrain.toData(), false)
+})
+
+test('a bush the arena does not reach is left out, and one that crosses its edge stays', () => {
+  const layout = readMapLayout(mapWith([
+    arena(), ...allSpawns(),
+    bush(900, 100, 50, 50),
+    bush(-80, 100, 50, 50),
+    bush(750, 300, 100, 50),
+  ]))
+  assert.deepEqual(layout.terrain.bushes, [{ x: world(750), y: world(300), width: world(850) - world(750), height: world(350) - world(300) }])
+})
+
+test('a bush too small to have a size once drawn is left out, as a snapshot\'s rectangles have one', () => {
+  const layout = readMapLayout(mapWith([arena(), ...allSpawns(), bush(600, 300, 0.1, 30), bush(600, 300, 40, 0.1)]))
+  assert.deepEqual(layout.terrain.bushes, [])
+})
+
+test('a bush that is not a plain rectangle is not played on', () => {
+  for (const crooked of [
+    bush(600, 300, 40, 30, { rotation: 15 }),
+    bush(600, 300, 40, 30, { polygon: [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 0, y: 30 }] }),
+    bush(600, 300, 40, 30, { ellipse: true }),
+    bush(600, 300, 0, 0, { point: true }),
+    bush(600, 300, 0, 30),
+  ]) {
+    assert.match(problemsOf(mapWith([arena(), ...allSpawns(), crooked])), /bush object \d+ is not a plain rectangle/)
+  }
+})
+
+test('a bush can be written with the class, as Tiled saves it now, as well as the type', () => {
+  const asClass = { ...bush(600, 300, 40, 30), type: undefined, class: 'bush' }
+  assert.equal(readMapLayout(mapWith([arena(), ...allSpawns(), asClass])).terrain.bushes.length, 1)
 })
 
 test('a spawn point that is not right says which one and what is wrong', () => {

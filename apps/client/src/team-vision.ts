@@ -4,6 +4,7 @@ import {
   DEFAULT_VISION_SYSTEM,
   GAME_VISION_RANGE,
   visionSystems,
+  type Terrain,
   type VisionGround,
   type VisionMask,
   type VisionSystem,
@@ -11,11 +12,18 @@ import {
 } from '../../../packages/shared/src/index.ts'
 import type { RenderedCharacter, RenderedEntity } from './game-state.ts'
 
+// The bushes of the ground, which is all that `TeamVision` asks of it for them: a `Terrain` is one.
+export type Bushes = Pick<Terrain, 'bushAt'>
+
 // What the local player's team sees, and so what the page shows: from where its living champions are drawn, a vision
 // system (see vision.ts in shared) works out what they see together, and what is not seen is darkened (`FogLayer`) and
 // what stands in it is left out: an enemy, a monster or a shot is only drawn where the team can see it. The team's own
 // champions, turrets and core, and what they have put out, are always drawn. Anyone is seen where they are touching the light: a body counts
 // as seen if its middle, or any furthest point of it, is.
+//
+// A bush is the one place the light does not show: whoever stands in one (their middle in it) is hidden from every team that has no living
+// champion in the same bush, however near and however well lit. The team's own, and a turret or a core, are never hidden by one. What is shot
+// across a bush is still seen, as it is only a body that stands in one that is hidden.
 //
 // There is no darkness, and everything is drawn, when there is no system (`?vision=off`), when the debug view is on, and
 // when the team has no one alive to see from (a player who is dead sees the whole game, until they are back).
@@ -26,8 +34,13 @@ export class TeamVision {
   private view: VisionView | undefined
   private team: number | undefined
   private readonly teamOf = new Map<number, number>()
+  // The bushes that someone of the team is standing in (see `Terrain.bushAt`), which the team sees into.
+  private readonly occupied = new Set<number>()
 
-  constructor(private readonly system: VisionSystem | undefined) {}
+  constructor(
+    private readonly system: VisionSystem | undefined,
+    private readonly bushes?: Bushes,
+  ) {}
 
   // The name of the system, or "off".
   get name(): string {
@@ -39,6 +52,7 @@ export class TeamVision {
     this.team = localTeam
     this.view = undefined
     this.teamOf.clear()
+    this.occupied.clear()
     for (const character of characters) this.teamOf.set(character.id, character.team)
     if (!this.system || options.reveal || localTeam === undefined) return
     // The team looks from its living champions and from its standing turrets (its core is one), each as far as its own range: a champion's is
@@ -46,6 +60,12 @@ export class TeamVision {
     // they add to what a team sees, and are not what keeps it from seeing nothing.
     const alive = characters.filter((character) => character.team === localTeam && !character.dead)
     if (!alive.some((character) => !character.turret)) return
+    if (this.bushes) {
+      for (const character of alive) {
+        const bush = this.bushes.bushAt(character.position)
+        if (bush !== undefined) this.occupied.add(bush)
+      }
+    }
     this.view = this.system.see(alive.map((character) => ({
       position: character.position,
       range: character.turret?.visionRange ?? GAME_VISION_RANGE,
@@ -58,7 +78,17 @@ export class TeamVision {
   }
 
   isVisible(character: RenderedCharacter): boolean {
-    return !this.view || character.team === this.team || canSeeBody(this.view, character.position, character.champion.radius)
+    if (!this.view || character.team === this.team) return true
+    // An enemy that is invisible is not seen, however near: it is what the status is.
+    if (character.invisible) return false
+    if (!character.turret && this.isHiddenByBush(character.position)) return false
+    return canSeeBody(this.view, character.position, character.champion.radius)
+  }
+
+  // Whether a body whose middle is here is in a bush that none of the team is in.
+  private isHiddenByBush(position: { x: number; y: number }): boolean {
+    const bush = this.bushes?.bushAt(position)
+    return bush !== undefined && !this.occupied.has(bush)
   }
 
   isEntityVisible(entity: RenderedEntity): boolean {
@@ -91,12 +121,14 @@ export function visionNameFromSearch(search: string): string {
 
 // The team's vision on this ground, with the system the address asks for. One it does not have is said in the console and
 // the default used, so a typo is not a game with no vision.
-export function createTeamVision(ground: VisionGround, search = ''): TeamVision {
+// The ground is a `Terrain` in a game, and its bushes hide what stands in them; a ground that is only the size and the walls has none.
+export function createTeamVision(ground: VisionGround & Partial<Bushes>, search = ''): TeamVision {
   const name = visionNameFromSearch(search)
-  if (name === 'off') return new TeamVision(undefined)
+  const bushes = ground.bushAt ? (ground as Bushes) : undefined
+  if (name === 'off') return new TeamVision(undefined, bushes)
   if (!visionSystems.has(name)) {
     console.warn(`There is no vision system called "${name}" (there are ${[...visionSystems.keys()].join(', ')}, and off), so "${DEFAULT_VISION_SYSTEM}" is used.`)
-    return new TeamVision(createVision(ground))
+    return new TeamVision(createVision(ground), bushes)
   }
-  return new TeamVision(createVision(ground, name))
+  return new TeamVision(createVision(ground, name), bushes)
 }

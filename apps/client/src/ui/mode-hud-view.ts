@@ -1,4 +1,5 @@
 import { getTeam } from '../../../../packages/shared/src/index.ts'
+import { element } from './dom.ts'
 import { coreHint, coreReadout, flagHint, flagReadout, hillReadout, modeTitle, type CoreView, type FlagView, type ModeView, type TeamScore } from './mode-hud.ts'
 
 const NEUTRAL_COLOR = '#c9d6e4'
@@ -8,62 +9,39 @@ const SCORE_NAME = { deathmatch: 'kills', koth: 'points', ctf: 'captures', core:
 
 function scoreChip(row: TeamScore, localTeam: number | undefined): HTMLElement {
   const team = getTeam(row.team)
-  const item = document.createElement('li')
-  item.classList.toggle('is-local', row.team === localTeam)
-  item.style.setProperty('--team-color', team.color)
-  const swatch = document.createElement('span')
-  swatch.className = 'mode-swatch'
+  const swatch = element('span', 'mode-swatch')
   swatch.setAttribute('aria-hidden', 'true')
   // The name as well as the colour, so it does not rest on telling colours apart.
-  const name = document.createElement('span')
-  name.className = 'mode-team'
-  name.textContent = team.name
-  const score = document.createElement('span')
-  score.className = 'mode-score'
-  score.textContent = String(row.score)
-  item.append(swatch, name, score)
+  const item = element('li', '', swatch, element('span', 'mode-team', team.name), element('span', 'mode-score', String(row.score)))
+  item.classList.toggle('is-local', row.team === localTeam)
+  item.style.setProperty('--team-color', team.color)
   return item
 }
 
 function flagItem(flag: FlagView): HTMLElement {
   const team = getTeam(flag.team)
-  const item = document.createElement('li')
-  item.className = `mode-flag is-${flag.status}`
-  item.style.setProperty('--team-color', team.color)
-  const icon = document.createElement('span')
-  icon.className = 'mode-flag-icon'
-  icon.textContent = '⚑'
+  const icon = element('span', 'mode-flag-icon', '⚑')
   icon.setAttribute('aria-hidden', 'true')
-  const name = document.createElement('span')
-  name.className = 'mode-flag-name'
-  name.textContent = `${team.name} flag`
-  const state = document.createElement('span')
-  state.className = 'mode-flag-state'
-  state.textContent = flagReadout(flag)
+  const state = element('span', 'mode-flag-state', flagReadout(flag))
   if (flag.carrier) state.style.setProperty('--carrier-color', getTeam(flag.carrier.team).color)
-  item.append(icon, name, state)
+  const item = element('li', `mode-flag is-${flag.status}`, icon, element('span', 'mode-flag-name', `${team.name} flag`), state)
+  item.style.setProperty('--team-color', team.color)
   return item
 }
 
 function coreItem(core: CoreView): HTMLElement {
   const team = getTeam(core.team)
   const readout = coreReadout(core)
-  const item = document.createElement('li')
-  item.className = `mode-core is-${core.status}`
-  item.style.setProperty('--team-color', team.color)
-  const name = document.createElement('span')
-  name.className = 'mode-core-name'
-  name.textContent = `${team.name} core`
-  const bar = document.createElement('span')
-  bar.className = 'mode-core-bar'
-  const fill = document.createElement('span')
-  fill.className = 'mode-core-fill'
+  const fill = element('span', 'mode-core-fill')
   fill.style.width = `${Math.round(readout.fraction * 100)}%`
-  bar.append(fill)
-  const state = document.createElement('span')
-  state.className = 'mode-core-state'
-  state.textContent = readout.text
-  item.append(name, bar, state)
+  const item = element(
+    'li',
+    `mode-core is-${core.status}`,
+    element('span', 'mode-core-name', `${team.name} core`),
+    element('span', 'mode-core-bar', fill),
+    element('span', 'mode-core-state', readout.text),
+  )
+  item.style.setProperty('--team-color', team.color)
   return item
 }
 
@@ -71,34 +49,20 @@ function coreItem(core: CoreView): HTMLElement {
 // one is and who has it, and for the cores how each stands. Plain elements over the canvas, hidden until the first update, and rebuilt
 // only when what they say changes (the hill's bar moves every frame).
 export function createModeHudView(container: HTMLElement) {
-  const root = document.createElement('div')
-  root.className = 'game-mode-hud'
-  root.hidden = true
-  const title = document.createElement('div')
-  title.className = 'mode-title'
-  const scores = document.createElement('ul')
-  scores.className = 'mode-scores'
-  const hill = document.createElement('div')
-  hill.className = 'mode-hill'
+  const title = element('div', 'mode-title')
+  const scores = element('ul', 'mode-scores')
+  const hillFill = element('div', 'mode-hill-fill')
+  const hillText = element('div', 'mode-hill-text')
+  const hill = element('div', 'mode-hill', element('div', 'mode-hill-bar', hillFill), hillText)
   hill.setAttribute('role', 'progressbar')
   hill.setAttribute('aria-label', 'Hill capture')
   hill.setAttribute('aria-valuemin', '0')
   hill.setAttribute('aria-valuemax', '100')
-  const hillBar = document.createElement('div')
-  hillBar.className = 'mode-hill-bar'
-  const hillFill = document.createElement('div')
-  hillFill.className = 'mode-hill-fill'
-  hillBar.append(hillFill)
-  const hillText = document.createElement('div')
-  hillText.className = 'mode-hill-text'
-  hill.append(hillBar, hillText)
-  const flags = document.createElement('ul')
-  flags.className = 'mode-flags'
-  const coreRows = document.createElement('ul')
-  coreRows.className = 'mode-cores'
-  const hint = document.createElement('p')
-  hint.className = 'mode-hint'
-  root.append(title, scores, hill, flags, coreRows, hint)
+  const flags = element('ul', 'mode-flags')
+  const coreRows = element('ul', 'mode-cores')
+  const hint = element('p', 'mode-hint')
+  const root = element('div', 'game-mode-hud', title, scores, hill, flags, coreRows, hint)
+  root.hidden = true
   container.appendChild(root)
   let shownScores = ''
   let shownFlags = ''

@@ -1,5 +1,6 @@
 import { Champion, champions, type AttackProjectileDef, type ChampionDef } from './champions.js'
 import { GAME_VISION_RANGE } from './constants.js'
+import { distanceBetween } from './geometry.js'
 import { DEFAULT_CORE_REWARD, DEFAULT_TURRET_REWARD, type Resources } from './progression.js'
 import { rampedShot, rampProblem, TURRET_RAMP, type TurretRamp } from './turret-ramp.js'
 import type { Vector2 } from './index.js'
@@ -199,9 +200,7 @@ export function chooseTurretTarget(body: TurretBody, others: readonly TurretPrey
   let nearestAway = Infinity
   for (const other of [...others].sort((left, right) => left.id - right.id)) {
     if (!other.alive || other.team === body.team) continue
-    const dx = other.position.x - body.position.x
-    const dy = other.position.y - body.position.y
-    const away = Math.sqrt(dx * dx + dy * dy)
+    const away = distanceBetween(body.position, other.position)
     if (away > body.range) continue
     if (other.id === body.attacking) current = other.id
     if (away < nearestAway) {

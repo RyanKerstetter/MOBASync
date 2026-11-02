@@ -1,3 +1,4 @@
+import { clamp } from './geometry.js'
 import type { Vector2 } from './index.js'
 
 // A box in world units, by its edges.
@@ -64,14 +65,14 @@ export function nearestFree(
       if (x < inner.left || x > inner.right) continue
       const blocked = others.filter((other) => other.left < x && x < other.right).map((other): [number, number] => [other.top, other.bottom])
       for (const [low, high] of freeStretches(Math.max(box.top, inner.top), Math.min(box.bottom, inner.bottom), blocked)) {
-        consider(x, Math.max(low, Math.min(high, from.y)))
+        consider(x, clamp(from.y, low, high))
       }
     }
     for (const y of [box.top, box.bottom]) {
       if (y < inner.top || y > inner.bottom) continue
       const blocked = others.filter((other) => other.top < y && y < other.bottom).map((other): [number, number] => [other.left, other.right])
       for (const [low, high] of freeStretches(Math.max(box.left, inner.left), Math.min(box.right, inner.right), blocked)) {
-        consider(Math.max(low, Math.min(high, from.x)), y)
+        consider(clamp(from.x, low, high), y)
       }
     }
   }

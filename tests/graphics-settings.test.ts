@@ -197,10 +197,11 @@ function visibility(root: Container): Map<Container, boolean> {
 const changedBetween = (before: Map<Container, boolean>, after: Map<Container, boolean>): Container[] =>
   [...after].filter(([node, shown]) => before.get(node) !== shown).map(([node]) => node)
 
-test('each effect is on until the renderer is told otherwise, and turning one off hides one thing, a different thing for each, and nothing else', () => {
+test('each effect is off until the renderer is told otherwise, and turning one on shows one thing, a different thing for each, and nothing else', () => {
   const everyone = characters()
   const world = new WorldRenderer({ map: { view: new Container() }, spriteSets: new Map() })
-  assert.deepEqual(world.effects, DEFAULT_EFFECTS, 'all on to begin with')
+  assert.deepEqual(world.effects, DEFAULT_EFFECTS, 'the defaults to begin with')
+  for (const effect of EFFECT_KEYS) assert.equal(world.effects[effect], false, `${effect} is off to begin with: you see none of it until you turn it on`)
   const frame = (now: number) => ({
     now,
     characters: everyone,
@@ -210,24 +211,24 @@ test('each effect is on until the renderer is told otherwise, and turning one of
     shops: [SHOP],
   })
   world.update(frame(0))
-  const allOn = visibility(world.scene)
-  const hidden = new Map<EffectKey, Container>()
+  const allOff = visibility(world.scene)
+  const shown = new Map<EffectKey, Container>()
   for (const effect of EFFECT_KEYS) {
-    world.effects = { ...DEFAULT_EFFECTS, [effect]: false }
+    world.effects = { ...DEFAULT_EFFECTS, [effect]: true }
     world.update(frame(1))
-    const changed = changedBetween(allOn, visibility(world.scene))
-    assert.equal(changed.length, 1, `turning off ${effect} hides one thing, and not the rest: ${changed.length}`)
-    assert.equal(changed[0].visible, false)
-    hidden.set(effect, changed[0])
-    // And back on, as it was.
+    const changed = changedBetween(allOff, visibility(world.scene))
+    assert.equal(changed.length, 1, `turning on ${effect} shows one thing, and not the rest: ${changed.length}`)
+    assert.equal(changed[0].visible, true)
+    shown.set(effect, changed[0])
+    // And back off, as it was.
     world.effects = { ...DEFAULT_EFFECTS }
     world.update(frame(2))
-    assert.deepEqual(changedBetween(allOn, visibility(world.scene)), [], `${effect} is back`)
+    assert.deepEqual(changedBetween(allOff, visibility(world.scene)), [], `${effect} is hidden again`)
   }
-  assert.equal(new Set(hidden.values()).size, EFFECT_KEYS.length, 'each effect hides its own')
+  assert.equal(new Set(shown.values()).size, EFFECT_KEYS.length, 'each effect shows its own')
 
-  // All of them off at once hides all of them.
-  world.effects = Object.fromEntries(EFFECT_KEYS.map((effect) => [effect, false])) as typeof DEFAULT_EFFECTS
+  // All of them on at once shows all of them.
+  world.effects = Object.fromEntries(EFFECT_KEYS.map((effect) => [effect, true])) as typeof DEFAULT_EFFECTS
   world.update(frame(3))
-  assert.equal(changedBetween(allOn, visibility(world.scene)).length, EFFECT_KEYS.length)
+  assert.equal(changedBetween(allOff, visibility(world.scene)).length, EFFECT_KEYS.length)
 })

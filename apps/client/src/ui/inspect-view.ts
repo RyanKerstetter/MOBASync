@@ -1,5 +1,6 @@
 import { getItem, ITEM_SLOTS, type ItemSlot } from '../../../../packages/shared/src/index.ts'
 import { createAbilityIcon } from './ability-icon.ts'
+import { element } from './dom.ts'
 import { itemIconUrl } from './item-icon-urls.ts'
 import type { InspectView } from './inspect.ts'
 import type { ItemTooltipController } from './item-tooltip.ts'
@@ -10,13 +11,6 @@ export type InspectHandlers = {
   tooltip: ItemTooltipController
   // The panel's own close button was pressed.
   onClose(): void
-}
-
-function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, ...children: Node[]): HTMLElementTagNameMap[K] {
-  const made = document.createElement(tag)
-  made.className = className
-  made.append(...children)
-  return made
 }
 
 // The panel on the left that says who a left click picked (see `inspectView`): the name and level, how it stands, the stats that matter, and for a

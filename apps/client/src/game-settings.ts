@@ -7,11 +7,25 @@ export type GameSettings = {
   castMode: CastMode
   // Which of the effects drawn over the ground are on (the graphics menu).
   effects: EffectSettings
+  // How far past the edge of an enemy a click still picks it, in world pixels, for attacks and for abilities aimed at a unit (the controls menu).
+  clickRadius: number
   // Whether the frame rate and network diagnostics are shown at the top left (the dev menu).
   diagnostics: boolean
 }
 
-export const DEFAULT_SETTINGS: GameSettings = { castMode: DEFAULT_CAST_MODE, effects: { ...DEFAULT_EFFECTS }, diagnostics: true }
+// The extra click radius is whole pixels from none to this many; the menu's slider moves in steps of CLICK_RADIUS_STEP.
+export const MAX_CLICK_RADIUS = 40
+export const CLICK_RADIUS_STEP = 2
+export const DEFAULT_CLICK_RADIUS = 10
+
+export const DEFAULT_SETTINGS: GameSettings = { castMode: DEFAULT_CAST_MODE, effects: { ...DEFAULT_EFFECTS }, clickRadius: DEFAULT_CLICK_RADIUS, diagnostics: true }
+
+// What was stored for the click radius, held to the range the menu offers: a number is rounded and kept between none and the most, and
+// anything else (missing, text, not a number) is the default.
+export function readClickRadius(stored: unknown): number {
+  if (typeof stored !== 'number' || !Number.isFinite(stored)) return DEFAULT_CLICK_RADIUS
+  return Math.min(MAX_CLICK_RADIUS, Math.max(0, Math.round(stored)))
+}
 
 const STORAGE_KEY = 'moba-settings'
 const CAST_MODES: readonly CastMode[] = ['quick', 'quick-with-indicator']
@@ -35,6 +49,7 @@ export function loadSettings(storage: SettingsStorage | undefined = defaultStora
     return {
       castMode: CAST_MODES.find((mode) => mode === fields.castMode) ?? DEFAULT_SETTINGS.castMode,
       effects: readEffects(fields.effects),
+      clickRadius: readClickRadius(fields.clickRadius),
       diagnostics: typeof fields.diagnostics === 'boolean' ? fields.diagnostics : DEFAULT_SETTINGS.diagnostics,
     }
   } catch {

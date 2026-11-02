@@ -1,5 +1,7 @@
 import type { CastMode } from './cast-control.ts'
+import { CLICK_RADIUS_STEP, MAX_CLICK_RADIUS } from './game-settings.ts'
 import { EFFECT_KEYS, type EffectKey } from './render/effect-settings.ts'
+import { element } from './ui/dom.ts'
 
 // One row of the escape menu, as data. The menu is built from lists of these, so adding to it is
 // adding an item to `menuTabs`, not new drawing code.
@@ -14,6 +16,19 @@ export type MenuItem =
   }
   // On or off, shown as a switch, with a line under it that says what it does.
   | { kind: 'toggle'; label: string; description?: string; get: () => boolean; set: (on: boolean) => void }
+  // A number from `min` to `max` in steps, shown as a slider with its value beside the name, and a line under it that says what it does.
+  | {
+    kind: 'slider'
+    label: string
+    description?: string
+    min: number
+    max: number
+    step: number
+    // What the number is counted in, shown after it.
+    unit?: string
+    get: () => number
+    set: (value: number) => void
+  }
   // Something that happens when it is pressed.
   | { kind: 'action'; label: string; danger?: boolean; run: () => void }
 
@@ -36,11 +51,14 @@ export const EFFECT_LABELS: Readonly<Record<EffectKey, { label: string; descript
 // What the tabs of the escape menu hold, left to right, and the rows in each. It is given what to do for each item rather than doing
 // it, so it knows nothing of the game and can be tested on its own.
 //   Graphics  what is drawn: the effects, each of which can be turned off on its own.
-//   Controls  how the game is played: the cast mode.
+//   Controls  how the game is played: the cast mode, and how easy enemies are to click on.
 //   Dev       tools for whoever is working on the game: the debug view and the diagnostics, and the sprite tools (given only in a development build).
 export function menuTabs(actions: {
   getCastMode: () => CastMode
   setCastMode: (mode: CastMode) => void
+  // The extra reach round an enemy that a click still picks it from, in pixels.
+  getClickRadius: () => number
+  setClickRadius: (radius: number) => void
   getEffect: (effect: EffectKey) => boolean
   setEffect: (effect: EffectKey, on: boolean) => void
   // The debug view (hitboxes, and everything seen), which the P key turns on and off as well.
@@ -78,6 +96,19 @@ export function menuTabs(actions: {
           options: (Object.keys(CAST_MODE_LABELS) as CastMode[]).map((mode) => ({ value: mode, label: CAST_MODE_LABELS[mode] })),
           get: actions.getCastMode,
           set: (value) => actions.setCastMode(value as CastMode),
+        }],
+      }, {
+        title: 'Targeting',
+        items: [{
+          kind: 'slider',
+          label: 'Click radius',
+          description: 'Extra reach round an enemy that a click still picks it, for attacks and targeted abilities.',
+          min: 0,
+          max: MAX_CLICK_RADIUS,
+          step: CLICK_RADIUS_STEP,
+          unit: 'px',
+          get: actions.getClickRadius,
+          set: actions.setClickRadius,
         }],
       }],
     },
@@ -123,80 +154,80 @@ type GameMenuOptions = {
 // The escape menu: a panel over the game with a tab for each page of settings. It does not stop the game, which goes
 // on behind it, so a player in a fight who opens it is still in the fight. It remembers the tab it was left on while the page is open.
 export function createGameMenu({ container, tabs, footer }: GameMenuOptions) {
-  const overlay = document.createElement('div')
-  overlay.className = 'game-menu'
-  overlay.hidden = true
-  const panel = document.createElement('div')
-  panel.className = 'game-menu-panel'
+  const panel = element('div', 'game-menu-panel')
   panel.setAttribute('role', 'dialog')
   panel.setAttribute('aria-label', 'Game menu')
-  overlay.append(panel)
+  const overlay = element('div', 'game-menu', panel)
+  overlay.hidden = true
   container.append(overlay)
 
   let currentTab: string | undefined
 
-  // A row of the menu. Each control carries a key that says which it is, so the one that has the keyboard still has it when the menu is drawn again.
+  // A button of the menu. Each control carries a key that says which it is, so the one that has the keyboard still has it when the menu is drawn again.
+  const button = (key: string, className: string, ...children: Array<Node | string>): HTMLButtonElement => {
+    const made = element('button', className, ...children)
+    made.type = 'button'
+    made.dataset.menuKey = key
+    return made
+  }
+
+  // A row of the menu.
   const row = (item: MenuItem, key: string, again: () => void): HTMLElement => {
-    const element = document.createElement('div')
-    element.className = 'game-menu-row'
+    const made = element('div', 'game-menu-row')
     if (item.kind === 'choice') {
-      const label = document.createElement('span')
-      label.textContent = item.label
-      const group = document.createElement('div')
-      group.className = 'game-menu-choices'
-      for (const option of item.options) {
-        const button = document.createElement('button')
-        button.type = 'button'
-        button.textContent = option.label
-        button.dataset.menuKey = `${key}/${option.value}`
+      made.append(element('span', '', item.label), element('div', 'game-menu-choices', ...item.options.map((option) => {
+        const choice = button(`${key}/${option.value}`, '', option.label)
         const selected = option.value === item.get()
-        button.classList.toggle('is-selected', selected)
-        button.setAttribute('aria-pressed', String(selected))
-        button.addEventListener('click', () => {
+        choice.classList.toggle('is-selected', selected)
+        choice.setAttribute('aria-pressed', String(selected))
+        choice.addEventListener('click', () => {
           item.set(option.value)
           again()
         })
-        group.append(button)
-      }
-      element.append(label, group)
+        return choice
+      })))
     } else if (item.kind === 'toggle') {
       const on = item.get()
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.className = 'game-menu-toggle'
-      button.dataset.menuKey = key
-      button.setAttribute('role', 'switch')
-      button.setAttribute('aria-checked', String(on))
-      const text = document.createElement('span')
-      text.className = 'game-menu-toggle-text'
-      const label = document.createElement('span')
-      label.textContent = item.label
-      text.append(label)
-      if (item.description) {
-        const description = document.createElement('span')
-        description.className = 'game-menu-description'
-        description.textContent = item.description
-        text.append(description)
-      }
-      const track = document.createElement('span')
-      track.className = 'game-menu-switch'
+      const track = element('span', 'game-menu-switch')
       track.setAttribute('aria-hidden', 'true')
-      button.append(text, track)
-      button.addEventListener('click', () => {
+      const toggle = button(
+        key,
+        'game-menu-toggle',
+        element('span', 'game-menu-toggle-text', element('span', '', item.label), ...(item.description ? [element('span', 'game-menu-description', item.description)] : [])),
+        track,
+      )
+      toggle.setAttribute('role', 'switch')
+      toggle.setAttribute('aria-checked', String(on))
+      toggle.addEventListener('click', () => {
         item.set(!on)
         again()
       })
-      element.append(button)
+      made.append(toggle)
+    } else if (item.kind === 'slider') {
+      const shown = (value: number): string => `${value}${item.unit ? ` ${item.unit}` : ''}`
+      const value = element('span', 'game-menu-slider-value', shown(item.get()))
+      const input = element('input')
+      input.type = 'range'
+      input.min = String(item.min)
+      input.max = String(item.max)
+      input.step = String(item.step)
+      input.value = String(item.get())
+      input.dataset.menuKey = key
+      input.setAttribute('aria-label', item.label)
+      // Not drawn again as it moves: that would take the slider from under the hand that is dragging it.
+      input.addEventListener('input', () => {
+        item.set(Number(input.value))
+        value.textContent = shown(item.get())
+      })
+      made.append(element('div', 'game-menu-slider-head', element('span', '', item.label), value), input)
+      if (item.description) made.append(element('span', 'game-menu-description', item.description))
     } else {
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.textContent = item.label
-      button.dataset.menuKey = key
-      button.classList.toggle('is-danger', item.danger === true)
-      button.addEventListener('click', item.run)
-      element.append(button)
+      const action = button(key, '', item.label)
+      action.classList.toggle('is-danger', item.danger === true)
+      action.addEventListener('click', item.run)
+      made.append(action)
     }
-    return element
+    return made
   }
 
   const render = (): void => {
@@ -206,53 +237,35 @@ export function createGameMenu({ container, tabs, footer }: GameMenuOptions) {
     const tab = pages.find((page) => page.id === currentTab) ?? pages[0]
     currentTab = tab?.id
 
-    const heading = document.createElement('h3')
-    heading.textContent = 'Menu'
-
-    const strip = document.createElement('div')
-    strip.className = 'game-menu-tabs'
-    strip.setAttribute('role', 'tablist')
-    for (const page of pages) {
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.textContent = page.label
-      button.dataset.menuKey = `tab:${page.id}`
-      button.setAttribute('role', 'tab')
+    const strip = element('div', 'game-menu-tabs', ...pages.map((page) => {
+      const tabButton = button(`tab:${page.id}`, '', page.label)
       const selected = page.id === tab?.id
-      button.classList.toggle('is-selected', selected)
-      button.setAttribute('aria-selected', String(selected))
-      button.addEventListener('click', () => {
+      tabButton.setAttribute('role', 'tab')
+      tabButton.classList.toggle('is-selected', selected)
+      tabButton.setAttribute('aria-selected', String(selected))
+      tabButton.addEventListener('click', () => {
         currentTab = page.id
         render()
       })
-      strip.append(button)
-    }
+      return tabButton
+    }))
+    strip.setAttribute('role', 'tablist')
 
-    const body = document.createElement('div')
-    body.className = 'game-menu-page'
+    const body = element('div', 'game-menu-page', ...(tab?.sections ?? []).map((section) => element(
+      'div',
+      'game-menu-section',
+      ...(section.title ? [element('h4', '', section.title)] : []),
+      ...section.items.map((item) => row(item, `${tab?.id}/${section.title ?? ''}/${item.label}`, render)),
+    )))
     body.setAttribute('role', 'tabpanel')
-    for (const section of tab?.sections ?? []) {
-      const group = document.createElement('div')
-      group.className = 'game-menu-section'
-      if (section.title) {
-        const title = document.createElement('h4')
-        title.textContent = section.title
-        group.append(title)
-      }
-      for (const item of section.items) group.append(row(item, `${tab?.id}/${section.title ?? ''}/${item.label}`, render))
-      body.append(group)
-    }
 
     const bottom = footer().map((item) => row(item, `footer/${item.label}`, render))
-    const hint = document.createElement('p')
-    hint.className = 'game-menu-hint'
-    hint.textContent = 'Press Escape to close.'
-    panel.replaceChildren(heading, strip, body, ...bottom, hint)
+    panel.replaceChildren(element('h3', '', 'Menu'), strip, body, ...bottom, element('p', 'game-menu-hint', 'Press Escape to close.'))
 
     if (focused !== undefined) {
-      for (const element of panel.querySelectorAll<HTMLElement>('[data-menu-key]')) {
-        if (element.dataset.menuKey === focused) {
-          element.focus()
+      for (const control of panel.querySelectorAll<HTMLElement>('[data-menu-key]')) {
+        if (control.dataset.menuKey === focused) {
+          control.focus()
           break
         }
       }

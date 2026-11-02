@@ -1,4 +1,4 @@
-import type { Vector2 } from '../../../packages/shared/src/index.ts'
+import { distanceBetween, type Vector2 } from '../../../packages/shared/src/index.ts'
 
 // Holding the right button keeps giving the command it gave when it went down: attack the enemy under the cursor, or
 // walk to the cursor, which follows the mouse as it moves and as the champion does. It is not given every frame:
@@ -25,8 +25,6 @@ export type HoldLook = {
   position: Vector2
   moving: boolean
 }
-
-const distance = (left: Vector2, right: Vector2): number => Math.sqrt((left.x - right.x) ** 2 + (left.y - right.y) ** 2)
 
 export class HoldCommand {
   private isHeld = false
@@ -73,8 +71,8 @@ export class HoldCommand {
       return seen.attackingId === seen.enemyId ? undefined : { type: 'attack', targetId: seen.enemyId }
     }
     if (this.lastMove) {
-      const cutShort = wasMoving && !seen.moving && distance(seen.position, this.lastMove) > HOLD_ARRIVED_DISTANCE
-      if (!cutShort && distance(this.lastMove, seen.cursor) < HOLD_MOVE_MIN_DISTANCE) return undefined
+      const cutShort = wasMoving && !seen.moving && distanceBetween(seen.position, this.lastMove) > HOLD_ARRIVED_DISTANCE
+      if (!cutShort && distanceBetween(this.lastMove, seen.cursor) < HOLD_MOVE_MIN_DISTANCE) return undefined
     }
     this.lastMove = { ...seen.cursor }
     return { type: 'move', target: { ...seen.cursor } }

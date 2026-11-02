@@ -1,5 +1,5 @@
 // The effects the page draws over the ground that a player can turn off one at a time (the graphics menu, see game-menu.ts). They are about how
-// the page looks and nothing else: no rule of the game changes, and every one is on until a player turns it off.
+// the page looks and nothing else: no rule of the game changes, and every one is off until a player turns it on.
 export type EffectSettings = {
   // The ring round each turret and core that shows how far it shoots.
   turretRanges: boolean
@@ -14,7 +14,7 @@ export type EffectKey = keyof EffectSettings
 // Every effect there is, in the order the menu lists them.
 export const EFFECT_KEYS: readonly EffectKey[] = ['turretRanges', 'selfAttackRange', 'shopGlow']
 
-export const DEFAULT_EFFECTS: Readonly<EffectSettings> = { turretRanges: true, selfAttackRange: true, shopGlow: true }
+export const DEFAULT_EFFECTS: Readonly<EffectSettings> = { turretRanges: false, selfAttackRange: false, shopGlow: false }
 
 // What was stored for the effects, as settings: each is the stored value when that is true or false, and is the default when it is missing or is
 // anything else, so a stored value that is damaged, or from before an effect was added, loses only that one.

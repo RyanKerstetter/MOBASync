@@ -181,7 +181,7 @@ export const GameFrameDashSchema = z.object({
 // Statuses are active for frames in [startTick, endTick).
 export const StatusSchema = z.object({
   id: z.string().min(1),
-  kind: z.enum(['slow', 'haste', 'attackrange', 'resist', 'root', 'stun', 'shield', 'burn', 'poison', 'blind', 'silence', 'disarm', 'dodge', 'stat']),
+  kind: z.enum(['slow', 'haste', 'attackrange', 'resist', 'root', 'stun', 'shield', 'burn', 'poison', 'blind', 'silence', 'disarm', 'fear', 'invisible', 'dodge', 'stat']),
   rootId: z.string(),
   ownerId: z.number().int().positive(),
   startTick: TickSchema,
@@ -238,6 +238,9 @@ export const GameFrameAttackTargetSchema = z.object({
   targetId: z.number().int().positive(),
   // The order that set it, which the attacks it makes are credited to.
   orderId: z.string().min(1),
+  // Set when the order was an ability aimed at an enemy out of its reach: the character walks up to the target as it would to attack it,
+  // and casts this once it is in the ability's reach, instead of attacking.
+  abilityId: z.string().min(1).max(64).optional(),
 })
 
 // What a monster is up to (see ai.ts): idle at home, after someone, or walking home. It is in the frame because
@@ -353,6 +356,8 @@ export const ModeSetupSchema = z.discriminatedUnion('kind', [
     teams: z.array(z.number().int().positive()),
     // A champion that dies loses its items but for its pet (`KEPT_ON_DEATH`). Absent, which is how it is by default, it keeps them.
     loseItemsOnDeath: z.literal(true).optional(),
+    // No gold: a kill pays experience only, nobody starts with any, and there is no shop to buy in. Absent, which is how it is by default, there is.
+    noGold: z.literal(true).optional(),
     ...RulesFields,
   }),
 ])
@@ -401,11 +406,13 @@ export const GameFrameSchema = z.object({
 })
 
 // The ground a game is played on: the arena's size, and each wall as [x, y, width, height], in world
-// units. A snapshot without one is on the plain arena.
+// units, and the same for the bushes if it has any. A snapshot without one is on the plain arena.
+const RectTupleSchema = z.tuple([z.number(), z.number(), z.number().positive(), z.number().positive()])
 export const TerrainSchema = z.object({
   width: z.number().positive(),
   height: z.number().positive(),
-  walls: z.array(z.tuple([z.number(), z.number(), z.number().positive(), z.number().positive()])),
+  walls: z.array(RectTupleSchema),
+  bushes: z.array(RectTupleSchema).optional(),
 })
 
 // Where each team can shop, in world units (see shops.ts). A snapshot without any is a game with no shops, shopped in from anywhere.
@@ -492,7 +499,7 @@ export * from './items.js'
 export * from './item-effects.js'
 export * from './shops.js'
 export * from './stats.js'
-export { boxTouchesCircle } from './geometry.js'
+export { boxTouchesCircle, clamp, directionTo, distanceBetween, normalize } from './geometry.js'
 export type { BoxShape } from './geometry.js'
 export {
   aimPoint,
@@ -512,18 +519,23 @@ export {
   disarm,
   dodge,
   enemiesInBox,
+  enemiesInCone,
   enemiesInLine,
+  endNamed,
   enemiesInRadius,
+  fear,
   getEntityDef,
   haste,
   heal,
   health,
   interrupt,
+  invisible,
   knockback,
   level,
   linear,
   loseHealth,
   mark,
+  markedUnits,
   maxHealth,
   missingHealth,
   namedStatusTicksLeft,
@@ -551,6 +563,7 @@ export {
   subject,
   subjectWithin,
   targetUnit,
+  towardTarget,
   when,
 } from './effects.js'
 export type {
@@ -680,6 +693,7 @@ export {
   CharacterTickSnapshot,
   GameTickSnapshot,
   entityPosAt,
+  hasStatus,
   SimCharacter,
   Simulator,
 } from './simulator.js'

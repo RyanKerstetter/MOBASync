@@ -29,6 +29,10 @@ function enemyWithin(reach: number): Vector2 {
   return { x: CASTER_AT.x + Math.max(10, Math.min(60, reach - 10)), y: CASTER_AT.y }
 }
 
+// The teammate an ability for allies is cast on: a second player on the caster's team, standing near it.
+const ALLY_ID = 3
+const ALLY_AT: Vector2 = { x: CASTER_AT.x, y: CASTER_AT.y + 50 }
+
 function targetFor(def: AbilityDef, enemyId: number): CastTarget {
   switch (def.targeting) {
     case 'none': return { mode: 'none' }
@@ -38,7 +42,7 @@ function targetFor(def: AbilityDef, enemyId: number): CastTarget {
       const at = enemyWithin(def.range)
       return { mode: 'point', point: { x: Math.max(at.x, CASTER_AT.x + (def.minRange ?? 0)), y: at.y } }
     }
-    case 'unit': return { mode: 'unit', unitId: enemyId }
+    case 'unit': return { mode: 'unit', unitId: def.targetsAllies ? ALLY_ID : enemyId }
   }
 }
 
@@ -133,6 +137,8 @@ function duelWithCast(champion: Champion, abilityId: string, tick: number, seq: 
   if (!simulator) {
     duel.addPlayer(1, 'player-1', 'Player 1', CASTER_AT, champion)
     duel.addPlayer(2, 'player-2', 'Player 2', enemyWithin(def.range), opponent)
+    // On the caster's team (the first), for an ability that is cast on a teammate.
+    if (def.targetsAllies) duel.addPlayer(ALLY_ID, 'player-3', 'Player 3', ALLY_AT, opponent, 1)
   }
   // A cast that follows an earlier one in the same game starts from wherever that left the caster.
   const origin = simulator ? duel.at(tick).get(1)?.getPosition() ?? CASTER_AT : CASTER_AT

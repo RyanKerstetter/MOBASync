@@ -6,7 +6,16 @@ import {
   EMPOWER_BONUS_DAMAGE,
   EMPOWER_DURATION_TICKS,
   EMPOWER_KEY,
+  FEAR_BONUS,
+  FLURRY_KEY,
+  FLURRY_SLOW,
+  FLURRY_SLOW_TICKS,
+  FEAR_RADIUS,
   FIRST_STRIKE_COOLDOWN_TICKS,
+  LINK_KEY,
+  LINK_SHARE,
+  MONK_AUTO_REFUND_TICKS,
+  MONK_DAMAGE_REDUCTION,
   PLATING_KEY,
   PLATING_MAX_STACKS,
   PLATING_RESISTANCE_PER_STACK,
@@ -15,6 +24,13 @@ import {
   RAGE_AUTO_TICKS,
   RAGE_KEY,
   RAGE_MAX_TICKS,
+  SAGE_HASTE,
+  SAGE_HASTE_NAME,
+  SAGE_HASTE_TICKS,
+  SAGE_HEAL,
+  SAGE_HEAL_SCALING,
+  SAGE_KEY,
+  SAGE_MARK_TICKS,
   SHADOW_KEY,
   SHADOW_MAX_STACKS,
   SHADOW_STACK_TICKS,
@@ -23,6 +39,7 @@ import {
   SIGHTED_HASTE_TICKS,
   SIGHTED_KEY,
   SIGHTED_WINDOW_TICKS,
+  terrify,
   TRICK_BONUS_DAMAGE,
   TRICK_HASTE,
   TRICK_HASTE_TICKS,
@@ -38,10 +55,13 @@ import {
 } from './abilities.js'
 import { GAME_TPS } from './constants.js'
 import {
+  areEnemies,
   arcane,
   attackDamage,
   damage,
+  endNamed,
   haste,
+  heal,
   linear,
   mark,
   popMarkers,
@@ -50,6 +70,7 @@ import {
   runEffects,
   scaled,
   self,
+  slow,
   spawnEntity,
   stacks,
   statBuff,
@@ -58,9 +79,11 @@ import {
   type Effect,
   type EffectSource,
   type EntityDef,
+  type Selector,
   type SimContext,
   type SimReader,
 } from './effects.js'
+import type { Status } from './index.js'
 import { STRUCTURE_ARCANE_DAMAGE } from './structures.js'
 import { BASE_STAT_DEFAULTS, NO_GROWTH, StatBlock, type BaseStatsDef, type ChampionStats, type StatValues } from './stats.js'
 
@@ -118,6 +141,22 @@ export interface ChampionDef {
   onCast?: readonly Effect[]
   // A bar over the champion that shows how long one of its statuses has left. Nothing is drawn while it has none.
   meter?: ChampionMeterDef
+  // Every hit it does (an auto or an ability) does this much more, as a share of itself (0.3 is 30% more), to a unit that has a status of this kind that the
+  // champion itself put on it, such as a fear.
+  bonusAgainst?: { status: Status['kind']; fraction: number }
+  // Killing a champion (a player, not a monster) makes every ability it has ready again, on the tick of the kill.
+  resetsCooldownsOnKill?: boolean
+  // Runs for the champion whenever it stops being invisible, whether the time ran out or it attacked or cast and was seen: after what it did, if it did something.
+  // It is run at the champion's position, and does not run for one that dies invisible.
+  onLeaveInvisibility?: readonly Effect[]
+  // How far what `onLeaveInvisibility` does reaches from the champion, if it reaches round it: the page draws a ring this big round the champion you control while it is
+  // invisible, so you can see who would be caught when you are seen. A body counts as caught when any of it is in the ring.
+  leaveInvisibilityRadius?: number
+  // Every hit it takes does this much less, as a share (0.2 is 20% less), whatever the source (an auto, an ability, a burn): on top of its resistance, and before its shields.
+  damageReduction?: number
+  // A unit with a marker of this `key` that this champion put on it (a link) hands the champion `share` of every hit it takes, and takes that much less of it (0.4 is 40%): the champion
+  // takes its share as it would any hit, from its own resistance and shields on, and it is credited to whoever struck the unit. Nothing passes while the champion is dead.
+  damageLink?: { key: string; share: number }
 }
 
 type StatusBonus = { kind: string; stat?: string; amount: number }
@@ -153,6 +192,46 @@ const arcaneOnStructure: Effect<SimContext> = when<SimContext>(
   (sim, src) => STRUCTURE_ARCANE_DAMAGE > 0 && src.subject !== null && sim.character(src.subject)?.structure === true && ownArcane(sim, src) > 0,
   [damage(scaled(0, { arcane: STRUCTURE_ARCANE_DAMAGE }))],
 )
+
+// Monk's Flurry gives whoever he gives it to (himself, or the teammate he has linked, a champion of any kind) charges to carry, so what an auto does with them is part of every
+// champion's autos. Each is spent by an auto, and the auto that spends one slows what it hits; the last one also ends the attack speed that came with them (it is the one status of the
+// name `FLURRY_KEY`, see `statBuff`).
+const flurryCharges = stacks(FLURRY_KEY, self())
+const spendFlurry: Effect<SimContext> = (sim, src) => {
+  const left = flurryCharges(sim, src)
+  if (left <= 0) return
+  runEffects([popMarkers(FLURRY_KEY, self(), { count: 1 }), ...(left === 1 ? [endNamed(FLURRY_KEY)] : [])], sim, src)
+}
+const flurryHit: Effect<SimContext> = when<SimContext>(
+  (sim, src) => flurryCharges(sim, src) > 0,
+  [slow(FLURRY_SLOW, FLURRY_SLOW_TICKS), spendFlurry],
+)
+
+// Sage's mend is poppable by anyone on her side: an auto of any of her team (herself, or a champion of any kind) on an enemy she has mended uses the mend up, to heal whoever made the
+// auto and give them move speed, so what an auto does with it is part of every champion's autos. It is Sage's passive that does it, so it runs as her: what the heal is worth is
+// worked out from her arcane and not from the arcane of whoever hit, and it is her mend that comes off. Each mender's mend is its own: two Sages' mends on an enemy are two, and one
+// auto uses up both. A mend that a Sage left behind when she died is still there to be used until it runs out. An enemy of hers uses none, and one that is not hers is left alone.
+const mendHeal = scaled(SAGE_HEAL, SAGE_HEAL_SCALING)
+const popMends: Effect<SimContext> = (sim, src) => {
+  if (src.subject === null) return
+  const attacker = sim.character(src.ownerId)
+  if (!attacker) return
+  const menders = [...new Set(sim.markersOn(src.subject, SAGE_KEY).map((marker) => marker.ownerId))].sort((left, right) => left - right)
+  for (const menderId of menders) {
+    const mender = sim.character(menderId)
+    if (!mender || areEnemies(attacker, mender)) continue
+    const attacking: Selector = () => [src.ownerId]
+    runEffects(
+      [
+        heal(mendHeal, attacking),
+        haste(SAGE_HASTE, SAGE_HASTE_TICKS, attacking, { named: SAGE_HASTE_NAME }),
+        popMarkers(SAGE_KEY),
+      ],
+      sim,
+      { ...src, id: `${src.id}:mend:u${menderId}`, ownerId: menderId },
+    )
+  }
+}
 
 // Whether the unit an auto is aimed at is dodging it.
 const subjectDodging = (sim: SimReader, src: EffectSource): boolean =>
@@ -193,6 +272,13 @@ export class Champion {
   readonly onAttackLaunch: readonly Effect[]
   readonly onCast: readonly Effect[]
   readonly meter: ChampionMeterDef | undefined
+  readonly bonusAgainst: { status: Status['kind']; fraction: number } | undefined
+  readonly resetsCooldownsOnKill: boolean
+  readonly onLeaveInvisibility: readonly Effect[]
+  readonly leaveInvisibilityRadius: number | undefined
+  // The share of every hit it takes less of, from 0 for none (see `ChampionDef`).
+  readonly damageReduction: number
+  readonly damageLink: { key: string; share: number } | undefined
 
   constructor(def: ChampionDef) {
     for (const abilityId of def.abilities) {
@@ -258,15 +344,41 @@ export class Champion {
     })
     // An auto at a dodging target is spent and none of its effects land, whether it was a swing or a
     // shot: not the damage, not the champion's own on-hit effects, and not an ability readied for it,
-    // whose readiness is used up all the same.
+    // whose readiness is used up all the same (and so is a Flurry charge).
     this.attackEffects = [when<SimContext>(
       subjectDodging,
-      readyKeys.map((key) => popMarkers(key, self())),
-      [...this.onAttackHit, ...readied, arcaneOnStructure],
+      [...readyKeys.map((key) => popMarkers(key, self())), spendFlurry],
+      [...this.onAttackHit, ...readied, flurryHit, popMends, arcaneOnStructure],
     )]
     this.onAttackLaunch = this.attackProjectile ? [launchAutoShot(this.attackProjectile)] : this.attackEffects
     this.onCast = def.onCast ?? []
     this.meter = def.meter ? { ...def.meter } : undefined
+    if (def.bonusAgainst && !(def.bonusAgainst.fraction > 0 && Number.isFinite(def.bonusAgainst.fraction))) {
+      throw new Error(`Champion "${def.id}" has a bonus against a status that needs to be a share above 0.`)
+    }
+    this.bonusAgainst = def.bonusAgainst ? { ...def.bonusAgainst } : undefined
+    this.resetsCooldownsOnKill = def.resetsCooldownsOnKill === true
+    this.onLeaveInvisibility = def.onLeaveInvisibility ?? []
+    if (def.leaveInvisibilityRadius !== undefined && !(def.leaveInvisibilityRadius > 0 && Number.isFinite(def.leaveInvisibilityRadius))) {
+      throw new Error(`Champion "${def.id}" has a radius for what it does on leaving invisibility that needs to be above 0.`)
+    }
+    this.leaveInvisibilityRadius = def.leaveInvisibilityRadius
+    if (def.damageReduction !== undefined && !(def.damageReduction >= 0 && def.damageReduction < 1)) {
+      throw new Error(`Champion "${def.id}" has a damage reduction that needs to be a share from 0 up to (but not including) 1.`)
+    }
+    this.damageReduction = def.damageReduction ?? 0
+    if (def.damageLink && !(def.damageLink.key.length > 0 && def.damageLink.share > 0 && def.damageLink.share <= 1)) {
+      throw new Error(`Champion "${def.id}" has a damage link that needs the key of a marker and a share above 0 and at most 1.`)
+    }
+    this.damageLink = def.damageLink ? { ...def.damageLink } : undefined
+  }
+
+  // Every ability it can cast: the ones on its keys, and the recasts that take their place.
+  castableAbilities(): string[] {
+    return this.abilities.flatMap((abilityId) => {
+      const recast = abilityDefs.get(abilityId)?.recast
+      return recast === undefined ? [abilityId] : [abilityId, recast]
+    })
   }
 
   // Its stats at this level: the ones it is made with at level 1, and each level after that adds its growth. The health is a whole
@@ -515,9 +627,9 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     name: 'Hammer',
     description: 'A hulking bruiser that toughens with every blow, leaps onto its prey and flies into a rage.',
     passive: `Auto attacks give a stack of resistance, up to ${PLATING_MAX_STACKS}. Stacks last ${PLATING_TICKS / GAME_TPS} seconds and every auto renews them.`,
-    base: { maxHp: 1100, attackDamage: 70, attackSpeed: .8, resistance: 0, haste: 0, arcane: 10 },
-    growth: { maxHp: 90, attackDamage: 6, attackSpeed: 0.02, resistance: 3, haste: 2, arcane: 3 },
-    moveSpeed: 140,
+    base: { maxHp: 1100, attackDamage: 70, attackSpeed: .9, resistance: 0, haste: 0, arcane: 10 },
+    growth: { maxHp: 90, attackDamage: 12, attackSpeed: 0.02, resistance: 8, haste: 6, arcane: 3 },
+    moveSpeed: 145,
     radius: 24,
     attackRange: 100,
     attackWindup: 0.25,
@@ -538,7 +650,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A melee skirmisher that hooks enemies in, whirls its chains around it and dashes through fights.',
     passive: `The first auto on an enemy, or first hit on it with the edge of Whirl, deals bonus damage and heals you. Each enemy has its own ${FIRST_STRIKE_COOLDOWN_TICKS / GAME_TPS} second cooldown.`,
     base: { maxHp: 900, attackDamage: 70, attackSpeed: 1, resistance: 0, haste: 0, arcane: 10 },
-    growth: { maxHp: 55, attackDamage: 7, attackSpeed: 0.03, resistance: 3, haste: 3, arcane: 3 },
+    growth: { maxHp: 65, attackDamage: 16, attackSpeed: 0.02, resistance: 4, haste: 8, arcane: 3 },
     moveSpeed: 150,
     radius: 21,
     attackRange: 110,
@@ -546,6 +658,65 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     // Q hooks, W charges for a second (he can walk but not attack while it does) and then lashes out round him, E dashes and can be used while W charges.
     abilities: ['hook', 'whirl', 'lunge'],
     onAttackHit: [damage(attackDamage()), firstStrike],
+  }),
+  new Champion({
+    id: 'cloak',
+    name: 'Cloak',
+    description: 'A melee assassin that vanishes, scares off what is near when it appears, and finishes the feared with knives and a dash.',
+    passive: `Leaving invisibility fears nearby enemies. You deal ${FEAR_BONUS * 100}% more damage to enemies you have feared, and killing a champion resets your cooldowns.`,
+    base: { maxHp: 750, attackDamage: 60, attackSpeed: 1, resistance: 0, haste: 0, arcane: 10 },
+    growth: { maxHp: 40, attackDamage: 16, attackSpeed: 0.01, resistance: 1, haste: 9, arcane: 3 },
+    moveSpeed: 155,
+    radius: 20,
+    attackRange: 90,
+    attackWindup: 0.17,
+    // Q makes him invisible, W is a fan of knives, E is a dash through an enemy.
+    abilities: ['ghost', 'knives', 'cutthrough'],
+    // His hits do more to what he has feared (a fear is a status of his own), every kill of a champion makes his abilities ready, and ceasing to be invisible is what fears.
+    bonusAgainst: { status: 'fear', fraction: FEAR_BONUS },
+    resetsCooldownsOnKill: true,
+    onLeaveInvisibility: terrify,
+    leaveInvisibilityRadius: FEAR_RADIUS,
+  }),
+  new Champion({
+    id: 'sage',
+    name: 'Sage',
+    description: 'A ranged healer that mends allies, roots and shoves back enemies, and feeds on the foes it has marked.',
+    passive: `Heal Pulse and Vine Bolt mend the enemies they hit for ${SAGE_MARK_TICKS / GAME_TPS} seconds. An auto attack from you or an ally on a mended enemy uses up the mend to heal whoever hit it and give them ${SAGE_HASTE * 100}% move speed.`,
+    base: { maxHp: 750, attackDamage: 50, attackSpeed: .9, resistance: 0, haste: 0, arcane: 30 },
+    growth: { maxHp: 55, attackDamage: 7, attackSpeed: 0.02, resistance: 3, haste: 8, arcane: 16 },
+    moveSpeed: 145,
+    radius: 20,
+    attackRange: 230,
+    attackWindup: 0.22,
+    attackProjectile: { speed: 600, radius: 6, color: '#8ee6a0' },
+    // Q pulses out from her, W is a piercing bolt, E heals a teammate (or herself).
+    abilities: ['pulse', 'vinebolt', 'rejuvenate'],
+    // Her passive is in every champion's autos (see `popMends`), since her team uses her mends too: her own autos are plain.
+  }),
+  new Champion({
+    id: 'monk',
+    name: 'Monk',
+    description: 'A melee guardian that links to a teammate to share their damage, and speeds up, shields and heals the pair.',
+    passive: `Takes ${MONK_DAMAGE_REDUCTION * 100}% less damage. Auto attacks take ${MONK_AUTO_REFUND_TICKS / GAME_TPS} second off the cooldown of all your abilities.`,
+    base: { maxHp: 1000, attackDamage: 60, attackSpeed: .9, resistance: 0, haste: 0, arcane: 10 },
+    growth: { maxHp: 75, attackDamage: 4, attackSpeed: 0.01, resistance: 5, haste: 7, arcane: 12 },
+    moveSpeed: 145,
+    radius: 22,
+    attackRange: 95,
+    attackWindup: 0.2,
+    // Q links to a teammate (and, with the link up, heals them or cuts it), W quickens the next autos, E shields.
+    abilities: ['link', 'flurry', 'guard'],
+    damageReduction: MONK_DAMAGE_REDUCTION,
+    damageLink: { key: LINK_KEY, share: LINK_SHARE },
+    // Every ability he can cast has its cooldown hurried along by his autos, Link Heal (the recast on Q) too.
+    onAttackHit: [
+      damage(attackDamage()),
+      reduceCooldown('link', MONK_AUTO_REFUND_TICKS),
+      reduceCooldown('linkheal', MONK_AUTO_REFUND_TICKS),
+      reduceCooldown('flurry', MONK_AUTO_REFUND_TICKS),
+      reduceCooldown('guard', MONK_AUTO_REFUND_TICKS),
+    ],
   }),
 ].map((champion) => [champion.id, champion]))
 

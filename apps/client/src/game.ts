@@ -29,7 +29,7 @@ import { championSprites } from './champion-sprites.ts'
 import { createDebugOverlay } from './ui/debug-overlay.ts'
 import { createGameMenu, menuFooter, menuTabs } from './game-menu.ts'
 import { HoldCommand, type HeldCommand } from './hold-command.ts'
-import { loadSettings, saveSettings } from './game-settings.ts'
+import { loadSettings, readClickRadius, saveSettings } from './game-settings.ts'
 import { ClientGameState } from './game-state.ts'
 import { createTeamVision, type TeamVision } from './team-vision.ts'
 import { abilitySlotViews } from './ui/hud.ts'
@@ -131,13 +131,10 @@ export async function startGame({
   const hud = createHudView(container, {
     tooltip: itemTooltip,
     onShop: (filter) => {
-      if (gameState.hasEconomy) shop.toggle(filter)
+      if (gameState.hasGold) shop.toggle(filter)
     },
     onSell: (slot) => {
-      if (!inPlay()) return
-      const attempt = gameState.createSellOrder(slot)
-      if (attempt.ok) reliableMessenger.send(attempt.order)
-      else onStatus(attempt.reason, true)
+      if (inPlay()) sendAttempt(gameState.createSellOrder(slot))
     },
   })
   // The character a left click picked, whom the panel on the left is about, until the player picks another, or nothing, or it dies.
@@ -194,6 +191,7 @@ export async function startGame({
   const castControl = new CastControl(castMode ?? settings.castMode)
   // What the player turned off in the menu last time stays off.
   world.effects = { ...settings.effects }
+  gameState.setExtraPickRadius(settings.clickRadius)
   debugOverlay.setVisible(settings.diagnostics)
   // Dev tool: redraw every champion from `overrides` (sheets picked from a folder, see
   // `spriteOverridesFrom`) over the art the game came with, or from that art alone with none.
@@ -243,6 +241,12 @@ export async function startGame({
       setCastMode: (mode) => {
         castControl.setMode(mode)
         settings.castMode = mode
+        saveSettings(settings)
+      },
+      getClickRadius: () => settings.clickRadius,
+      setClickRadius: (radius) => {
+        settings.clickRadius = readClickRadius(radius)
+        gameState.setExtraPickRadius(settings.clickRadius)
         saveSettings(settings)
       },
       getEffect: (effect) => settings.effects[effect],
@@ -305,6 +309,17 @@ export async function startGame({
       onStatus('Order acknowledgement delayed; requesting a state sync.', true)
     },
   })
+  // Puts a snapshot from the server into the simulation, and tells the messenger which of this player's orders it already holds.
+  const applySnapshot = (snapshot: GameSnapshot): ReturnType<ClientGameState['applySnapshot']> => {
+    const result = gameState.applySnapshot(snapshot)
+    for (const order of result.confirmedOrders) reliableMessenger.acknowledge(order.id, order.seq)
+    return result
+  }
+  // Sends an order that could be made, and says why when it could not.
+  const sendAttempt = (attempt: { ok: true; order: GameOrder } | { ok: false; reason: string }): void => {
+    if (attempt.ok) reliableMessenger.send(attempt.order)
+    else onStatus(attempt.reason, true)
+  }
 
   // Listen on the whole screen, not the map, so clicks and aiming work over the void past its edge.
   app.stage.eventMode = 'static'
@@ -361,11 +376,10 @@ export async function startGame({
   }
   const onContextMenu = (event: MouseEvent): void => event.preventDefault()
   app.canvas.addEventListener('contextmenu', onContextMenu)
-  const castAtCursor = (slot: number): void => {
-    const attempt = gameState.createCastOrder(slot, pointerInWorld())
-    if (attempt.ok) reliableMessenger.send(attempt.order)
-    else onStatus(attempt.reason, true)
-  }
+  const castAtCursor = (slot: number, selfCast = false): void =>
+    sendAttempt(gameState.createCastOrder(slot, pointerInWorld(), performance.now(), selfCast))
+  // Alt on its own would open the browser's menu bar when it is let go, so it is kept from doing that while the game is being played.
+  const isAlt = (event: KeyboardEvent): boolean => event.code === 'AltLeft' || event.code === 'AltRight'
   const onKeyDown = (event: KeyboardEvent): void => {
     if (event.code === 'Escape') {
       // Escape puts the shop away first if it is open, then drops an aim, as it always has, and opens the menu when there is
@@ -388,12 +402,18 @@ export async function startGame({
       world.debug = !world.debug
       return
     }
+    if (isAlt(event) && inPlay() && !isTypingIn(event.target, true)) event.preventDefault()
     const abilitySlot = abilityKeys.indexOf(event.code)
     if (event.code !== 'Space' && abilitySlot < 0) return
     if (event.repeat || !inPlay() || gameState.isLocalDead()) return
     if (isTypingIn(event.target, true)) return
     event.preventDefault()
     if (abilitySlot >= 0) {
+      // Alt and an ability key casts an ability for allies on the champion itself, at once, with no aim: whatever else was being aimed is left as it is.
+      if (event.altKey && gameState.abilitySelfCasts(abilitySlot)) {
+        castAtCursor(abilitySlot, true)
+        return
+      }
       const action = castControl.press(abilitySlot, gameState.abilityNeedsAim(abilitySlot))
       if (action.type === 'cast') {
         castAtCursor(abilitySlot)
@@ -415,6 +435,7 @@ export async function startGame({
     if (order) reliableMessenger.send(order)
   }
   const onKeyUp = (event: KeyboardEvent): void => {
+    if (isAlt(event) && inPlay()) event.preventDefault()
     const abilitySlot = abilityKeys.indexOf(event.code)
     if (abilitySlot < 0) return
     if (castControl.release(abilitySlot).type !== 'cast') return
@@ -491,14 +512,11 @@ export async function startGame({
     if (pageTerrain && parsed.data.terrain && !pageTerrain.sameAs(parsed.data.terrain)) {
       console.warn(
         'The server is playing on a different version of the map than this page drew. Reload the page. '
-        + `The page's map is ${pageTerrain.width} by ${pageTerrain.height} with ${pageTerrain.walls.length} walls, `
-        + `and the server's is ${parsed.data.terrain.width} by ${parsed.data.terrain.height} with ${parsed.data.terrain.walls.length}.`,
+        + `The page's map is ${pageTerrain.width} by ${pageTerrain.height} with ${pageTerrain.walls.length} walls and ${pageTerrain.bushes.length} bushes, `
+        + `and the server's is ${parsed.data.terrain.width} by ${parsed.data.terrain.height} with ${parsed.data.terrain.walls.length} and ${parsed.data.terrain.bushes?.length ?? 0}.`,
       )
     }
-    const snapshotResult = gameState.applySnapshot(parsed.data)
-    for (const order of snapshotResult.confirmedOrders) {
-      reliableMessenger.acknowledge(order.id, order.seq)
-    }
+    applySnapshot(parsed.data)
     gameState.resetServerTickAnchor(parsed.data.tick)
     // Stay on the loading screen until a ping round trip has synchronized the
     // tick estimate, otherwise early orders are stamped outside the server's window.
@@ -529,11 +547,7 @@ export async function startGame({
         onStatus('The server sent invalid recovery state.', true)
         return
       }
-      const snapshotResult = gameState.applySnapshot(parsed.data)
-      for (const order of snapshotResult.confirmedOrders) {
-        reliableMessenger.acknowledge(order.id, order.seq)
-      }
-      if (!snapshotResult.applied) return
+      if (!applySnapshot(parsed.data).applied) return
       onStatus('Game state synchronized.')
     })
   })
@@ -647,6 +661,7 @@ export async function startGame({
       ...(sight.mask ? { fog: sight.mask } : {}),
       mode,
       shops: gameState.getShopZones(),
+      bushes: gameState.getTerrain().bushes,
       rewards: gameState.getKillRewards(now),
       localCharacterId,
       ...(local ? { localAttackCooldown: gameState.getAttackCooldownProgress(now) } : {}),
@@ -667,10 +682,12 @@ export async function startGame({
     const stats = gameState.getLocalStats(now)
     const loadout = gameState.getLocalLoadout(now)
     if (loadout) shop.update(loadout, now)
-    // Without an economy there is no level, no stats panel and no items or shop: the HUD is the abilities and the health.
-    if (!gameState.hasEconomy) shop.close()
+    // Without an economy there is no level, no stats panel and no items or shop: the HUD is the abilities and the health. Without gold there is the level and
+    // the stats, and no items or shop.
+    if (!gameState.hasGold) shop.close()
     hud.update({
       economy: gameState.hasEconomy,
+      gold: gameState.hasGold,
       ...(loadout ? { inventory: loadout.items, inShop: loadout.inShop } : {}),
       dead,
       ...(local

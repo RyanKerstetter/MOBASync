@@ -4,6 +4,8 @@ import { statusLabels, type StatusFlags } from '../apps/client/src/render/status
 
 const none: StatusFlags & { dead: boolean } = {
   stunned: false,
+  feared: false,
+  invisible: false,
   rooted: false,
   silenced: false,
   disarmed: false,
@@ -27,6 +29,8 @@ test('each status is named in words', () => {
   assert.deepEqual(statusLabels({ ...none, stunned: true }), ['stunned'])
   assert.deepEqual(statusLabels({ ...none, silenced: true }), ['silenced'])
   assert.deepEqual(statusLabels({ ...none, disarmed: true }), ['disarmed'])
+  assert.deepEqual(statusLabels({ ...none, feared: true }), ['feared'])
+  assert.deepEqual(statusLabels({ ...none, invisible: true }), ['invisible'])
   assert.deepEqual(statusLabels({ ...none, blinded: true }), ['blinded'])
   assert.deepEqual(statusLabels({ ...none, burning: true }), ['burning'])
   assert.deepEqual(statusLabels({ ...none, dodging: true }), ['dodging'])
@@ -34,8 +38,8 @@ test('each status is named in words', () => {
 
 test('several at once are all shown, the most disabling first', () => {
   assert.deepEqual(
-    statusLabels({ ...none, hasted: true, slowed: true, disarmed: true, silenced: true, stunned: true }),
-    ['stunned', 'silenced', 'disarmed', 'slowed', 'hasted'],
+    statusLabels({ ...none, invisible: true, hasted: true, slowed: true, disarmed: true, silenced: true, feared: true, stunned: true }),
+    ['stunned', 'feared', 'silenced', 'disarmed', 'slowed', 'hasted', 'invisible'],
   )
 })
 

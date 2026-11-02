@@ -17,6 +17,9 @@ import {
   FINALIZE_LAG,
   abilityOnKey,
   buyProblem,
+  clamp,
+  distanceBetween,
+  hasStatus,
   hastedCooldownTicks,
   getAbilityDef,
   getItem,
@@ -67,13 +70,13 @@ import {
   type SellOrder,
   type ShopZone,
   type SimEntity,
-  type Status,
   type Terrain,
   type Vector2,
   type XpProgress,
 } from '../../../packages/shared/src/index.ts'
 
 const NO_SHOP = 'This mode has no shop.'
+const NO_GOLD = 'This game has no gold or shop.'
 
 export type TrackedOrder = {
   order: GameOrder
@@ -83,6 +86,9 @@ export type TrackedOrder = {
 // What a player has collected, for the HUD: the level their experience makes and how far they are to the next (see `xpProgress`),
 // and their gold and shards.
 export type LocalProgress = XpProgress & { gold: number; shards: number }
+
+// What a player has to spend and carry, and whether it can shop where it is.
+export type LocalLoadout = { gold: number; items: Inventory; inShop: boolean }
 
 // What a monster is doing, for the debug view and whatever else wants to show it: how far it notices, how far from home it
 // goes before it starts to give up, where home is, and what it is up to.
@@ -136,6 +142,8 @@ export type RenderedCharacter =
     deadForSeconds?: number
     // Markers on this character by key, such as 'curse' stacks.
     stacks: Record<string, number>
+    // The champion that has it linked to itself (see `ChampionDef.damageLink`), if one has: the page draws a beam between the two, and no pip for it.
+    linkedBy?: number
     // The bar over a champion that shows how long one of its statuses has left, such as a rage (see `ChampionMeterDef`): how full it is, from 0 to 1, and its
     // colour. Only there while it has any left.
     meter?: { fraction: number; color: string }
@@ -149,6 +157,10 @@ export type RenderedCharacter =
     silenced: boolean
     // Unable to start an auto attack (see `disarm`).
     disarmed: boolean
+    // Running from whoever feared it, and unable to act (see `fear`).
+    feared: boolean
+    // Not to be seen by an enemy, or aimed at by one (see `invisible`): the page draws it faintly to those it is not hidden from.
+    invisible: boolean
     // Dodging every auto attack aimed at it.
     dodging: boolean
     // What it is in the middle of, if anything: an auto attack or an ability, windup or backswing.
@@ -161,7 +173,7 @@ export type RenderedEntity = SimEntity & {
   position: Vector2
   // The circle's radius, or for a box the radius that encloses it. Only circles are drawn from it.
   radius: number
-  visual: 'bolt' | 'field' | 'telegraph' | 'flash'
+  visual: 'bolt' | 'field' | 'telegraph' | 'flash' | 'hidden'
   color?: string
   box?: BoxShape
   // How far through its lifetime it is, from 0 to 1. A telegraph fills in as this grows.
@@ -204,17 +216,21 @@ export type CastPreview = {
   indicator?: AbilityIndicator
   // Absent while the aim would not cast, such as a unit ability over empty ground.
   target?: CastTarget
-  // A unit ability aimed at an enemy beyond its range: the target is shown, but it would not cast.
+  // A unit ability aimed at an enemy (or for allies, a teammate) beyond its range: it would not cast yet, but walk up to them and cast on reaching them.
   outOfRange?: boolean
 }
+
+// How far past its edge a click still picks a champion, however the extra click radius is set.
+export const PICK_SLACK = 6
 
 // What a character is called: a player's name, or a monster's or a turret's (the core of a base is one: `Core`).
 function characterName(character: SimCharacter): string {
   return character.player?.name ?? character.monster?.name ?? character.turret?.name ?? `Player ${character.id}`
 }
 
-function hasStatus(statuses: readonly Status[], kind: Status['kind']): boolean {
-  return statuses.some((status) => status.kind === kind)
+// A champion's stats at the level a frame has it, with what its items and its statuses add to them.
+function statsOf(champion: Champion, state: CharacterTickSnapshot | undefined): ChampionStats {
+  return withStatBuffs(withItems(champion.statsAt(state?.getLevel() ?? 1), state?.getItems()), state?.getStatuses())
 }
 
 function countMarkers(markers: readonly Marker[]): Record<string, number> {
@@ -233,6 +249,8 @@ const LOCAL_EXTRAPOLATION_MAX_STEP = 60
 type RenderedRemotePosition = {
   position: Vector2
   updatedAt: number
+  // Whether it was dead when it was last drawn, to tell the frame it comes back on (see `getRenderedCharacterView`).
+  dead: boolean
 }
 
 export class ClientGameState {
@@ -263,6 +281,16 @@ export class ClientGameState {
 
   setLocalCharacterId(characterId: number): void {
     this.localCharacterId = characterId
+  }
+
+  // The character the player controls, once it is in the game.
+  private get localCharacter(): SimCharacter | undefined {
+    return this.localCharacterId === undefined ? undefined : this.simulator.characters.get(this.localCharacterId)
+  }
+
+  // The controlled character as the frame being drawn has it.
+  private localState(now: number): CharacterTickSnapshot | undefined {
+    return this.localCharacterId === undefined ? undefined : this.getSnapshotAtEstimatedTick(now).get(this.localCharacterId)
   }
 
   setNextOrderSequence(sequence: number): void {
@@ -322,9 +350,7 @@ export class ClientGameState {
     oldestPendingOrderAgeMs: number | undefined
     localPosition: Vector2 | undefined
   } {
-    const localCharacter = this.localCharacterId === undefined
-      ? undefined
-      : this.simulator.characters.get(this.localCharacterId)
+    const localCharacter = this.localCharacter
     const oldestPendingOrder = [...this.localOrders.values()]
       .reduce<TrackedOrder | undefined>(
         (oldest, current) => !oldest || current.sentAt < oldest.sentAt ? current : oldest,
@@ -359,9 +385,7 @@ export class ClientGameState {
     this.simulator.replaceFromSnapshot(snapshot)
     this.setServerTick(snapshot.tick, receivedAt)
 
-    const localCharacter = this.localCharacterId === undefined
-      ? undefined
-      : this.simulator.characters.get(this.localCharacterId)
+    const localCharacter = this.localCharacter
     const replicatedOrders = new Set(
       localCharacter?.orders.map((order) => order.seq) ?? [],
     )
@@ -381,18 +405,12 @@ export class ClientGameState {
   }
 
   createMoveOrder(target: Vector2, now = performance.now()): MoveOrder | undefined {
-    if (this.localCharacterId === undefined || !this.simulator.characters.has(this.localCharacterId)) {
-      return undefined
-    }
+    if (!this.localCharacter) return undefined
     return this.issueOrder<MoveOrder>({ tick: this.nextOrderTick(now), type: 'move', target: { ...target } }, now)
   }
 
   createAttackOrder(targetId: number, now = performance.now()): GameAttackOrder | undefined {
-    if (
-      this.localCharacterId === undefined
-      || !this.simulator.characters.has(this.localCharacterId)
-      || !this.simulator.characters.has(targetId)
-    ) return undefined
+    if (!this.localCharacter || !this.simulator.characters.has(targetId)) return undefined
     return this.issueOrder<GameAttackOrder>({ tick: this.nextOrderTick(now), type: 'attack', targetId }, now)
   }
 
@@ -400,30 +418,40 @@ export class ClientGameState {
   // away from its shop, it costs more than the gold it has, or its slot is full), and the reason is given instead; one that can be is done on every peer on that tick, by the same rule
   // (`buyProblem`), so what the shop shows and what the simulator does agree.
   createBuyOrder(itemId: string, now = performance.now()): { ok: true; order: BuyOrder } | { ok: false; reason: string } {
-    if (!this.hasEconomy) return { ok: false, reason: NO_SHOP }
-    const loadout = this.getLocalLoadout(now)
-    if (!loadout) return { ok: false, reason: 'Your champion is not in the game.' }
-    if (!loadout.inShop) return { ok: false, reason: NOT_IN_SHOP }
-    const problem = buyProblem(getItem(itemId), loadout.gold, loadout.items)
+    const shop = this.shopLoadout(now)
+    if (!shop.ok) return shop
+    const problem = buyProblem(getItem(itemId), shop.loadout.gold, shop.loadout.items)
     if (problem) return { ok: false, reason: problem }
-    const order = this.issueOrder<BuyOrder>({ tick: this.nextOrderTick(now), type: 'buy', itemId }, now)
-    return order ? { ok: true, order } : { ok: false, reason: 'The order could not be given.' }
+    return this.issueShopOrder<BuyOrder>({ tick: this.nextOrderTick(now), type: 'buy', itemId }, now)
   }
 
   // Sells what the controlled champion has in a slot, in its shop.
   createSellOrder(slot: ItemSlot, now = performance.now()): { ok: true; order: SellOrder } | { ok: false; reason: string } {
+    const shop = this.shopLoadout(now)
+    if (!shop.ok) return shop
+    if (shop.loadout.items[slot] === undefined) return { ok: false, reason: `You have nothing in your ${ITEM_SLOT_NAMES[slot].toLowerCase()} slot.` }
+    return this.issueShopOrder<SellOrder>({ tick: this.nextOrderTick(now), type: 'sell', slot }, now)
+  }
+
+  // What the controlled champion has to spend and carry, if it can shop where it is: the reason it cannot, if not.
+  private shopLoadout(now: number): { ok: true; loadout: LocalLoadout } | { ok: false; reason: string } {
     if (!this.hasEconomy) return { ok: false, reason: NO_SHOP }
+    if (!this.hasGold) return { ok: false, reason: NO_GOLD }
     const loadout = this.getLocalLoadout(now)
     if (!loadout) return { ok: false, reason: 'Your champion is not in the game.' }
     if (!loadout.inShop) return { ok: false, reason: NOT_IN_SHOP }
-    if (loadout.items[slot] === undefined) return { ok: false, reason: `You have nothing in your ${ITEM_SLOT_NAMES[slot].toLowerCase()} slot.` }
-    const order = this.issueOrder<SellOrder>({ tick: this.nextOrderTick(now), type: 'sell', slot }, now)
-    return order ? { ok: true, order } : { ok: false, reason: 'The order could not be given.' }
+    return { ok: true, loadout }
+  }
+
+  private issueShopOrder<T extends BuyOrder | SellOrder>(order: Omit<T, 'id' | 'seq'>, now: number): { ok: true; order: T } | { ok: false; reason: string } {
+    const issued = this.issueOrder<T>(order, now)
+    return issued ? { ok: true, order: issued } : { ok: false, reason: 'The order could not be given.' }
   }
 
   // Aim is in arena coordinates. The ability is resolved from the slot now, so
-  // the order names what was cast rather than which key was pressed.
-  createCastOrder(slot: number, aim: Vector2, now = performance.now()): CastAttempt {
+  // the order names what was cast rather than which key was pressed. With `selfCast`, an ability for allies is cast on the champion itself, wherever the aim is (the
+  // Alt key): see `abilitySelfCasts`.
+  createCastOrder(slot: number, aim: Vector2, now = performance.now(), selfCast = false): CastAttempt {
     const ability = this.abilityInSlot(slot)
     if (!ability.ok) return ability
     const { localCharacterId } = ability
@@ -438,12 +466,23 @@ export class ClientGameState {
     const blocker = this.castBlocker(def, state, entityOut)
     if (blocker) return { ok: false, reason: blocker }
     const origin = state.getPosition()
-    const aimed = this.castTarget(def, origin, aim, now, frame)
+    const aimed = selfCast && def.targetsAllies
+      ? { ok: true as const, target: { mode: 'unit', unitId: localCharacterId } satisfies CastTarget }
+      : this.castTarget(def, origin, aim, now, frame)
     if (!aimed.ok) return { ok: false, reason: aimed.reason }
     const { target } = aimed
 
     const order = this.issueOrder<CastOrder>({ tick, type: 'cast', abilityId: def.id, target, origin }, now)
     return order ? { ok: true, order } : { ok: false, reason: 'The cast could not be scheduled.' }
+  }
+
+  // Whether the ability on a slot can be cast on the champion itself by a key (Alt): one for allies (`AbilityDef.targetsAllies`), as it is on the key now (so a recast counts).
+  // The others are cast as they always are, since there is no one to aim at but an enemy, or somewhere on the ground.
+  abilitySelfCasts(slot: number, now = performance.now()): boolean {
+    const ability = this.abilityInSlot(slot)
+    if (!ability.ok) return false
+    const frame = this.getSnapshotAtEstimatedTick(now)
+    return abilityOnKey(ability.def, this.entityOut(frame, ability.localCharacterId)).targetsAllies === true
   }
 
   // Whether the ability in a slot has something to aim; a self-cast does not. A key that has
@@ -477,6 +516,7 @@ export class ClientGameState {
     if (!state.getAbilityCooldown(def.id).ready) return `${def.id} is on cooldown.`
     const statuses = state.getStatuses()
     if (hasStatus(statuses, 'stun')) return 'You cannot cast while stunned.'
+    if (hasStatus(statuses, 'fear')) return 'You cannot cast while feared.'
     if (hasStatus(statuses, 'silence')) return 'You cannot cast while silenced.'
     if (!meetsRequirement(def, entityOut, (abilityId) => !state.getAbilityCooldown(abilityId).ready) && def.requires) {
       const base = def.requires.out
@@ -512,28 +552,26 @@ export class ClientGameState {
     const origin = frame.get(localCharacterId)?.getPosition()
     if (!origin) return undefined
     const aimed = this.castTarget(def, origin, aim, now, frame, characters)
-    const shown = aimed.ok ? aimed.target : aimed.outOfRange
     return {
       abilityId: def.id,
       targeting: def.targeting,
       range: def.range,
       ...(def.minRange ? { minRange: def.minRange } : {}),
       ...(def.indicator ? { indicator: { ...def.indicator } } : {}),
-      ...(shown ? { target: shown } : {}),
-      ...(!aimed.ok && aimed.outOfRange ? { outOfRange: true } : {}),
+      ...(aimed.ok ? { target: aimed.target } : {}),
+      ...(aimed.ok && aimed.outOfRange ? { outOfRange: true } : {}),
     }
   }
 
   private abilityInSlot(slot: number):
     | { ok: true; localCharacterId: number; def: AbilityDef }
     | { ok: false; reason: string } {
-    const localCharacterId = this.localCharacterId
-    const character = localCharacterId === undefined ? undefined : this.simulator.characters.get(localCharacterId)
-    if (localCharacterId === undefined || !character) return { ok: false, reason: 'Your champion is not available.' }
+    const character = this.localCharacter
+    if (!character) return { ok: false, reason: 'Your champion is not available.' }
     const abilityId = character.champion.abilityInSlot(slot)
     const def = abilityId === undefined ? undefined : getAbilityDef(abilityId)
     if (!def) return { ok: false, reason: 'No ability is bound to that key.' }
-    return { ok: true, localCharacterId, def }
+    return { ok: true, localCharacterId: character.id, def }
   }
 
   // `frame` is where the simulator will measure a unit's reach from: its position there is what
@@ -545,42 +583,58 @@ export class ClientGameState {
     now: number,
     frame: GameTickSnapshot,
     characters?: readonly RenderedCharacter[],
-  ): { ok: true; target: CastTarget } | { ok: false; reason: string; outOfRange?: CastTarget } {
+  ): { ok: true; target: CastTarget; outOfRange?: true } | { ok: false; reason: string } {
     if (def.targeting === 'none') return { ok: true, target: { mode: 'none' } }
     if (def.targeting === 'point') {
-      const dx = aim.x - origin.x
-      const dy = aim.y - origin.y
-      const distance = Math.hypot(dx, dy)
+      const distance = distanceBetween(origin, aim)
       const minRange = def.minRange ?? 0
       // An ability with a least distance has no heading from right on top of the caster.
       if (distance === 0 && minRange > 0) return { ok: false, reason: 'Aim away from your champion.' }
       // Held between the nearest and the farthest it can be aimed.
-      const held = Math.max(minRange, Math.min(def.range, distance))
+      const held = clamp(distance, minRange, def.range)
       const scale = distance === 0 ? 1 : held / distance
-      return { ok: true, target: { mode: 'point', point: { x: origin.x + dx * scale, y: origin.y + dy * scale } } }
+      return { ok: true, target: { mode: 'point', point: { x: origin.x + (aim.x - origin.x) * scale, y: origin.y + (aim.y - origin.y) * scale } } }
     }
     if (def.targeting === 'direction') {
       const dir = quantizeDirection({ x: aim.x - origin.x, y: aim.y - origin.y })
       if (!dir) return { ok: false, reason: 'Aim away from your champion.' }
       return { ok: true, target: { mode: 'direction', dir } }
     }
-    const unit = this.getEnemyNear(aim, now, characters)
-    if (!unit) return { ok: false, reason: `Aim ${def.id} at an enemy.` }
-    const target: CastTarget = { mode: 'unit', unitId: unit.id }
-    const unitAt = frame.get(unit.id)?.getPosition()
-    if (!unitAt || !withinCastRange(origin, unitAt, def.range)) {
-      return { ok: false, reason: `${def.id} is out of range of that target.`, outOfRange: target }
+    let unitId: number
+    if (def.targetsLinked) {
+      // On whoever the champion has linked, wherever the cursor is, unless it is on the champion itself.
+      const self = this.localCharacterId
+      const linked = self === undefined ? undefined : this.getAllyNear(aim, now, characters)?.id === self ? self : this.linkedUnit(frame, self)
+      if (linked === undefined) return { ok: false, reason: 'You have no one linked.' }
+      unitId = linked
+    } else {
+      const unit = def.targetsAllies ? this.getAllyNear(aim, now, characters) : this.getEnemyNear(aim, now, characters)
+      if (!unit) return { ok: false, reason: def.targetsAllies ? `Aim ${def.id} at a teammate, or at yourself.` : `Aim ${def.id} at an enemy.` }
+      unitId = unit.id
     }
+    const target: CastTarget = { mode: 'unit', unitId }
+    const unitAt = frame.get(unitId)?.getPosition()
+    // Out of its reach it is still cast: the simulator walks the champion up to the target, as it does to attack an enemy, and casts on reaching it.
+    if (!unitAt || !withinCastRange(origin, unitAt, def.range)) return { ok: true, target, outOfRange: true }
     return { ok: true, target }
   }
 
+  // The unit this champion has linked to itself in a frame (see `ChampionDef.damageLink`): the one that carries a marker of the key its champion links by that is the champion's own.
+  private linkedUnit(frame: GameTickSnapshot, ownerId: number): number | undefined {
+    const key = this.simulator.characters.get(ownerId)?.champion.damageLink?.key
+    if (key === undefined) return undefined
+    for (const character of this.simulator.characters.values()) {
+      if (character.id !== ownerId && frame.get(character.id)?.getMarkers().some((marker) => marker.key === key && marker.ownerId === ownerId)) return character.id
+    }
+    return undefined
+  }
+
   getAbilityCooldowns(now = performance.now()): AbilityCooldown[] {
-    const localCharacterId = this.localCharacterId
-    const character = localCharacterId === undefined ? undefined : this.simulator.characters.get(localCharacterId)
-    if (localCharacterId === undefined || !character) return []
+    const character = this.localCharacter
+    if (!character) return []
     const snapshot = this.getSnapshotAtEstimatedTick(now)
-    const state = snapshot.get(localCharacterId)
-    const entityOut = this.entityOut(snapshot, localCharacterId)
+    const state = snapshot.get(character.id)
+    const entityOut = this.entityOut(snapshot, character.id)
     return character.champion.abilities.flatMap((keyed, slot) => {
       const keyedDef = getAbilityDef(keyed)
       if (!keyedDef) return []
@@ -595,7 +649,7 @@ export class ClientGameState {
           now,
         ),
         // The whole cooldown is the ability's shortened by the champion's haste, which is what the simulator starts it at.
-        cooldownTicks: hastedCooldownTicks(def.cooldownTicks, withStatBuffs(withItems(character.champion.statsAt(state?.getLevel() ?? 1), state?.getItems()), state?.getStatuses()).haste),
+        cooldownTicks: hastedCooldownTicks(def.cooldownTicks, statsOf(character.champion, state).haste),
       }]
     })
   }
@@ -611,6 +665,14 @@ export class ClientGameState {
     return this.simulator.terrain
   }
 
+  // How far past the edge of an enemy's body a click still picks it, on top of the small slack every click has (the Controls menu sets it). It makes the
+  // enemy easier to hit with the mouse, for attacks and for abilities aimed at a unit, and is about the mouse alone: no rule of the game reads it.
+  private extraPickRadius = 0
+
+  setExtraPickRadius(radius: number): void {
+    this.extraPickRadius = Number.isFinite(radius) ? Math.max(0, radius) : 0
+  }
+
   // The enemy under a point: the click that attacks, and the aim of an ability aimed at a unit.
   // Teammates are never one, so clicking on one just walks there. Nor is one that is not seen.
   getEnemyNear(
@@ -618,21 +680,29 @@ export class ClientGameState {
     now = performance.now(),
     characters: readonly RenderedCharacter[] = this.getCharacters(now),
   ): RenderedCharacter | undefined {
-    const localTeam = this.localCharacterId === undefined
-      ? undefined
-      : this.simulator.characters.get(this.localCharacterId)?.team
-    return characters
-      .filter((character) => character.id !== this.localCharacterId
-        && !character.dead
-        && !character.invulnerable
-        && character.team !== localTeam
-        && this.canSee(character))
-      .map((character) => ({
-        character,
-        distance: Math.hypot(character.position.x - point.x, character.position.y - point.y),
-      }))
-      .filter(({ character, distance }) => distance <= character.champion.radius + 6)
-      .sort((left, right) => left.distance - right.distance)[0]?.character
+    const localTeam = this.localCharacter?.team
+    return this.closestTo(
+      point,
+      characters,
+      (character) => character.id !== this.localCharacterId && !character.invulnerable && character.team !== localTeam,
+      PICK_SLACK + this.extraPickRadius,
+    )
+  }
+
+  // The teammate under a point, or the local champion itself: the aim of an ability for allies (`AbilityDef.targetsAllies`), so pointing at yourself is the way to cast it on
+  // yourself. A turret or a core of the team is not one, nor is a monster.
+  getAllyNear(
+    point: Vector2,
+    now = performance.now(),
+    characters: readonly RenderedCharacter[] = this.getCharacters(now),
+  ): RenderedCharacter | undefined {
+    const localTeam = this.localCharacter?.team
+    return this.closestTo(
+      point,
+      characters,
+      (character) => character.team === localTeam && character.turret === undefined && character.monster === undefined,
+      PICK_SLACK + this.extraPickRadius,
+    )
   }
 
   // The living character that is seen under a point, whoever it is on: the click that looks at someone (`getInspection`), where the click that
@@ -642,14 +712,27 @@ export class ClientGameState {
     now = performance.now(),
     characters: readonly RenderedCharacter[] = this.getCharacters(now),
   ): RenderedCharacter | undefined {
-    return characters
-      .filter((character) => !character.dead && this.canSee(character))
-      .map((character) => ({
-        character,
-        distance: Math.hypot(character.position.x - point.x, character.position.y - point.y),
-      }))
-      .filter(({ character, distance }) => distance <= character.champion.radius + 6)
-      .sort((left, right) => left.distance - right.distance)[0]?.character
+    return this.closestTo(point, characters, () => true, PICK_SLACK)
+  }
+
+  // The living character that is seen and `wanted` nearest a point, if its body is within `slack` of the point (any distance, with none). Of two as near as each other, the first.
+  private closestTo(
+    point: Vector2,
+    characters: readonly RenderedCharacter[],
+    wanted: (character: RenderedCharacter) => boolean,
+    slack?: number,
+  ): RenderedCharacter | undefined {
+    let closest: RenderedCharacter | undefined
+    let closestGap = Infinity
+    for (const character of characters) {
+      if (character.dead || !wanted(character) || !this.canSee(character)) continue
+      const gap = distanceBetween(character.position, point)
+      if (gap < closestGap && (slack === undefined || gap <= character.champion.radius + slack)) {
+        closest = character
+        closestGap = gap
+      }
+    }
+    return closest
   }
 
   // What to say of a character that has been clicked on, as of the frame being drawn: who it is, how it stands, its stats at its level with what its items and
@@ -661,7 +744,7 @@ export class ClientGameState {
     if (!sim || !state) return undefined
     const items = state.getItems()
     const level = state.getLevel()
-    const localTeam = this.localCharacterId === undefined ? undefined : this.simulator.characters.get(this.localCharacterId)?.team
+    const localTeam = this.localCharacter?.team
     return {
       id: character.id,
       name: character.name ?? `Player ${character.id}`,
@@ -670,8 +753,8 @@ export class ClientGameState {
       // A player's level is shown where there are levels (as it is over its head); a monster's always is, since it grows by what it kills.
       ...(character.monster ? { level } : character.level !== undefined ? { level: character.level } : {}),
       health: { hp: character.health?.hp ?? 0, maxHp: character.health?.maxHp ?? 0, shield: character.totalShield },
-      stats: withStatBuffs(withItems(sim.champion.statsAt(level), items), state.getStatuses()),
-      ...(character.player && this.simulator.hasEconomy ? { items } : {}),
+      stats: statsOf(sim.champion, state),
+      ...(character.player && this.simulator.hasGold ? { items } : {}),
     }
   }
 
@@ -680,21 +763,10 @@ export class ClientGameState {
   // to and attacked, as when it is right-clicked. Two as near as each other: the first, which is the same for
   // everyone.
   getClosestEnemy(point: Vector2, now = performance.now()): RenderedCharacter | undefined {
-    if (this.localCharacterId === undefined) return undefined
     const characters = this.getCharacters(now)
     const local = characters.find((character) => character.id === this.localCharacterId)
     if (!local) return undefined
-    let closest: RenderedCharacter | undefined
-    let closestDistance = Infinity
-    for (const character of characters) {
-      if (character.dead || character.invulnerable || character.team === local.team || !this.canSee(character)) continue
-      const distance = Math.hypot(character.position.x - point.x, character.position.y - point.y)
-      if (distance < closestDistance) {
-        closest = character
-        closestDistance = distance
-      }
-    }
-    return closest
+    return this.closestTo(point, characters, (character) => !character.invulnerable && character.team !== local.team)
   }
 
   getLocalCharacterId(): number | undefined {
@@ -703,7 +775,7 @@ export class ClientGameState {
 
   // The team of the controlled champion, which the results are told from the point of view of.
   getLocalTeam(): number | undefined {
-    return this.localCharacterId === undefined ? undefined : this.simulator.characters.get(this.localCharacterId)?.team
+    return this.localCharacter?.team
   }
 
   // Who the local champion is going after: set by an attack order, and kept (through walking up to
@@ -711,12 +783,11 @@ export class ClientGameState {
   // The way the controlled champion is walking, for the debug view: where it is, then each point of the
   // path round the walls that it heads for, ending at where it is going. Nothing while it is not walking.
   getLocalPath(now = performance.now()): Vector2[] | undefined {
-    const characterId = this.localCharacterId
-    const champion = characterId === undefined ? undefined : this.simulator.characters.get(characterId)?.champion
-    if (characterId === undefined || !champion) return undefined
-    const state = this.getSnapshotAtEstimatedTick(now).get(characterId)
-    const target = state?.getMoveTarget()
-    if (!state || !target || state.isDashing() || state.isDead()) return undefined
+    const champion = this.localCharacter?.champion
+    const state = this.localState(now)
+    if (!champion || !state) return undefined
+    const target = state.getMoveTarget()
+    if (!target || state.isDashing() || state.isDead()) return undefined
     const from = state.getPosition()
     const route = this.simulator.terrain.path(from, target, champion.radius)
     return route && [from, ...route]
@@ -724,14 +795,12 @@ export class ClientGameState {
 
   // Where the controlled champion is in the frame being drawn, and whether it is walking (or dashing) somewhere.
   getLocalMotion(now = performance.now()): { position: Vector2; moving: boolean } | undefined {
-    if (this.localCharacterId === undefined) return undefined
-    const state = this.getSnapshotAtEstimatedTick(now).get(this.localCharacterId)
+    const state = this.localState(now)
     return state ? { position: state.getPosition(), moving: state.getMoveTarget() !== undefined } : undefined
   }
 
   getLocalAttackTarget(now = performance.now()): number | undefined {
-    if (this.localCharacterId === undefined) return undefined
-    return this.getSnapshotAtEstimatedTick(now).get(this.localCharacterId)?.getAttackTarget()
+    return this.localState(now)?.getAttackTarget()
   }
 
   // How far the controlled champion is from being able to attack again, from 0 to 1. A swing spends the attack when its hit lands (or its shot leaves),
@@ -739,13 +808,10 @@ export class ClientGameState {
   // start, which is `nextAttackTick`, set as the swing lands, and it stays as it was while a swing winds up, so a swing that is cancelled does not
   // move it. What it fills over is the wait the frame says it set, so a change of attack speed during the wait does not move the bar.
   getAttackCooldownProgress(now = performance.now()): number {
-    const localCharacterId = this.localCharacterId
-    const champion = localCharacterId === undefined
-      ? undefined
-      : this.simulator.characters.get(localCharacterId)?.champion
-    if (localCharacterId === undefined || !champion) return 1
+    const champion = this.localCharacter?.champion
+    if (!champion) return 1
     const snapshot = this.getSnapshotAtEstimatedTick(now)
-    const local = snapshot.get(localCharacterId)
+    const local = this.localCharacterId === undefined ? undefined : snapshot.get(this.localCharacterId)
     const cooldown = local?.getCooldown()
     if (!cooldown) return 1
     const ticksRemaining = this.fractionalTicksRemaining(snapshot.tick, cooldown.ticksRemaining, now)
@@ -759,7 +825,7 @@ export class ClientGameState {
       const itemSpeedBonus = itemAttackSpeedBonus(local?.getItems())
       total = champion.attackCooldownTicksWith(statuses, level, itemSpeed, itemSpeedBonus) - champion.attackWindupTicksWith(statuses, level, itemSpeed, itemSpeedBonus)
     }
-    return Math.max(0, Math.min(1, 1 - ticksRemaining / Math.max(1, total)))
+    return clamp(1 - ticksRemaining / Math.max(1, total), 0, 1)
   }
 
   applyOrder(order: GameBroadcastOrder): boolean {
@@ -785,10 +851,16 @@ export class ClientGameState {
     return this.simulator.hasEconomy
   }
 
+  // Whether it has gold, and so a shop and items (see `Simulator.hasGold`): a game with levels can be played without. If not, the page has the level and the stats and no items,
+  // gold or shop.
+  get hasGold(): boolean {
+    return this.simulator.hasGold
+  }
+
   // What the controlled champion has collected: its gold and shards, and its level with how far it is to the next. Nothing before the
   // champion is in the game.
   getLocalProgress(now = performance.now()): LocalProgress | undefined {
-    const character = this.localCharacterId === undefined ? undefined : this.simulator.characters.get(this.localCharacterId)
+    const character = this.localCharacter
     if (!character) return undefined
     // The experience and the gold are in the frame being drawn, so they are as predicted as the champion on screen (a purchase shows as soon as its
     // tick comes); the shards are the character's, which count only the kills that can no longer be undone.
@@ -798,20 +870,19 @@ export class ClientGameState {
 
   // The controlled champion's stats at its level, with what its items add to them, as of the frame being drawn: what the stats panel lists.
   getLocalStats(now = performance.now()): ChampionStats | undefined {
-    const character = this.localCharacterId === undefined ? undefined : this.simulator.characters.get(this.localCharacterId)
-    if (!character) return undefined
-    const state = this.getSnapshotAtEstimatedTick(now).get(character.id)
-    return withStatBuffs(withItems(character.champion.statsAt(state?.getLevel() ?? 1), state?.getItems()), state?.getStatuses())
+    const character = this.localCharacter
+    return character && statsOf(character.champion, this.localState(now))
   }
 
   // What the controlled champion has to spend and what it carries, as of the frame being drawn: what the shop and the item slots show, and
   // what a purchase is checked against before an order for it is sent.
   // `inShop` is whether it can buy and sell where it is (`Simulator.canShop`): in a shop of its team, or dead, or the game has no shops.
-  getLocalLoadout(now = performance.now()): { gold: number; items: Inventory; inShop: boolean } | undefined {
-    if (this.localCharacterId === undefined || !this.simulator.characters.has(this.localCharacterId)) return undefined
+  getLocalLoadout(now = performance.now()): LocalLoadout | undefined {
+    const character = this.localCharacter
+    if (!character) return undefined
     const frame = this.getSnapshotAtEstimatedTick(now)
-    const state = frame.get(this.localCharacterId)
-    return state ? { gold: state.getGold(), items: state.getItems(), inShop: this.simulator.canShop(this.localCharacterId, frame) } : undefined
+    const state = frame.get(character.id)
+    return state ? { gold: state.getGold(), items: state.getItems(), inShop: this.simulator.canShop(character.id, frame) } : undefined
   }
 
   // The score of each team, and for a game on the hill or with flags how they stand, as of the frame being
@@ -998,8 +1069,7 @@ export class ClientGameState {
   }
 
   isLocalDead(now = performance.now()): boolean {
-    if (this.localCharacterId === undefined) return false
-    return this.getSnapshotAtEstimatedTick(now).get(this.localCharacterId)?.isDead() ?? false
+    return this.localState(now)?.isDead() ?? false
   }
 
   applyOrderAck(ack: GameOrderAck, receivedAt = performance.now()): boolean {
@@ -1032,6 +1102,8 @@ export class ClientGameState {
       const meterLeft = meterDef && health?.deathTick === undefined
         ? namedStatusTicksLeft(statuses, character.id, meterDef.status, this.estimateTick(now))
         : 0
+      // Who has this one linked: the owner of a marker of the key its champion links by.
+      const linkedBy = state?.getMarkers().find((marker) => this.simulator.characters.get(marker.ownerId)?.champion.damageLink?.key === marker.key)?.ownerId
       characters.push({
         id: character.id,
         ...(character.player ? { player: { ...character.player } } : {}),
@@ -1057,6 +1129,7 @@ export class ClientGameState {
         ...(health ? { health } : {}),
         totalShield: state?.getShield() ?? 0,
         stacks: countMarkers(state?.getMarkers() ?? []),
+        ...(linkedBy !== undefined ? { linkedBy } : {}),
         ...(meterDef && meterLeft > 0 ? { meter: { fraction: Math.min(1, meterLeft / meterDef.ticks), color: meterDef.color } } : {}),
         hasted: hasStatus(statuses, 'haste'),
         slowed: hasStatus(statuses, 'slow'),
@@ -1067,6 +1140,8 @@ export class ClientGameState {
         blinded: hasStatus(statuses, 'blind'),
         silenced: hasStatus(statuses, 'silence'),
         disarmed: hasStatus(statuses, 'disarm'),
+        feared: hasStatus(statuses, 'fear'),
+        invisible: hasStatus(statuses, 'invisible'),
         dodging: hasStatus(statuses, 'dodge'),
         ...this.getActionView(snapshot, state, now),
         attackRange: character.champion.attackRangeWith(statuses, itemTotals(state?.getItems()).attackRange ?? 0),
@@ -1105,7 +1180,7 @@ export class ClientGameState {
           // It runs one more tick than its lifetime, which is when its expiry effects fire.
           progress: entity.lifetimeTicks === undefined
             ? 0
-            : Math.min(1, Math.max(0, (renderTick - entity.startTick) / (entity.lifetimeTicks + 1))),
+            : clamp((renderTick - entity.startTick) / (entity.lifetimeTicks + 1), 0, 1),
           ...(def.color ? { color: def.color } : {}),
           ...(def.box ? { box: def.box } : {}),
         }]
@@ -1132,7 +1207,7 @@ export class ClientGameState {
     // An ability with no windup goes off the moment it is cast, so there is no casting to show.
     if (action.kind === 'cast' && (getAbilityDef(action.abilityId)?.windUpTicks ?? 0) <= 0) return {}
     const length = action.endTick - action.startTick
-    const progress = length <= 0 ? 1 : Math.min(1, Math.max(0, (this.estimateTick(now) - action.startTick) / length))
+    const progress = length <= 0 ? 1 : clamp((this.estimateTick(now) - action.startTick) / length, 0, 1)
     let aimAt: Vector2 | undefined
     if (action.kind === 'attack') aimAt = snapshot.get(action.targetId)?.getPosition()
     else if (action.target.mode === 'point') aimAt = action.target.point
@@ -1196,7 +1271,7 @@ export class ClientGameState {
       if (fraction === 0 || lowerTick >= current.tick) return { position: from, dead, dashing }
       const to = this.simulator.at(lowerTick + 1).get(characterId)?.getPosition() ?? from
       // Interpolating across a respawn would slide the champion across the arena.
-      if (Math.hypot(to.x - from.x, to.y - from.y) > REMOTE_SNAP_DISTANCE) return { position: from, dead, dashing }
+      if (distanceBetween(from, to) > REMOTE_SNAP_DISTANCE) return { position: from, dead, dashing }
       return {
         position: {
           x: from.x + (to.x - from.x) * fraction,
@@ -1234,11 +1309,11 @@ export class ClientGameState {
     if (!previous) return position
     const stepX = position.x - previous.x
     const stepY = position.y - previous.y
-    const step = Math.hypot(stepX, stepY)
+    const step = distanceBetween(previous, position)
     // A jump this large is a respawn, not movement.
     if (step === 0 || step > LOCAL_EXTRAPOLATION_MAX_STEP) return position
 
-    const advance = Math.min(step * fraction, Math.hypot(target.x - position.x, target.y - position.y))
+    const advance = Math.min(step * fraction, distanceBetween(position, target))
     return { x: position.x + stepX / step * advance, y: position.y + stepY / step * advance }
   }
 
@@ -1263,26 +1338,31 @@ export class ClientGameState {
       this.renderedRemotePositions.set(characterId, {
         position: target,
         updatedAt: now,
+        dead,
       })
       return { position: target, dead }
     }
 
-    // A dash already moves smoothly between ticks, and chasing it at walking pace would lag.
-    if (dashing) {
+    // One that has just come back is where the frame has it: at its spawn point, and not walking there from where it died. (Smoothing would slide it along, in the
+    // sight of everyone, if it died within the snap distance of where it comes back, such as a monster that died a short way from its post.)
+    const revived = rendered.dead && !dead
+    rendered.dead = dead
+    // Drawn where the frame has it, with nothing smoothed.
+    const snap = (): { position: Vector2; dead: boolean } => {
       rendered.position = target
       rendered.updatedAt = now
       return { position: target, dead }
     }
+    if (revived) return snap()
+
+    // A dash already moves smoothly between ticks, and chasing it at walking pace would lag.
+    if (dashing) return snap()
 
     const elapsedSeconds = Math.max(0, now - rendered.updatedAt) / 1000
     const dx = target.x - rendered.position.x
     const dy = target.y - rendered.position.y
-    const distance = Math.hypot(dx, dy)
-    if (distance > REMOTE_SNAP_DISTANCE) {
-      rendered.position = target
-      rendered.updatedAt = now
-      return { position: target, dead }
-    }
+    const distance = distanceBetween(rendered.position, target)
+    if (distance > REMOTE_SNAP_DISTANCE) return snap()
     if (distance === 0 || elapsedSeconds === 0) {
       rendered.updatedAt = now
       return { position: rendered.position, dead }

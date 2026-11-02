@@ -1,12 +1,6 @@
+import { element } from './dom.ts'
 import { generalIconUrl } from './general-icon-urls.ts'
 import type { ItemTooltip } from './shop.ts'
-
-function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, ...children: Node[]): HTMLElementTagNameMap[K] {
-  const made = document.createElement(tag)
-  made.className = className
-  made.append(...children)
-  return made
-}
 
 // The box that follows the pointer over an item, in the shop or in a slot, saying what it is (see `ItemTooltip`): its name, its slot, what it costs,
 // what it adds, and a note. One box serves every item: `bind` ties an element to what to say when it is pointed at, and the box is

@@ -161,22 +161,24 @@ test('a cast reaches exactly as far as its range, centre to centre', () => {
   assert.equal(withinCastRange(origin, { x: 221, y: 260 }, 200), false)
 })
 
-test('a unit ability aimed at an enemy beyond its range is refused with a reason, and issues nothing', () => {
+test('a unit ability aimed at an enemy beyond its range is still ordered: the simulator walks up to the enemy and casts', () => {
   // The test lash reaches 200; this enemy is 300 away and is drawn right under the cursor.
   const far = createClient(300)
   const near = createClient(200)
 
-  const refused = far.createCastOrder(1, { x: 400, y: 100 }, 0)
-  assert.equal(refused.ok, false)
-  assert.match(refused.ok ? '' : refused.reason, /out of range/)
-  // Right on its reach it casts.
+  const ordered = far.createCastOrder(1, { x: 400, y: 100 }, 0)
+  assert.ok(ordered.ok, 'not refused for being out of range')
+  assert.deepEqual(ordered.order.target, { mode: 'unit', unitId: 2 })
   assert.equal(near.createCastOrder(1, { x: 300, y: 100 }, 0).ok, true)
-  // The refused cast used up no order number or tick: the next order is the first.
-  const move = far.createMoveOrder({ x: 200, y: 100 }, 0)
-  assert.equal(move?.seq, 1)
+  // An aim at no enemy at all is still refused, with a reason, and uses up no order number or tick.
+  const nobody = createClient(300)
+  const refused = nobody.createCastOrder(1, { x: 100, y: 900 }, 0)
+  assert.equal(refused.ok, false)
+  assert.match(refused.ok ? '' : refused.reason, /at an enemy/)
+  assert.equal(nobody.createMoveOrder({ x: 200, y: 100 }, 0)?.seq, 1)
 })
 
-test('the indicator shows an out of range target, marked so it can be drawn as one that will not cast', () => {
+test('the indicator shows an out of range target, marked so it can be drawn as one that is walked up to first', () => {
   const far = createClient(300)
   const near = createClient(150)
 
@@ -211,5 +213,5 @@ test('reach is judged where the simulator will judge it, not where the enemy is 
   assert.equal(withinCastRange(origin, real, 200), false)
 
   const preview = gameState.getCastPreview(1, drawn.position, now)
-  assert.equal(preview?.outOfRange, true, 'so the ring is red')
+  assert.equal(preview?.outOfRange, true, 'so the ring is the colour of one that is walked up to')
 })

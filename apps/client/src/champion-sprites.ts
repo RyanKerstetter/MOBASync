@@ -147,6 +147,22 @@ const trinketmaster: SpriteSet = {
   },
 }
 
+// The cloak: a placeholder, the Ninja's sheets copied into its own folder, with the same frame size, place in the frame and timings, until it has art of its own.
+const cloak: SpriteSet = {
+  frameWidth: 32,
+  frameHeight: 32,
+  anchor: { x: 14, y: 24 },
+  scale: 3,
+  facing: 1,
+  clips: {
+    idle: { url: new URL('../../../res/champion/cloak/Idle.png', import.meta.url).href, frames: 4, fps: 6, loop: true },
+    walk: { url: new URL('../../../res/champion/cloak/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
+    attack: { url: new URL('../../../res/champion/cloak/Attack_1.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 3 },
+    cast: { url: new URL('../../../res/champion/cloak/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
+    dead: { url: new URL('../../../res/champion/cloak/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
+  },
+}
+
 // The hammer and the chain: placeholders too, the Swordsman's sheets and the Trinketmaster's copied into their own folders, with the same frame size, place in
 // the frame and timings as the champions they were copied from, until they have art of their own.
 const hammer: SpriteSet = {
@@ -176,6 +192,38 @@ const chain: SpriteSet = {
     attack: { url: new URL('../../../res/champion/chain/Attack_2.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 3 },
     cast: { url: new URL('../../../res/champion/chain/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
     dead: { url: new URL('../../../res/champion/chain/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
+  },
+}
+
+// The sage and the monk: placeholders too, the Archer's sheets (for the ranged sage) and the Swordsman's (for the melee monk) copied into their own folders, with the same frame
+// size, place in the frame and timings as the champions they were copied from, until they have art of their own.
+const sage: SpriteSet = {
+  frameWidth: 32,
+  frameHeight: 32,
+  anchor: { x: 16, y: 24 },
+  scale: 3,
+  facing: 1,
+  clips: {
+    idle: { url: new URL('../../../res/champion/sage/Idle.png', import.meta.url).href, frames: 4, fps: 6, loop: true },
+    walk: { url: new URL('../../../res/champion/sage/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
+    attack: { url: new URL('../../../res/champion/sage/Attack.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 2 },
+    cast: { url: new URL('../../../res/champion/sage/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
+    dead: { url: new URL('../../../res/champion/sage/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
+  },
+}
+
+const monk: SpriteSet = {
+  frameWidth: 32,
+  frameHeight: 32,
+  anchor: { x: 14, y: 24 },
+  scale: 3,
+  facing: 1,
+  clips: {
+    idle: { url: new URL('../../../res/champion/monk/Idle.png', import.meta.url).href, frames: 4, fps: 6, loop: true },
+    walk: { url: new URL('../../../res/champion/monk/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
+    attack: { url: new URL('../../../res/champion/monk/Attack_1.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 3 },
+    cast: { url: new URL('../../../res/champion/monk/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
+    dead: { url: new URL('../../../res/champion/monk/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
   },
 }
 
@@ -324,6 +372,9 @@ export const championSprites: Readonly<Record<string, SpriteSet>> = {
   trinketmaster,
   hammer,
   chain,
+  cloak,
+  sage,
+  monk,
   capricorn,
   soldier,
   grenadier,

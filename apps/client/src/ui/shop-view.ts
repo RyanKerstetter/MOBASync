@@ -1,4 +1,5 @@
 import { createAbilityIcon } from './ability-icon.ts'
+import { element } from './dom.ts'
 import { generalIconUrl } from './general-icon-urls.ts'
 import { itemIconUrl } from './item-icon-urls.ts'
 import type { ItemTooltipController } from './item-tooltip.ts'
@@ -17,13 +18,6 @@ import {
 export type ShopHandlers = {
   // Buys an item. It gives the reason it was not (not enough gold, the slot is full) as words to show, or nothing when the order was sent.
   onBuy(itemId: string): string | undefined
-}
-
-function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, ...children: Node[]): HTMLElementTagNameMap[K] {
-  const made = document.createElement(tag)
-  made.className = className
-  made.append(...children)
-  return made
 }
 
 function goldIcon(className: string): HTMLImageElement {

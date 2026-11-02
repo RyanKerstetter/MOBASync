@@ -1,4 +1,5 @@
 import { nearestFree, type Box } from './exits.js'
+import { clamp, distanceBetween } from './geometry.js'
 import type { Vector2 } from './index.js'
 import type { PathfinderFactory } from './pathfinding.js'
 
@@ -67,7 +68,7 @@ export const createVisibilityGraph: PathfinderFactory = (world) => {
     for (let first = 0; first < corners.length; first += 1) {
       for (let second = first + 1; second < corners.length; second += 1) {
         if (!clear(blockers, corners[first], corners[second])) continue
-        const length = distance(corners[first], corners[second])
+        const length = distanceBetween(corners[first], corners[second])
         edges[first].push({ to: second, length })
         edges[second].push({ to: first, length })
       }
@@ -101,7 +102,7 @@ function findPath(graph: Graph, from: Vector2, to: Vector2): Vector2[] | undefin
   const before = new Array<number>(corners.length).fill(-1)
   const settled = new Array<boolean>(corners.length).fill(false)
   corners.forEach((corner, index) => {
-    if (clear(blockers, start, corner)) best[index] = distance(start, corner)
+    if (clear(blockers, start, corner)) best[index] = distanceBetween(start, corner)
   })
   // The nearest unsettled corner each time, the lowest index on a tie, so every peer takes the same way.
   for (;;) {
@@ -123,7 +124,7 @@ function findPath(graph: Graph, from: Vector2, to: Vector2): Vector2[] | undefin
   let total = Infinity
   corners.forEach((corner, index) => {
     if (best[index] === Infinity || !clear(blockers, corner, end)) return
-    const length = best[index] + distance(corner, end)
+    const length = best[index] + distanceBetween(corner, end)
     if (length < total) {
       total = length
       last = index
@@ -142,8 +143,8 @@ function findPath(graph: Graph, from: Vector2, to: Vector2): Vector2[] | undefin
 // step out to see anything.
 function standable(graph: Graph, point: Vector2): Vector2 | undefined {
   const { inner } = graph
-  let x = Math.max(inner.left, Math.min(inner.right, point.x))
-  let y = Math.max(inner.top, Math.min(inner.bottom, point.y))
+  let x = clamp(point.x, inner.left, inner.right)
+  let y = clamp(point.y, inner.top, inner.bottom)
   for (let attempt = 0; attempt <= MAX_ESCAPES; attempt += 1) {
     const blocker = graph.blockers.find((box) => inside(box, { x, y }))
     if (!blocker) return x === point.x && y === point.y ? point : { x, y }
@@ -158,8 +159,8 @@ function standable(graph: Graph, point: Vector2): Vector2 | undefined {
     let best = choices[0]
     for (const exit of choices) if (exit.cost < best.cost) best = exit
     const side = {
-      x: Math.max(inner.left, Math.min(inner.right, best.to.x)),
-      y: Math.max(inner.top, Math.min(inner.bottom, best.to.y)),
+      x: clamp(best.to.x, inner.left, inner.right),
+      y: clamp(best.to.y, inner.top, inner.bottom),
     }
     // That side can be into the next wall, where two meet: leaving one is going into the other, and so on until it gives up, which
     // is a body that cannot be routed anywhere and an order that does nothing. Then it leaves by the nearest way clear of all of them.
@@ -178,12 +179,6 @@ function within(box: Box, point: Vector2): boolean {
 // Strictly inside: on the edge is outside, so a path can run along it.
 function inside(box: Box, point: Vector2): boolean {
   return point.x > box.left && point.x < box.right && point.y > box.top && point.y < box.bottom
-}
-
-function distance(from: Vector2, to: Vector2): number {
-  const dx = to.x - from.x
-  const dy = to.y - from.y
-  return Math.sqrt(dx * dx + dy * dy)
 }
 
 // Whether the straight line from one point to another gets through without going into any of the boxes.

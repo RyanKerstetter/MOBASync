@@ -9,6 +9,7 @@ import {
 import { createAbilityIcon } from './ability-icon.ts'
 import { abilityIconUrl } from './ability-icon-urls.ts'
 import { abilityTooltip } from './ability-tooltip.ts'
+import { element } from './dom.ts'
 import { generalIconUrl } from './general-icon-urls.ts'
 import { itemIconUrl } from './item-icon-urls.ts'
 import type { ItemTooltipController } from './item-tooltip.ts'
@@ -40,6 +41,9 @@ export type HudInput = {
   // Whether the game has an economy (levels, gold, items: see `modeHasEconomy`). Without, the two side panels, of the level and stats and of the items and
   // shops, are not shown, and the abilities and health stand alone. Left out, it is as it last was (with, to start).
   economy?: boolean
+  // Whether the game has gold, which the items and the shops are for (see `Simulator.hasGold`). Without, the panel of the items and shops is not shown, as the level and the
+  // stats are (if it has an economy). Left out, it follows `economy`.
+  gold?: boolean
   // How long until the controlled champion is back, while it is dead.
   respawnSeconds?: number
   // The controlled champion is dead and will not come back (see `GameState.isLocalOutOfTheGame`).
@@ -68,13 +72,6 @@ type HudSlot = {
   time: HTMLElement
   // What the slot shows now, which its tooltip is told from.
   view?: AbilitySlotView
-}
-
-function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, ...children: Node[]): HTMLElementTagNameMap[K] {
-  const made = document.createElement(tag)
-  made.className = className
-  made.append(...children)
-  return made
 }
 
 // A little picture from res/general (the gold, the shard), drawn with hard edges. With no file for it there is no picture.
@@ -195,7 +192,7 @@ export function createHudView(container: HTMLElement, handlers?: HudHandlers) {
       root.classList.toggle('is-dead', input.dead)
       if (input.economy !== undefined) {
         statsPanel.hidden = !input.economy
-        shopPanel.hidden = !input.economy
+        shopPanel.hidden = !(input.gold ?? input.economy)
       }
       if (input.progress) {
         championLevel = input.progress.level

@@ -1,5 +1,6 @@
 import { GAME_ARENA_HEIGHT, GAME_ARENA_WIDTH } from './constants.js'
 import { nearestFree } from './exits.js'
+import { clamp, distanceBetween } from './geometry.js'
 import type { Vector2 } from './index.js'
 import type { Pathfinder, PathfinderFactory } from './pathfinding.js'
 import { createVisibilityGraph } from './visibility-graph.js'
@@ -12,6 +13,8 @@ export type TerrainData = {
   width: number
   height: number
   walls: Array<[number, number, number, number]>
+  // The bushes, in the same form. Left out when the ground has none, which keeps a snapshot of a map without any as it was.
+  bushes?: Array<[number, number, number, number]>
 }
 
 // How far a body may sit inside a wall before it is pushed out, so one pushed out to exactly its
@@ -26,6 +29,10 @@ const MAX_PASSES = 4
 // are not part of the simulation's frames. They stop champions walking (and pathfinding plans
 // around them) but nothing else: attacks, abilities, dashes, blinks and knockbacks go over them.
 //
+// The bushes are on the ground too. They stop nothing, and no rule of the game reads them: they are
+// for what the page shows, which is that a team cannot see into one unless it has someone in it (see
+// `bushAt`, and `TeamVision` in the client).
+//
 // Positions and sizes are world units, from the arena's top left corner. A snapshot carries the
 // terrain (`toData`), so a client plays on exactly the ground the server does.
 export class Terrain {
@@ -35,6 +42,11 @@ export class Terrain {
   readonly height: number
   // In a fixed order, so every peer visits them in the same order whatever order the map listed them.
   readonly walls: readonly Rect[]
+  // In a fixed order too.
+  readonly bushes: readonly Rect[]
+  // For each bush, the patch it is in: the lowest index of the bushes that it overlaps or touches, through others that do. A patch drawn as
+  // several rectangles is one bush to stand in.
+  private readonly patches: readonly number[]
   private readonly pathfinder: Pathfinder
 
   constructor(
@@ -42,10 +54,13 @@ export class Terrain {
     walls: readonly Rect[] = [],
     // How champions find a way around the walls. Every peer of a game must use the same one.
     createPathfinder: PathfinderFactory = createVisibilityGraph,
+    bushes: readonly Rect[] = [],
   ) {
     this.width = arena.width
     this.height = arena.height
-    this.walls = walls.map((wall) => ({ ...wall })).sort(compareWalls)
+    this.walls = walls.map((wall) => ({ ...wall })).sort(compareRects)
+    this.bushes = bushes.map((bush) => ({ ...bush })).sort(compareRects)
+    this.patches = patchesOf(this.bushes)
     this.pathfinder = createPathfinder({ width: this.width, height: this.height, walls: this.walls })
   }
 
@@ -59,8 +74,9 @@ export class Terrain {
   static fromData(data: TerrainData, createPathfinder?: PathfinderFactory): Terrain {
     return new Terrain(
       data,
-      data.walls.map(([x, y, width, height]) => ({ x, y, width, height })),
+      data.walls.map(rectOf),
       createPathfinder,
+      (data.bushes ?? []).map(rectOf),
     )
   }
 
@@ -68,7 +84,8 @@ export class Terrain {
     return {
       width: this.width,
       height: this.height,
-      walls: this.walls.map((wall): [number, number, number, number] => [wall.x, wall.y, wall.width, wall.height]),
+      walls: this.walls.map(tupleOf),
+      ...(this.bushes.length > 0 ? { bushes: this.bushes.map(tupleOf) } : {}),
     }
   }
 
@@ -76,19 +93,24 @@ export class Terrain {
   sameAs(data: TerrainData): boolean {
     return data.width === this.width
       && data.height === this.height
-      && data.walls.length === this.walls.length
-      && this.walls.every((wall, index) => {
-        const [x, y, width, height] = data.walls[index]
-        return wall.x === x && wall.y === y && wall.width === width && wall.height === height
-      })
+      && sameRects(this.walls, data.walls)
+      && sameRects(this.bushes, data.bushes ?? [])
+  }
+
+  // The bush a point is in, if it is in one, as a number that is the same for every point of the same bush and different for another: bushes that
+  // overlap or touch are one. The edge is in. Two points are in the same bush when this gives the same number for both.
+  bushAt(point: Vector2): number | undefined {
+    const index = this.bushes.findIndex((bush) =>
+      point.x >= bush.x && point.x <= bush.x + bush.width && point.y >= bush.y && point.y <= bush.y + bush.height)
+    return index < 0 ? undefined : this.patches[index]
   }
 
   // The point held inside the arena for a body of this radius. It is all that holds a dash, a shot
   // or a following entity, which pass over walls.
   clamp(position: Vector2, radius: number): Vector2 {
     return {
-      x: Math.max(radius, Math.min(this.width - radius, position.x)),
-      y: Math.max(radius, Math.min(this.height - radius, position.y)),
+      x: clamp(position.x, radius, this.width - radius),
+      y: clamp(position.y, radius, this.height - radius),
     }
   }
 
@@ -139,25 +161,56 @@ export class Terrain {
     let total = 0
     let last = from
     for (const point of route) {
-      const dx = point.x - last.x
-      const dy = point.y - last.y
-      total += Math.sqrt(dx * dx + dy * dy)
+      total += distanceBetween(last, point)
       last = point
     }
     return total
   }
 }
 
-function compareWalls(left: Rect, right: Rect): number {
+function compareRects(left: Rect, right: Rect): number {
   return left.y - right.y || left.x - right.x || left.height - right.height || left.width - right.width
+}
+
+const rectOf = ([x, y, width, height]: [number, number, number, number]): Rect => ({ x, y, width, height })
+const tupleOf = (rect: Rect): [number, number, number, number] => [rect.x, rect.y, rect.width, rect.height]
+
+function sameRects(rects: readonly Rect[], tuples: ReadonlyArray<readonly [number, number, number, number]>): boolean {
+  return rects.length === tuples.length
+    && rects.every((rect, index) => {
+      const [x, y, width, height] = tuples[index]
+      return rect.x === x && rect.y === y && rect.width === width && rect.height === height
+    })
+}
+
+// Which patch each rectangle is in (see `Terrain.patches`): the lowest index among those it is joined to.
+function patchesOf(rects: readonly Rect[]): number[] {
+  const patch = rects.map((_, index) => index)
+  const root = (index: number): number => {
+    let at = index
+    while (patch[at] !== at) at = patch[at]
+    return at
+  }
+  for (let first = 0; first < rects.length; first += 1) {
+    for (let second = first + 1; second < rects.length; second += 1) {
+      const one = rects[first]
+      const other = rects[second]
+      const joined = one.x <= other.x + other.width && other.x <= one.x + one.width
+        && one.y <= other.y + other.height && other.y <= one.y + one.height
+      if (!joined) continue
+      const low = Math.min(root(first), root(second))
+      patch[Math.max(root(first), root(second))] = low
+    }
+  }
+  return rects.map((_, index) => root(index))
 }
 
 // Whether a circle with its centre at (x, y) overlaps the wall, by more than the tolerance.
 function overlaps(x: number, y: number, radius: number, wall: Rect): boolean {
   const reach = radius - PENETRATION_TOLERANCE
   if (reach <= 0) return false
-  const dx = x - Math.max(wall.x, Math.min(wall.x + wall.width, x))
-  const dy = y - Math.max(wall.y, Math.min(wall.y + wall.height, y))
+  const dx = x - clamp(x, wall.x, wall.x + wall.width)
+  const dy = y - clamp(y, wall.y, wall.y + wall.height)
   return dx * dx + dy * dy < reach * reach
 }
 
@@ -179,8 +232,8 @@ function pushOut(x: number, y: number, radius: number, terrain: Terrain, index: 
   const wall = terrain.walls[index]
   const right = wall.x + wall.width
   const bottom = wall.y + wall.height
-  const nearestX = Math.max(wall.x, Math.min(right, x))
-  const nearestY = Math.max(wall.y, Math.min(bottom, y))
+  const nearestX = clamp(x, wall.x, right)
+  const nearestY = clamp(y, wall.y, bottom)
   const dx = x - nearestX
   const dy = y - nearestY
   const distanceSquared = dx * dx + dy * dy

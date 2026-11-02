@@ -37,6 +37,12 @@ export class EntityLayer {
   private addActor(entity: RenderedEntity): EntityActor {
     const node = new Container()
     let fill: Graphics | undefined
+    if (entity.visual === 'hidden') {
+      // Kept (so it comes and goes with the entity), but with nothing in it and nowhere in the scene.
+      const actor: EntityActor = { node }
+      this.actors.set(entity.id, actor)
+      return actor
+    }
     if (entity.visual === 'flash') {
       // The instant something goes off: its whole shape, filled bright and edged hard, on the ground under the champions so it never hides them.
       const color = entity.color ?? '#ffffff'

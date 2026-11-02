@@ -20,6 +20,8 @@ const OWN_STACKS: Array<[key: string, color: string]> = [
   ['shadow', '#ff9f43'],
   // Hammer's plating: up to six, a steel grey.
   ['plating', '#9fb0c3'],
+  // Monk's Flurry: the autos left, three at the most, a warm orange. They are the carrier's own, whoever gave them.
+  ['flurry', '#ff7a45'],
 ]
 // Marks other champions place on it, read by them:
 const MARKS: Array<[key: string, color: string]> = [
@@ -27,6 +29,11 @@ const MARKS: Array<[key: string, color: string]> = [
   ['gale', '#bfe6ff'],
   ['sighted', '#ff5a5f'],
   ['trick', '#3fc8c0'],
+  // Cloak's "feared lately", which his Cut Through reads: a muted violet.
+  ['feared', '#8e6bd9'],
+  // Sage's mend on an enemy, which her autos feed on: a leaf green.
+  ['mended', '#6fdc7e'],
+  // (Monk's link is on the teammate it joins, but it is drawn as a beam between the two and not as a pip: see link-layer.ts.)
   // The turrets' ramp: one for each shot a turret or a core has landed on it without a pause, in a colour no other mark has.
   [TURRET_RAMP_KEY, '#ffe14d'],
 ]

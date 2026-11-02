@@ -15,14 +15,18 @@ import {
   disarm,
   dodge,
   enemiesInBox,
+  enemiesInCone,
   enemiesInLine,
   enemiesInRadius,
+  fear,
   haste,
   heal,
+  invisible,
   knockback,
   linear,
   loseHealth,
   mark,
+  markedUnits,
   missingHealth,
   ownEntity,
   popMarkers,
@@ -44,6 +48,7 @@ import {
   stun,
   subject,
   targetUnit,
+  towardTarget,
   when,
   type DashDef,
   type Effect,
@@ -54,6 +59,7 @@ import {
   type SimContext,
   type SimReader,
 } from './effects.js'
+import { distanceBetween } from './geometry.js'
 import type { CastTarget, Vector2 } from './index.js'
 
 // How an ability is drawn while it is aimed.
@@ -67,6 +73,9 @@ export interface AbilityIndicator {
   width?: number
   // A line from the caster to the aimed point, for a dash.
   line?: boolean
+  // For a cone, such as a spread of knives: half the angle it opens by, in radians, which the page draws as a wedge from the caster out to the ability's range. The
+  // ability itself aims with numbers written out (see `enemiesInCone`), so a test checks that the two agree.
+  coneHalfAngle?: number
 }
 
 export interface AbilityDef {
@@ -80,6 +89,12 @@ export interface AbilityDef {
   // cooldown are told by the tooltip itself, from the ability, so they are left out of this.
   description?: string
   targeting: CastTarget['mode']
+  // For a unit-targeted ability: it is aimed at a teammate, or at the caster itself, and not at an enemy. Its target does not need to be seen to be aimed at.
+  targetsAllies?: true
+  // For one that is for allies: the page casts it on the unit the caster has linked to itself (`ChampionDef.damageLink`), wherever the cursor is, and on the caster only when
+  // the cursor is on it (or the self-cast key is held). So it needs no one under the cursor, and a teammate does not have to be pointed at. What the cast does with whoever it is on
+  // is the ability's own (Link Heal heals the linked unit, and cuts the link on the caster).
+  targetsLinked?: true
   range: number
   // A point-targeted ability cannot be aimed nearer the caster than this. The client pushes the aim out
   // to it, and a cast aimed nearer is dropped like one aimed out of range.
@@ -89,6 +104,8 @@ export interface AbilityDef {
   cooldownTicks: number
   // The ability needs the caster to be able to move, so a root or stun stops it from starting.
   movement?: boolean
+  // Casting it does not make an invisible caster seen. Every other ability does, and so does an auto attack: whoever is invisible and strikes is no longer.
+  keepsInvisibility?: true
   // How big its indicator is drawn while it is aimed. Without it the indicator only marks the aim.
   indicator?: AbilityIndicator
   // The ability can only be cast while the caster has (`out: true`) or has not (`out: false`) an
@@ -139,17 +156,11 @@ const seconds = (value: number): number => Math.round(value * GAME_TPS)
 // rounding. The simulator checks casts with this, and the client uses the same test to refuse a
 // cast that would be dropped and to show whether an aim is in reach.
 const RANGE_EPSILON = 1e-6
-export const withinCastRange = (from: Vector2, to: Vector2, range: number): boolean => {
-  const dx = to.x - from.x
-  const dy = to.y - from.y
-  return Math.sqrt(dx * dx + dy * dy) <= range + RANGE_EPSILON
-}
+export const withinCastRange = (from: Vector2, to: Vector2, range: number): boolean =>
+  distanceBetween(from, to) <= range + RANGE_EPSILON
 // Whether `to` is at least `minRange` from `from`, with the same slack.
-export const beyondMinCastRange = (from: Vector2, to: Vector2, minRange = 0): boolean => {
-  const dx = to.x - from.x
-  const dy = to.y - from.y
-  return Math.sqrt(dx * dx + dy * dy) >= minRange - RANGE_EPSILON
-}
+export const beyondMinCastRange = (from: Vector2, to: Vector2, minRange = 0): boolean =>
+  distanceBetween(from, to) >= minRange - RANGE_EPSILON
 
 // Whether an ability's `requires` holds, given a way to ask whether the caster has an entity of a
 // definition out. The simulator asks its frame and the client its own, so both judge alike.
@@ -1044,9 +1055,7 @@ export const DROP_MAX_TICKS = seconds(0.45)
 // How long the warning lasts for the point this cast is aimed at, in a straight line between the shortest and the longest by how far it is.
 const dropTicks = (_sim: SimReader, src: EffectSource): number => {
   if (src.aim?.mode !== 'point') return DROP_MAX_TICKS
-  const dx = src.aim.point.x - src.at.x
-  const dy = src.aim.point.y - src.at.y
-  const share = Math.min(1, Math.sqrt(dx * dx + dy * dy) / DROP_RANGE)
+  const share = Math.min(1, distanceBetween(src.at, src.aim.point) / DROP_RANGE)
   return Math.round(DROP_MIN_TICKS + (DROP_MAX_TICKS - DROP_MIN_TICKS) * share)
 }
 export const DROP_DAMAGE = 80
@@ -1184,9 +1193,9 @@ const WHIRL_CHARGE_TICKS = seconds(.8)
 export const WHIRL_CORE_RADIUS = 70
 export const WHIRL_RADIUS = 120
 export const WHIRL_DAMAGE = 35
-export const WHIRL_SCALING = { attackDamage: 0.5 } satisfies Scaling
+export const WHIRL_SCALING = { attackDamage: 0.6 } satisfies Scaling
 export const WHIRL_SWEET_DAMAGE = 70
-export const WHIRL_SWEET_SCALING = { attackDamage: 0.8 } satisfies Scaling
+export const WHIRL_SWEET_SCALING = { attackDamage: 1 } satisfies Scaling
 export const WHIRL_SWEET_SLOW = 0.4
 const WHIRL_SWEET_SLOW_TICKS = seconds(1.5)
 // Whether a body is wholly inside the core, which is the only place the plain hit reaches. A body that reaches out of it at all, into the ring, is on the edge,
@@ -1195,9 +1204,7 @@ const insideWhirlCore = (sim: SimReader, src: EffectSource, unitId: number): boo
   const unit = sim.character(unitId)
   const position = sim.posAt(unitId, src.tick)
   if (!unit || !position) return false
-  const dx = position.x - src.at.x
-  const dy = position.y - src.at.y
-  return Math.sqrt(dx * dx + dy * dy) + unit.champion.radius <= WHIRL_CORE_RADIUS
+  return distanceBetween(src.at, position) + unit.champion.radius <= WHIRL_CORE_RADIUS
 }
 const enemiesInWhirlCore: Selector = (sim, src) =>
   enemiesInRadius(WHIRL_CORE_RADIUS)(sim, src).filter((unitId) => insideWhirlCore(sim, src, unitId))
@@ -1270,7 +1277,7 @@ ability({
 // while Whirl charges.
 const LUNGE_RANGE = 120
 const LUNGE_SPEED = 400
-export const LUNGE_ATTACK_SPEED = 0.6
+export const LUNGE_ATTACK_SPEED = 0.4
 export const LUNGE_BUFF_TICKS = seconds(3)
 ability({
   id: 'lunge',
@@ -1285,6 +1292,364 @@ ability({
     dash(LUNGE_SPEED, LUNGE_RANGE),
     statBuff('attackSpeed', LUNGE_ATTACK_SPEED, LUNGE_BUFF_TICKS),
     resetAutoTimer(),
+  ],
+})
+
+// ---------------------------------------------------------------------------- Cloak
+
+// Cloak's fear. Stopping being invisible (the time running out, or an attack or an ability that is seen: see `ChampionDef.onLeaveInvisibility`) fears every enemy near
+// him, and then, for as long as it lasts, his hits do `FEAR_BONUS` more to them (`ChampionDef.bonusAgainst`). Each enemy he fears also carries a `FEAR_KEY` marker, his own, for
+// `FEAR_MEMORY_TICKS` (it is "lately", and outlasts the fear), which Cut Through reads and spends. A structure takes neither.
+export const FEAR_KEY = 'feared'
+export const FEAR_RADIUS = 80
+export const FEAR_TICKS = seconds(1)
+export const FEAR_MEMORY_TICKS = seconds(6)
+export const FEAR_BONUS = 0.3
+const fearableEnemies: Selector = (sim, src) =>
+  enemiesInRadius(FEAR_RADIUS)(sim, src).filter((unitId) => sim.character(unitId)?.structure !== true)
+export const terrify: readonly Effect[] = [
+  fear(FEAR_TICKS, fearableEnemies),
+  mark(FEAR_KEY, FEAR_MEMORY_TICKS, fearableEnemies),
+]
+
+// Cloak's Ghost: invisible for a couple of seconds, and faster. It is the one ability that does not make him seen: the others do, and so does an auto.
+export const GHOST_TICKS = seconds(3)
+export const GHOST_HASTE = 0.4
+ability({
+  id: 'ghost',
+  name: 'Ghost',
+  description: 'Turns you invisible and faster. When you are seen again, nearby enemies flee in fear.',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: seconds(16),
+  keepsInvisibility: true,
+  apply: [
+    invisible(GHOST_TICKS, self()),
+    haste(GHOST_HASTE, GHOST_TICKS, self()),
+  ],
+})
+
+// Cloak's Knives: a fan of five thrown a short way, which hurts each enemy in it once, however many of them reach it: the damage is done to everyone in the cone
+// (`enemiesInCone`), and the knives are only seen flying out. The cone is `KNIVES_RANGE` long, and opens by twice `KNIVES_HALF_ANGLE`. The cone is aimed with the
+// cosine and sine of that angle, and the knives with those of the turns they are fanned by, all written out as numbers so that every peer works from exactly the same.
+export const KNIVES_RANGE = 200
+export const KNIVES_HALF_ANGLE = Math.PI / 6
+export const KNIVES_DAMAGE = 55
+export const KNIVES_SCALING = { attackDamage: 0.5 } satisfies Scaling
+export const KNIVES_CONE = { cos: 0.8660254037844387, sin: 0.5 }
+const KNIVES_SPEED = 900
+const KNIFE_TURNS = [
+  { x: 0.8660254037844387, y: -0.5 },
+  { x: 0.9659258262890683, y: -0.25881904510252074 },
+  { x: 1, y: 0 },
+  { x: 0.9659258262890683, y: 0.25881904510252074 },
+  { x: 0.8660254037844387, y: 0.5 },
+]
+const knife = {
+  id: 'knife',
+  speed: KNIVES_SPEED,
+  radius: 5,
+  lifetimeTicks: Math.round(KNIVES_RANGE / KNIVES_SPEED * GAME_TPS),
+  color: '#d8dde6',
+} satisfies EntityDef
+ability({
+  id: 'knives',
+  name: 'Knives',
+  description: 'Throws a fan of knives a short way, hurting every enemy in it.',
+  targeting: 'direction',
+  range: KNIVES_RANGE,
+  windUpTicks: 5,
+  backswingTicks: 4,
+  cooldownTicks: seconds(6),
+  indicator: { coneHalfAngle: KNIVES_HALF_ANGLE },
+  apply: [
+    damage(scaled(KNIVES_DAMAGE, KNIVES_SCALING), enemiesInCone(KNIVES_RANGE, KNIVES_CONE)),
+    spawnEntity(knife, { spread: KNIFE_TURNS }),
+  ],
+})
+
+// Cloak's Cut Through: a dash of a fixed length, `CUT_RANGE`, toward the enemy it is aimed at (which has to be within that range to be aimed at), hurting every enemy it touches
+// on the way. It is the same length whichever enemy it is aimed at (see `towardTarget`): one that is nearer is gone through and overshot, by the difference, and one that is
+// exactly that far is ended up on top of. Against one he has feared lately (its marker) it gives a share of itself back (`CUT_REFUND`), and spends the marker, so the same enemy
+// does not give it back again until he has feared it again. It gives Knives back whenever it is cast.
+export const CUT_RANGE = 160
+export const CUT_REFUND = 0.9
+export const CUT_DAMAGE = 50
+export const CUT_SCALING = { attackDamage: 0.5 } satisfies Scaling
+const CUT_SPEED = 700
+const fearedLately = stacks(FEAR_KEY, subject())
+const cutThrough: DashDef = {
+  id: 'cutthrough',
+  onHit: [
+    damage(scaled(CUT_DAMAGE, CUT_SCALING)),
+    when<SimContext>((sim, src) => fearedLately(sim, src) > 0, [refundCooldown('cutthrough', CUT_REFUND), popMarkers(FEAR_KEY)]),
+  ],
+}
+ability({
+  id: 'cutthrough',
+  name: 'Cut Through',
+  description: 'Dashes a set distance toward an enemy, hurting all on the way. Refunds itself against one you recently feared, and always refunds Knives.',
+  targeting: 'unit',
+  range: CUT_RANGE,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: seconds(11),
+  movement: true,
+  apply: [
+    dash(CUT_SPEED, Infinity, self(), { toward: towardTarget(CUT_RANGE), through: true, on: cutThrough }),
+    refundCooldown('knives', 1),
+  ],
+})
+
+// ---------------------------------------------------------------------------- Sage
+
+// Sage's mend: Heal Pulse and Vine Bolt put a mend on each enemy they hit, one at the most on each, which lasts `SAGE_MARK_TICKS` (a hit renews it). An auto on an enemy that has
+// one heals Sage and quickens her, and spends it. (The auto is in champions.ts, with the rest of her autos.) A structure takes no markers, so it is never mended.
+export const SAGE_KEY = 'mended'
+export const SAGE_MARK_TICKS = seconds(5)
+export const SAGE_HEAL = 20
+export const SAGE_HEAL_SCALING = { arcane: 0.15 } satisfies Scaling
+export const SAGE_HASTE = 0.2
+export const SAGE_HASTE_TICKS = seconds(1.5)
+// The name of the one haste her autos keep renewing (see `haste`), so the autos after the first do not add another.
+export const SAGE_HASTE_NAME = 'sage'
+const mendEnemy: Effect = mark(SAGE_KEY, SAGE_MARK_TICKS, subject(), { cap: 1 })
+
+// Sage's Heal Pulse: a ring that goes out from her. It heals every ally in it (herself too), and hurts, pushes away and mends every enemy in it.
+export const PULSE_RADIUS = 190
+export const PULSE_HEAL = 50
+export const PULSE_HEAL_SCALING = { arcane: 0.5 } satisfies Scaling
+export const PULSE_DAMAGE = 50
+export const PULSE_DAMAGE_SCALING = { arcane: 0.5 } satisfies Scaling
+const PULSE_KNOCKBACK = 120
+const PULSE_KNOCKBACK_SPEED = 500
+const pulseBurst: EntityDef = {
+  id: 'pulse-burst',
+  speed: 0,
+  radius: PULSE_RADIUS,
+  lifetimeTicks: 10,
+  visual: 'flash',
+  color: '#8ee6a0',
+}
+ability({
+  id: 'pulse',
+  name: 'Heal Pulse',
+  description: 'A pulse that heals allies, and hurts and knocks back enemies.',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 6,
+  backswingTicks: 4,
+  cooldownTicks: seconds(12),
+  apply: [
+    heal(scaled(PULSE_HEAL, PULSE_HEAL_SCALING), alliesInRadius(PULSE_RADIUS)),
+    damage(scaled(PULSE_DAMAGE, PULSE_DAMAGE_SCALING), enemiesInRadius(PULSE_RADIUS)),
+    mark(SAGE_KEY, SAGE_MARK_TICKS, enemiesInRadius(PULSE_RADIUS), { cap: 1 }),
+    knockback(PULSE_KNOCKBACK, PULSE_KNOCKBACK_SPEED, enemiesInRadius(PULSE_RADIUS)),
+    spawnEntity(pulseBurst),
+  ],
+})
+
+// Sage's Vine Bolt: a bolt that goes through every enemy on its way, and hurts, roots and mends each.
+const VINE_RANGE = 520
+const VINE_SPEED = 850
+export const VINE_DAMAGE = 50
+export const VINE_SCALING = { arcane: 0.6 } satisfies Scaling
+export const VINE_ROOT_TICKS = seconds(1)
+const vineBolt = {
+  id: 'vine-bolt',
+  speed: VINE_SPEED,
+  radius: 12,
+  lifetimeTicks: Math.round(VINE_RANGE / VINE_SPEED * GAME_TPS),
+  pierce: true,
+  color: '#7bd88f',
+  onHit: [damage(scaled(VINE_DAMAGE, VINE_SCALING)), root(VINE_ROOT_TICKS), mendEnemy],
+} satisfies EntityDef
+ability({
+  id: 'vinebolt',
+  name: 'Vine Bolt',
+  description: 'A bolt that pierces enemies, hurting and rooting each one.',
+  targeting: 'direction',
+  range: VINE_RANGE,
+  windUpTicks: 6,
+  backswingTicks: 3,
+  cooldownTicks: seconds(9),
+  indicator: { width: vineBolt.radius * 2 },
+  apply: [spawnEntity(vineBolt)],
+})
+
+// Sage's Rejuvenate: heals a teammate, or herself, by a set amount and a share of the health they are missing.
+export const REJUVENATE_HEAL = 60
+export const REJUVENATE_SCALING = { arcane: 0.4 } satisfies Scaling
+export const REJUVENATE_MISSING = 0.2
+ability({
+  id: 'rejuvenate',
+  name: 'Rejuvenate',
+  description: 'Heals a teammate or yourself. It heals more the more health they are missing.',
+  targeting: 'unit',
+  targetsAllies: true,
+  range: 450,
+  windUpTicks: 4,
+  backswingTicks: 3,
+  cooldownTicks: seconds(10),
+  apply: [heal(linear(scaled(REJUVENATE_HEAL, REJUVENATE_SCALING), REJUVENATE_MISSING, missingHealth()), targetUnit())],
+})
+
+// ---------------------------------------------------------------------------- Monk
+
+// Monk's passive: a share of every hit he takes is not taken (see `ChampionDef.damageReduction`), and each auto he makes takes this many ticks off every ability's cooldown.
+export const MONK_DAMAGE_REDUCTION = 0.2
+export const MONK_AUTO_REFUND_TICKS = seconds(1)
+
+// Monk's Link: a bond to one teammate. It is a `LINK_KEY` marker on the teammate that is Monk's own, with no end, and a `link` entity on Monk that is only there to show the link is up (it
+// puts the Q key on its recast, and is not drawn: the page draws the link as a beam between the two, from the marker). It lasts until it is cut: the cut takes the marker off, the teammate's
+// death takes it with the rest of their markers, and Monk's death takes it off whoever has it (see `ChampionDef.damageLink`); the entity has no timer either, and goes with the link. While it is
+// up, `LINK_SHARE` of every hit the teammate takes is Monk's to take. It reaches `LINK_BREAK_RANGE` and no farther: the tick the teammate is farther from Monk than that (body's middle to
+// middle) the link is cut, as he would cut it himself (the entity sees to it, on its tick, since it is the one thing that is there for as long as the link is).
+//
+// The key is aimed at a unit either way. With no link, Link on a teammate links them, and on himself heals him. With one up the key is Link Heal (`linkheal`, the recast), which on the linked teammate
+// heals them and keeps the link, and on himself cuts the link: the cut gives Link Heal its cooldown back, so it never keeps him from cutting, and starts Link's whole cooldown over. On anyone else
+// it does nothing, and is given back whole.
+export const LINK_KEY = 'linked'
+export const LINK_SHARE = 0.4
+// The heal and the shields grow with his arcane (see `scaled`), which is 10 at level 1 and grows by 4 a level: 2 for each point is about 8 more for each level he gains.
+export const LINK_HEAL = 80
+export const LINK_HEAL_SCALING = { arcane: 1 } satisfies Scaling
+// How far apart the two can get before the link breaks. More than Link reaches to be cast (so a link made at the farthest is not broken the moment it is made), and about what two
+// champions on one side of a fight are from one another and no more.
+export const LINK_BREAK_RANGE = 500
+const linkedAlly = markedUnits(LINK_KEY)
+// Monk and whoever he has linked, for what he gives both.
+const selfAndLinked: Selector = (sim, src) => [src.ownerId, ...linkedAlly(sim, src)]
+const isLinked = (sim: SimReader, src: EffectSource): boolean => linkedAlly(sim, src).length > 0
+const castOnSelf = (_sim: SimReader, src: EffectSource): boolean => src.aim?.mode === 'unit' && src.aim.unitId === src.ownerId
+const linkHeal = scaled(LINK_HEAL, LINK_HEAL_SCALING)
+const aimedAtLinked = (sim: SimReader, src: EffectSource): boolean =>
+  src.aim?.mode === 'unit' && linkedAlly(sim, src).includes(src.aim.unitId)
+// Whether the teammate he has linked is farther from him than the link reaches.
+const linkStretched = (sim: SimReader, src: EffectSource): boolean => {
+  const [linkedId] = linkedAlly(sim, src)
+  if (linkedId === undefined) return false
+  const from = sim.posAt(src.ownerId, src.tick)
+  const to = sim.posAt(linkedId, src.tick)
+  return from !== undefined && to !== undefined && distanceBetween(from, to) > LINK_BREAK_RANGE
+}
+// What cutting a link does, whether he cuts it or it breaks: the marker comes off, the entity ends, and Link starts its wait now, whatever was left of it while the link was up.
+const cutLink: readonly Effect[] = [
+  popMarkers(LINK_KEY, linkedAlly),
+  removeEntities('link'),
+  startCooldown('link'),
+]
+const linkBond = {
+  id: 'link',
+  speed: 0,
+  radius: 32,
+  attached: true,
+  visual: 'hidden',
+  stayWhile: (sim, src) => sim.isAlive(src.ownerId) && isLinked(sim, src),
+  onTick: [when<SimContext>(linkStretched, cutLink)],
+} satisfies EntityDef
+ability({
+  id: 'link',
+  name: 'Link',
+  description: 'Links to a teammate and takes some of their damage, until they get too far away. Cast on yourself to heal.',
+  targeting: 'unit',
+  targetsAllies: true,
+  range: 450,
+  windUpTicks: 3,
+  backswingTicks: 3,
+  cooldownTicks: seconds(14),
+  // Only one link at a time. While it is up, this key is Link Heal instead.
+  requires: { entity: 'link', out: false },
+  recast: 'linkheal',
+  apply: [
+    when<SimContext>(
+      castOnSelf,
+      [heal(linkHeal, self())],
+      [mark(LINK_KEY, Infinity, targetUnit(), { cap: 1 }), spawnEntity(linkBond, { onePerOwner: true })],
+    ),
+  ],
+})
+export const LINK_HEAL_COOLDOWN_TICKS = seconds(6)
+ability({
+  id: 'linkheal',
+  name: 'Link Heal',
+  description: 'Heals your linked teammate and keeps the link. Aim it at yourself, or hold Alt, to cut the link.',
+  targeting: 'unit',
+  targetsAllies: true,
+  targetsLinked: true,
+  range: 450,
+  windUpTicks: 3,
+  backswingTicks: 3,
+  cooldownTicks: LINK_HEAL_COOLDOWN_TICKS,
+  requires: { entity: 'link', out: true },
+  apply: [
+    when<SimContext>(
+      castOnSelf,
+      [
+        ...cutLink,
+        // A cut is not a heal: it costs none of Link Heal's cooldown.
+        refundCooldown('linkheal', 1),
+      ],
+      [
+        when<SimContext>(
+          aimedAtLinked,
+          [heal(linkHeal, linkedAlly)],
+          // Someone who is not linked: nothing to give, so nothing is spent.
+          [refundCooldown('linkheal', 1)],
+        ),
+      ],
+    ),
+  ],
+})
+
+// Monk's Flurry: the next `FLURRY_AUTOS` autos of Monk, and of the teammate he has linked, are quicker and slow what they hit. The charges are markers that belong to whoever carries them
+// (`mark`'s `bearer`), spent by their autos wherever they are made (see champions.ts), so the teammate can be any champion; the attack speed is one status of the one name, ended with the last.
+export const FLURRY_KEY = 'flurry'
+export const FLURRY_AUTOS = 3
+// How long they last if the autos are not made.
+export const FLURRY_TICKS = seconds(6)
+export const FLURRY_ATTACK_SPEED = 0.5
+export const FLURRY_SLOW = 0.3
+export const FLURRY_SLOW_TICKS = seconds(1.5)
+ability({
+  id: 'flurry',
+  name: 'Flurry',
+  description: 'Resets your auto. Your next few autos are faster and slow their target, and your linked teammate gets them too.',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: seconds(12),
+  apply: [
+    statBuff('attackSpeed', FLURRY_ATTACK_SPEED, FLURRY_TICKS, selfAndLinked, { named: FLURRY_KEY }),
+    mark(FLURRY_KEY, FLURRY_TICKS, selfAndLinked, { count: FLURRY_AUTOS, cap: FLURRY_AUTOS, bearer: true }),
+    // It has no windup, so it can be cast between autos, and the next one is ready at once: Monk's, and not the linked teammate's.
+    resetAutoTimer(),
+  ],
+})
+
+// Monk's Guard: a shield for Monk and the teammate he has linked, or a bigger one for Monk alone if there is none.
+export const GUARD_SHIELD = 100
+export const GUARD_SHIELD_ALONE = 160
+export const GUARD_SCALING = { arcane: 1 } satisfies Scaling
+export const GUARD_TICKS = seconds(4)
+ability({
+  id: 'guard',
+  name: 'Guard',
+  description: 'Shields you and your linked teammate. With no link, you get a bigger shield.',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 0,
+  backswingTicks: 0,
+  cooldownTicks: seconds(14),
+  apply: [
+    when<SimContext>(
+      isLinked,
+      [shield(scaled(GUARD_SHIELD, GUARD_SCALING), GUARD_TICKS, selfAndLinked)],
+      [shield(scaled(GUARD_SHIELD_ALONE, GUARD_SCALING), GUARD_TICKS, self())],
+    ),
   ],
 })
 

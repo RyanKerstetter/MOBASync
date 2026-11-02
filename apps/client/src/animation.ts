@@ -148,7 +148,9 @@ export class CharacterAnimator {
 
   update(input: AnimatorInput, clips: Readonly<Partial<Record<AnimationKey, AnimationClip>>>): AnimationFrame | undefined {
     const { position, now } = input
-    if (this.lastPosition) {
+    // A body that is dead does not walk, and where it was is forgotten: the first frame it is alive is where it comes back, not a step there from where it died
+    // (a respawn is a jump, however short, such as a monster that died a little way from its post).
+    if (this.lastPosition && !input.dead) {
       const dx = position.x - this.lastPosition.x
       const dy = position.y - this.lastPosition.y
       const distance = Math.hypot(dx, dy)
@@ -166,7 +168,7 @@ export class CharacterAnimator {
         this.stepToward(directionOf(dx, dy, this.direction), distance)
       }
     }
-    this.lastPosition = { x: position.x, y: position.y }
+    this.lastPosition = input.dead ? undefined : { x: position.x, y: position.y }
 
     // Doing something aimed, it turns to face what it is aimed at at once.
     if (input.action?.aimAt && !input.dead) {

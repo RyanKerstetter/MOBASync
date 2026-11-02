@@ -251,30 +251,34 @@ export class ServerGameState {
       this.status !== GameStatusSchema.enum.starting
       && this.status !== GameStatusSchema.enum.selecting
     ) return
-    this.status = GameStatusSchema.enum.idle
-    this.selections.clear()
-    this.readyPlayers.clear()
-    this.simulator.reset()
-    this.characterIdsByPlayerId.clear()
-    this.orderAcksByPlayerId.clear()
+    this.resetGame()
   }
 
   // Shuts the game down, whatever it was doing, so the lobby is a lobby again and another can be started.
   // How it ended is kept for whoever asks (see `result`) until the next game opens champion select.
   close(): void {
+    this.resetGame()
+    this.departed.clear()
+  }
+
+  // Back to no game: nothing picked, no one ready, no one in it, and nothing simulated.
+  private resetGame(): void {
     this.status = GameStatusSchema.enum.idle
     this.selections.clear()
     this.readyPlayers.clear()
     this.simulator.reset()
     this.characterIdsByPlayerId.clear()
     this.orderAcksByPlayerId.clear()
-    this.departed.clear()
+  }
+
+  // Whether the game has begun, and is running or is over and being looked at.
+  private get begun(): boolean {
+    return this.status === GameStatusSchema.enum.running || this.status === GameStatusSchema.enum.finished
   }
 
   // A game that has begun and has no one left in it is shut down. It is asked whenever players go.
   closeIfEmpty(): boolean {
-    const begun = this.status === GameStatusSchema.enum.running || this.status === GameStatusSchema.enum.finished
-    if (!begun || this.characterIdsByPlayerId.size > 0) return false
+    if (!this.begun || this.characterIdsByPlayerId.size > 0) return false
     this.close()
     return true
   }
@@ -283,8 +287,7 @@ export class ServerGameState {
   // flag it carried is dropped where it stood), and what they had done is kept for the results. Nothing
   // happens for a player who is not in such a game.
   leaveGame(playerId: string): boolean {
-    const begun = this.status === GameStatusSchema.enum.running || this.status === GameStatusSchema.enum.finished
-    if (!begun || !this.characterIdsByPlayerId.has(playerId)) return false
+    if (!this.begun || !this.characterIdsByPlayerId.has(playerId)) return false
     this.removePlayer(playerId)
     return true
   }

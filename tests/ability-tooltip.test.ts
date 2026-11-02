@@ -11,18 +11,38 @@ import {
   dash,
   GAME_TPS,
   getAbilityDef,
+  heal,
   linear,
   missingHealth,
   scaled,
   self,
+  shield,
   spawnEntity,
   stacks,
   when,
   type AbilityDef,
   type ChampionStats,
+  type EntityDef,
   type Scaling,
 } from '../packages/shared/src/index.ts'
-import { SHURIKEN_DAMAGE, SHURIKEN_SCALING, SPOUT_DAMAGE, SPOUT_SCALING, TSUNAMI_DAMAGE, TSUNAMI_SCALING } from '../packages/shared/src/abilities.ts'
+import {
+  GUARD_SCALING,
+  GUARD_SHIELD,
+  GUARD_SHIELD_ALONE,
+  LINK_HEAL,
+  LINK_HEAL_SCALING,
+  PULSE_HEAL,
+  PULSE_HEAL_SCALING,
+  REJUVENATE_HEAL,
+  REJUVENATE_MISSING,
+  REJUVENATE_SCALING,
+  SHURIKEN_DAMAGE,
+  SHURIKEN_SCALING,
+  SPOUT_DAMAGE,
+  SPOUT_SCALING,
+  TSUNAMI_DAMAGE,
+  TSUNAMI_SCALING,
+} from '../packages/shared/src/abilities.ts'
 import { defineAbility } from './fixtures.ts'
 
 // What the box over an ability says: its numbers are found in the ability itself, worked out for the champion as it is, and told with what they are made of.
@@ -254,4 +274,77 @@ test('an ability is called by its name, or else by its id made into words', () =
   assert.equal(abilityName({ id: 'shadowstep', name: 'Shadow Step' }), 'Shadow Step')
   assert.equal(abilityName({ id: 'feast' }), 'Feast')
   assert.equal(abilityName({ id: 'monster-slam' }), 'Monster Slam')
+})
+
+// ---------------------------------------------------------------------------- heals and shields
+
+test('a heal and a shield are told like damage: the number for the caster, with what it is made of, and the heal tells the share of the health missing', () => {
+  const [HEAL, MISSING, HEAL_ARCANE, SHIELD, SHIELD_HEALTH] = [60, 0.2, 0.4, 120, 0.1]
+  const def = ability('t-at-mend', [
+    heal(linear(scaled(HEAL, { arcane: HEAL_ARCANE }), MISSING, missingHealth()), self()),
+    shield(scaled(SHIELD, { maxHealth: SHIELD_HEALTH }), 100, self()),
+    damage(40),
+  ])
+  const stats = champion({ arcane: 50, maxHp: 1200 })
+  const tip = abilityTooltip(def.id, { key: 'E', cooldownTicks: def.cooldownTicks, stats, level: 1, health: stats.maxHp })
+
+  assert.deepEqual(tip?.stats.slice(0, 3), [
+    { label: 'Heal', value: String(Math.round(HEAL + HEAL_ARCANE * stats.arcane)), detail: `${HEAL} + ${MISSING * 100}% of missing health + ${HEAL_ARCANE * 100}% Arcane` },
+    { label: 'Shield', value: String(Math.round(SHIELD + SHIELD_HEALTH * stats.maxHp)), detail: `${SHIELD} + ${SHIELD_HEALTH * 100}% Max health` },
+    { label: 'Damage', value: '40' },
+  ])
+})
+
+test('a flat heal or shield has no formula under it, and one that is not told is left out', () => {
+  const def = ability('t-at-flat-mend', [heal(30, self()), shield(90, 100, self()), heal(() => 5, self())])
+  assert.deepEqual(abilityNumbers(def).map((number) => [number.kind, number.amount.base]), [['heal', 30], ['shield', 90]])
+  const tip = abilityTooltip(def.id, { key: 'W', cooldownTicks: def.cooldownTicks, stats: champion(), level: 1, health: 900 })
+  assert.deepEqual(tip?.stats.slice(0, 2), [{ label: 'Heal', value: '30' }, { label: 'Shield', value: '90' }])
+})
+
+test('a heal that a pulse repeats is told for a second, and what else a pulse does is told as it always was', () => {
+  const [EVERY, HEAL, ARCANE, HIT] = [30, 8, 0.1, 15]
+  const bot: EntityDef = {
+    id: 't-at-bot',
+    speed: 0,
+    radius: 8,
+    lifetimeTicks: 600,
+    pulseEveryTicks: EVERY,
+    onPulse: [heal(scaled(HEAL, { arcane: ARCANE }), self()), damage(HIT)],
+  }
+  const def = ability('t-at-bot-cast', [spawnEntity(bot)])
+  const stats = champion({ arcane: 100 })
+  const tip = abilityTooltip(def.id, { key: 'E', cooldownTicks: def.cooldownTicks, stats, level: 1, health: 900 })
+  const pulses = GAME_TPS / EVERY
+
+  assert.deepEqual(tip?.stats.slice(0, 2), [
+    { label: 'Heal', value: `${Math.round((HEAL + ARCANE * stats.arcane) * pulses)}/s`, detail: `${HEAL * pulses} + ${Math.round(ARCANE * pulses * 1000) / 10}% Arcane` },
+    { label: 'Damage', value: String(HIT) },
+  ])
+})
+
+test('the heals and shields of the abilities in the game are found in them, with the numbers they are written with', () => {
+  const stats = champion({ arcane: 100, maxHp: 1000 })
+  const lines = (id: string) => abilityTooltip(id, { key: 'Q', cooldownTicks: 60, stats, level: 1, health: 600 })?.stats ?? []
+  const percent = (ratio: number): string => `${Number((ratio * 100).toFixed(1))}%`
+
+  // Rejuvenate: a set amount, a share of the health missing, and the arcane it grows with. (How much is missing is not known without a target, so it counts as none.)
+  assert.deepEqual(lines('rejuvenate')[0], {
+    label: 'Heal',
+    value: String(Math.round(REJUVENATE_HEAL + (REJUVENATE_SCALING.arcane ?? 0) * stats.arcane)),
+    detail: `${REJUVENATE_HEAL} + ${percent(REJUVENATE_MISSING)} of missing health + ${percent(REJUVENATE_SCALING.arcane ?? 0)} Arcane`,
+  })
+  // Monk's heal and shields grow with his arcane.
+  const monkHeal = { label: 'Heal', value: String(Math.round(LINK_HEAL + (LINK_HEAL_SCALING.arcane ?? 0) * stats.arcane)), detail: `${LINK_HEAL} + ${percent(LINK_HEAL_SCALING.arcane ?? 0)} Arcane` }
+  assert.deepEqual(lines('link')[0], monkHeal)
+  assert.deepEqual(lines('linkheal')[0], monkHeal, 'and Link Heal gives the same')
+  assert.deepEqual(lines('guard').slice(0, 2), [
+    { label: 'Shield', value: String(Math.round(GUARD_SHIELD + (GUARD_SCALING.arcane ?? 0) * stats.arcane)), detail: `${GUARD_SHIELD} + ${percent(GUARD_SCALING.arcane ?? 0)} Arcane` },
+    { label: 'Shield', value: String(Math.round(GUARD_SHIELD_ALONE + (GUARD_SCALING.arcane ?? 0) * stats.arcane)), detail: `${GUARD_SHIELD_ALONE} + ${percent(GUARD_SCALING.arcane ?? 0)} Arcane` },
+  ])
+  // Sage's pulse tells what it heals and what it hurts.
+  const pulse = lines('pulse')
+  assert.deepEqual(pulse[0].label, 'Heal')
+  assert.equal(pulse[0].value, String(Math.round(PULSE_HEAL + (PULSE_HEAL_SCALING.arcane ?? 0) * stats.arcane)))
+  assert.deepEqual(pulse[1].label, 'Damage')
 })

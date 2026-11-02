@@ -1,4 +1,5 @@
 import {
+  clamp,
   GAME_HILL_CAPTURE_TICKS,
   getGameMode,
   getTeam,
@@ -73,7 +74,7 @@ export function rankScores(teams: readonly number[], scoreOf: (team: number) => 
 
 // How full the bar is, from 0 to 1, for a game where it takes `captureTicks` to fill.
 export function hillFraction(progress: number, captureTicks: number = GAME_HILL_CAPTURE_TICKS): number {
-  return Math.max(0, Math.min(1, progress / captureTicks))
+  return clamp(progress / captureTicks, 0, 1)
 }
 
 const teamName = (team: number): string => getTeam(team).name
@@ -111,7 +112,7 @@ export function hillReadout(view: HillView): { fraction: number; team?: number; 
 
 // What a team's core row says: how full its health is (from 0 to 1) and, in words, how it stands.
 export function coreReadout(core: CoreView): { fraction: number; text: string } {
-  const fraction = core.maxHp > 0 ? Math.max(0, Math.min(1, core.hp / core.maxHp)) : 0
+  const fraction = core.maxHp > 0 ? clamp(core.hp / core.maxHp, 0, 1) : 0
   const players = `${core.playersAlive} player${core.playersAlive === 1 ? '' : 's'} left`
   switch (core.status) {
     case 'eliminated':

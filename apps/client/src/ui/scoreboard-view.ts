@@ -1,11 +1,10 @@
 import { getTeam } from '../../../../packages/shared/src/index.ts'
+import { element } from './dom.ts'
 import type { KillFeedEntry, LeaderboardRow } from './scoreboard.ts'
 
 // A player's name in their team's colour.
 function nameTag(person: { name: string; team: number }): HTMLElement {
-  const name = document.createElement('span')
-  name.className = 'scoreboard-name'
-  name.textContent = person.name
+  const name = element('span', 'scoreboard-name', person.name)
   name.style.color = getTeam(person.team).color
   return name
 }
@@ -14,16 +13,12 @@ function nameTag(person: { name: string; team: number }): HTMLElement {
 // elements over the canvas, hidden until the first update, and rebuilt only when what they show
 // changes.
 export function createScoreboardView(container: HTMLElement) {
-  const root = document.createElement('div')
-  root.className = 'game-scoreboard'
-  root.hidden = true
-  const leaderboard = document.createElement('ol')
-  leaderboard.className = 'leaderboard'
+  const leaderboard = element('ol', 'leaderboard')
   leaderboard.setAttribute('aria-label', 'Kills')
-  const killFeed = document.createElement('ul')
-  killFeed.className = 'kill-feed'
+  const killFeed = element('ul', 'kill-feed')
   killFeed.setAttribute('aria-label', 'Kill feed')
-  root.append(leaderboard, killFeed)
+  const root = element('div', 'game-scoreboard', leaderboard, killFeed)
+  root.hidden = true
   container.appendChild(root)
   let shownLeaderboard = ''
   let shownKillFeed = ''
@@ -35,12 +30,8 @@ export function createScoreboardView(container: HTMLElement) {
       if (leaderboardKey !== shownLeaderboard) {
         shownLeaderboard = leaderboardKey
         leaderboard.replaceChildren(...rows.map((row) => {
-          const item = document.createElement('li')
+          const item = element('li', '', nameTag(row), element('span', 'scoreboard-kills', String(row.kills)))
           item.classList.toggle('is-local', row.isLocal)
-          const kills = document.createElement('span')
-          kills.className = 'scoreboard-kills'
-          kills.textContent = String(row.kills)
-          item.append(nameTag(row), kills)
           return item
         }))
       }
@@ -48,12 +39,8 @@ export function createScoreboardView(container: HTMLElement) {
       if (killFeedKey !== shownKillFeed) {
         shownKillFeed = killFeedKey
         killFeed.replaceChildren(...feed.map((entry) => {
-          const item = document.createElement('li')
-          const verb = document.createElement('span')
-          verb.className = 'kill-feed-verb'
-          verb.textContent = entry.killer ? 'defeated' : 'was defeated'
-          item.append(...(entry.killer ? [nameTag(entry.killer), verb, nameTag(entry.victim)] : [nameTag(entry.victim), verb]))
-          return item
+          const verb = element('span', 'kill-feed-verb', entry.killer ? 'defeated' : 'was defeated')
+          return element('li', '', ...(entry.killer ? [nameTag(entry.killer), verb, nameTag(entry.victim)] : [nameTag(entry.victim), verb]))
         }))
       }
     },

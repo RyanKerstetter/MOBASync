@@ -1,4 +1,5 @@
 import { GAME_ART_SCALE, GAME_MAX_CHAMPION_RADIUS, GAME_MAX_PLAYERS } from './constants.js'
+import { distanceBetween } from './geometry.js'
 import type { HillArea, Vector2 } from './index.js'
 import { monsters } from './monsters.js'
 import type { SpawnSlots } from './spawns.js'
@@ -42,6 +43,8 @@ import { flattenLayers, getProperty, mapWorldScale, type TiledMap, type TiledObj
 //   biggest team starts, and so on. Core destruction is for two teams, so it uses the cores of slots 1 and 2, and a map that has both can
 //   be played in it (see modes.ts). A core is a turret (see turrets.ts), so it is solid and needs room for its size clear of the walls and the arena's edge, and a
 //   way to it from the spawn points. The core is in a game of that mode only: in the others its point is not used.
+// - any number of `bush` rectangles, which hide whoever stands in one from every team that has no one in it (see `Terrain.bushAt`). They stop
+//   nothing, and are only for what the page shows. A bush the arena does not reach is left out, and one that is not a plain rectangle refuses the map, like a wall.
 // - `shop` rectangles, each with the `team-name` of the slot of spawn points whose team shops there: a champion can buy and sell items only while
 //   it stands in a shop of its team (see shops.ts). A map with no shops can be shopped in from anywhere; a map with any needs one for every slot that
 //   has spawn points, or a team would have nowhere to buy, and is refused without.
@@ -49,6 +52,7 @@ import { flattenLayers, getProperty, mapWorldScale, type TiledMap, type TiledObj
 //   of the others by their sizes, or the map is refused (a champion would start inside one, or two would stand in each other). A point too close to a wall or the arena's edge is refused with the nearest place that clears them.
 const ARENA_CLASS = 'arena'
 const WALL_CLASS = 'wall'
+const BUSH_CLASS = 'bush'
 const SPAWN_CLASS = 'spawn'
 const HILL_CLASS = 'hill'
 const FLAG_CLASS = 'ctf-flag'
@@ -127,19 +131,27 @@ export function readMapLayout(map: TiledMap): MapLayout {
     y: Math.round((y - arenaRect.y) * scale),
   })
 
-  const walls: Rect[] = []
-  for (const { object, x, y } of ofClass(WALL_CLASS)) {
-    const label = object.name || `wall object ${object.id}`
-    if (!isPlainRectangle(object)) {
-      problems.push(`${label} is not a plain rectangle (walls cannot be rotated, or any other shape, yet).`)
-      continue
+  // The rectangles of one class of object, in whole world units, those wholly outside the arena left out. With `dropEmpty`, so is one so small that it rounds to
+  // nothing (a bush is not there to stand in then, and a snapshot's rectangles have a size).
+  const rectsOf = (objectClass: string, noun: string, plural: string, dropEmpty: boolean): Rect[] => {
+    const rects: Rect[] = []
+    for (const { object, x, y } of ofClass(objectClass)) {
+      const label = object.name || `${noun} object ${object.id}`
+      if (!isPlainRectangle(object)) {
+        problems.push(`${label} is not a plain rectangle (${plural} cannot be rotated, or any other shape, yet).`)
+        continue
+      }
+      const topLeft = inWorld(x, y)
+      const bottomRight = inWorld(x + (object.width ?? 0), y + (object.height ?? 0))
+      if (bottomRight.x <= 0 || bottomRight.y <= 0 || topLeft.x >= width || topLeft.y >= height) continue
+      if (dropEmpty && (bottomRight.x <= topLeft.x || bottomRight.y <= topLeft.y)) continue
+      rects.push({ x: topLeft.x, y: topLeft.y, width: bottomRight.x - topLeft.x, height: bottomRight.y - topLeft.y })
     }
-    const topLeft = inWorld(x, y)
-    const bottomRight = inWorld(x + (object.width ?? 0), y + (object.height ?? 0))
-    if (bottomRight.x <= 0 || bottomRight.y <= 0 || topLeft.x >= width || topLeft.y >= height) continue
-    walls.push({ x: topLeft.x, y: topLeft.y, width: bottomRight.x - topLeft.x, height: bottomRight.y - topLeft.y })
+    return rects
   }
-  const terrain = new Terrain({ width, height }, walls)
+  const walls = rectsOf(WALL_CLASS, 'wall', 'walls', false)
+  const bushes = rectsOf(BUSH_CLASS, 'bush', 'bushes', true)
+  const terrain = new Terrain({ width, height }, walls, undefined, bushes)
 
   const found = new Map<number, Map<number, Spawn>>()
   for (const { object, x, y } of ofClass(SPAWN_CLASS)) {
@@ -342,7 +354,7 @@ export function readMapLayout(map: TiledMap): MapLayout {
   for (const spawn of placed) {
     for (const solid of solids) {
       const need = solid.radius + GAME_MAX_CHAMPION_RADIUS
-      const apart = Math.hypot(spawn.at.x - solid.at.x, spawn.at.y - solid.at.y)
+      const apart = distanceBetween(spawn.at, solid.at)
       if (apart < need) {
         problems.push(
           `${spawn.label} is too close to ${solid.label}: they are ${pixels(apart)} map pixels apart and need ${Math.ceil((need / scale) * 10) / 10}, `
@@ -357,7 +369,7 @@ export function readMapLayout(map: TiledMap): MapLayout {
       const one = solids[first]
       const other = solids[second]
       const need = one.radius + other.radius
-      const apart = Math.hypot(one.at.x - other.at.x, one.at.y - other.at.y)
+      const apart = distanceBetween(one.at, other.at)
       if (apart < need) {
         problems.push(
           `${one.label} is too close to ${other.label}: they are ${pixels(apart)} map pixels apart and need ${Math.ceil((need / scale) * 10) / 10}, `

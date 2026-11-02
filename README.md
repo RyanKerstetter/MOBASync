@@ -120,6 +120,17 @@ walk either: a character told to move goes on walking through such a cast (after
 it resumes the walk), where a cast with a windup stops it to cast and it does not set off again. The
 lock lives in the frame, so it is part of every checkpoint and replay like any other state.
 
+**An ability aimed at an enemy out of its reach uses the same lock.** The cast order is not dropped: `startCast` sets the
+lock with the ability on it (`attackTarget.abilityId`), and `driveAttacks` walks the character toward the enemy as it would to attack
+it, but measures the reach by the ability's `range` (`withinCastRange`, centre to centre) and not the attack range. On arriving it
+casts, from where it stands, and the lock is over: it does not go on to attack the enemy afterwards. It is
+called off by the same things as an attack lock (a move or attack order, the target dying or leaving or going out of sight, a fear, the
+character's death), and also when the ability can no longer be cast (the character is silenced, or the ability is on cooldown), which stops the walk
+as well. Like an attack lock it is held, not dropped, while the character is stunned, dashing or winding up. An enemy already in reach is
+cast on at once, as it always was, and an order for a teammate, a dead or unseen enemy, or while the character cannot start a cast, is dropped.
+The client no longer refuses an out of range unit cast: it sends it, and the ring on the enemy turns amber (`OUT_OF_REACH_COLOR`) to
+say the champion will walk up first.
+
 On the screen, an enemy a click would attack is marked when the mouse is over it (four small ticks
 around it and a crosshair cursor), so you can see that the attack can be queued; the enemy the attack is locked
 on keeps slightly heavier red ticks for as long as it is (`render/attack-marker.ts`). Neither shows while an ability is
@@ -135,8 +146,8 @@ The arena is as big as the `arena` rectangle of the map from Tiled, once drawn (
 three, a rectangle of 803 by 494 pixels is 2409 by 1482), and champions walk anywhere on it that no wall
 holds them out of; its edge stops them at their radius. The world's origin is the top left corner of that
 rectangle. With no map, a game is on the plain arena (`GAME_ARENA_WIDTH` by `GAME_ARENA_HEIGHT`, 2376 by
-1440) with no walls, which is what the tests use. The ground (the arena's size and its walls) is a
-`Terrain`, which the simulator holds and every snapshot carries (a few bytes a wall), so a client plays on
+1440) with no walls, which is what the tests use. The ground (the arena's size, its walls and its bushes) is a
+`Terrain`, which the simulator holds and every snapshot carries (a few bytes a wall or a bush), so a client plays on
 exactly the ground the server does.
 
 Where teams start comes from the map's spawn points (see below). The biggest team in a game starts at
@@ -235,6 +246,13 @@ A map that cannot be played on is listed with what is wrong, but cannot be picke
   plain rectangles, not turned (other shapes are refused for now), and one the arena does not reach is left
   out. The walls are not drawn: the art is whatever tiles are drawn under them, and the debug view (P)
   outlines the walls, so the two can be lined up.
+- **Bushes:** rectangle objects of class `bush`, in any layer, as many as there are. Whoever stands in one (their middle in
+  it, edges included) cannot be seen by a team that has no living champion in the same bush (see "Vision"). A bush stops nothing:
+  it does not hold anyone out, and no rule of the game reads it. They must be plain rectangles, not turned (other shapes are
+  refused for now, like a wall's), and one the arena does not reach is left out. Bushes that overlap or touch are one bush, so a big
+  or odd-shaped one can be made of several rectangles. There is no art for a bush yet, so the game marks each with a plain green
+  box over its rectangle (`BushAreaLayer`, `render/bush-area.ts`: see-through, with a line round the edge, over the champions and under the
+  fog); the art under it is up to you, and the debug view (P) outlines the shapes too.
 - **Spawn points:** point objects of class `spawn`, each with a whole-number property `team-name`, the
   slot it is in (1 to 8), and a `spawn-number`, which of the slot's points it is (1, 2, 3 ... with none
   missing). **How many slots, and how many points in each, is what the map allows**: a map has a slot for each
@@ -369,6 +387,17 @@ destroyed one sees nothing. Walls block sight (the map's `wall` rectangles, as t
 shot is seen if its middle or any of the four furthest points of its body is; the team's own champions and turrets and what
 they put out are always drawn. A team with no champion alive sees the whole game until one is back (its turrets and core add to what
 a team sees, they do not keep a dead player in the dark), and the debug view (P) shows everything too. The page's address can say `?vision=range` (only how far a champion sees, with no shadows behind walls) or `?vision=off`.
+
+**Bushes hide what stands in them.** A body whose middle is in a bush (`Terrain.bushAt`, from the map's `bush` rectangles, see "Maps from
+Tiled") is not seen by a team unless a living champion of that team is in the same bush, however near it is and however well lit. A
+champion, a monster or a corpse is hidden by one like this, and it is kept and updated unseen like anything else out of sight; so it cannot be
+clicked on, aimed at, or picked by Space. Standing in a bush shows you what else is in it, and the team's: one champion in the bush
+is enough for all of them. A champion in another bush does not, nor does a dead one, an enemy or a monster; an ally's middle has to be in it, not just their body. Bushes that overlap or touch are one bush. A
+turret or a core is never hidden by one, and neither are shots and fields (it is the bodies that stand in a bush that are hidden: what
+is thrown over it is seen in the light as anywhere). The team's own are always drawn, and an enemy that is invisible stays unseen even from inside
+the bush. Nothing is hidden when everything is shown (the debug view, a team with no one alive, `?vision=off`). A bush does not block sight
+and does not darken the ground: only the bodies in it are left out, and the green box over it is just a marker. `tests/bushes.test.ts` covers the ground, the rule and the competitive map's own bushes.
+A body that attacks from a bush is not shown for it; that is not done.
 
 **It is how the page looks, not a rule of the game.** Every client plays the whole game from every order the server sends
 everyone (that is how rollback works), so each already has everyone's position; the server hides nothing, and a changed
@@ -523,6 +552,13 @@ shows while that mode is picked). With it on, a player who dies loses every item
 are lost, not sold: they pay nothing back. Their gold is kept, and a dead champion can shop, so they can buy again before they are back. Like
 the respawn time it is part of the setup the snapshot carries (`loseItemsOnDeath`, only present when it is on), and the items go on the tick of the
 death, in the frame, so a late order that undoes the death gives them back.
+
+**Gold and shop** is a rule for Core Destruction too (on by default; a tick box in the lobby's rules, shown while that mode is picked). With it off the game is played for experience alone: a kill
+pays its experience and no gold (a monster's or a turret's entry still says what it is worth, and only the gold of it is not paid), nobody starts with the gold a player does, there are no items, and the shop
+cannot be opened (the HUD has the level and the stats, and not the panel of items and shops). The levels and everything that grows with them are as they were, so it is a way to play with just the
+experience scalings. It is part of the setup the snapshot carries (`noGold`, only present when the gold is off, so a game with no word of it has gold; `Simulator.hasGold`), a page that joins the
+game gets it with it, and `Lose items on death` is put away in the lobby while there is no gold, since there are no items to lose. The shards are not gold and are paid as before (the shard shop is not
+shown). It is tested in `tests/no-gold.test.ts`.
 
 ### Playing a game through, and going back to the lobby
 
@@ -1156,11 +1192,16 @@ under them, which takes the player back to the lobby and leaves the game to the 
 leaves the lobby). It hangs from near the top of the screen, so the tabs stay where they are as pages of different heights are
 opened, and it remembers the tab it was left on while the page is open.
 
-- **Graphics** has an **Effects** section: a switch for each effect drawn over the ground, each on until it is turned off, and each
-  hiding only itself. **Turret attack range** is the ring round each turret and core that shows how far it shoots
+- **Graphics** has an **Effects** section: a switch for each effect drawn over the ground, each off until it is turned on, and each
+  showing only itself. **Turret attack range** is the ring round each turret and core that shows how far it shoots
   (`TurretRangeLayer`), **Your attack range** is the ring round your own champion (`IndicatorLayer`; the ring of an ability being aimed is
   not part of it, and is always drawn) and **Shop glow** is the green tint over each shop (`ShopAreaLayer`).
-- **Controls** has the **cast mode** (quick cast, or quick cast with an indicator).
+- **Controls** has the **cast mode** (quick cast, or quick cast with an indicator), and under **Targeting** the **click radius**, a slider
+  from 0 to `MAX_CLICK_RADIUS` pixels (`DEFAULT_CLICK_RADIUS` to begin with) that widens how far past the edge of an enemy a click still picks
+  it. It applies to everything that picks an enemy under the mouse (`ClientGameState.getEnemyNear`): right-clicking to attack (and holding the button), and
+  an ability aimed at a unit, and so to the indicator on the enemy. It is added to the small slack every click has (`PICK_SLACK`), so the enemy nearest
+  the click, by its middle, is still the one picked; it does not widen the click that looks at someone, or Space, which has no limit. It is a setting
+  of the page kept with the rest (`clickRadius`, whole pixels, read back held between 0 and the most), and no rule of the game reads it.
 - **Dev** has the **debug view** (the same as P, see below) and the **diagnostics** (the frame rate and network text at the top left), and, in a
   development build only, the tools to draw the champions from a folder of art picked from disk or to go back to the art the game came with.
 
@@ -1172,7 +1213,9 @@ key in `EffectSettings` (`render/effect-settings.ts`, with its default in `DEFAU
 asking for it: the menu, the stored settings and their checking follow from the key.
 
 What a player chooses is kept in the browser by `game-settings.ts` (`loadSettings` and `saveSettings`, every value checked on the way in and
-defaulted if missing or odd, each effect on its own, so settings stored before an effect was added keep what they had and have the new one on). A setting is
+defaulted if missing or odd, each effect on its own, so settings stored before an effect was added keep what they had and have the new one off). A
+browser that has stored its settings before keeps what it stored, so a player who had the effects on sees them on until they turn them off: the defaults are for
+a browser that has stored nothing (or whose stored settings are cleared). A setting is
 a field of `GameSettings`: the cast mode, the `effects` and whether the `diagnostics` are shown. The debug view is not kept, as P never was.
 The renderer is told by `WorldRenderer.effects`, which `game.ts` sets from the settings when the game begins and again each time a switch is turned.
 
@@ -1193,8 +1236,9 @@ folder, `res/champion/<name>`. The Swordsman is the sword-and-shield knight, the
 the Cursebearer the staff bearer, and the Ninja has art of its own. The Trinketmaster (melee) is a copy of
 the Swordsman's sheets, and the Capricorn, Soldier and Grenadier (ranged) are copies of the Archer's,
 as placeholders until they have art. So are the Hammer, a copy of the Swordsman's, and the Chain, a copy of the
-Trinketmaster's (each in a folder of its own, `res/champion/hammer` and `res/champion/chain`, with the same file names as the
-sheets they were copied from, so art can be dropped over them). They are drawn a little bigger than their
+Trinketmaster's, and the Cloak, a copy of the Ninja's (each in a folder of its own, `res/champion/hammer`, `res/champion/chain` and
+`res/champion/cloak`, with the same file names as the sheets they were copied from, so art can be dropped over them). The Sage (ranged) is a copy of the Archer's and the
+Monk (melee) of the Swordsman's, in `res/champion/sage` and `res/champion/monk`, the same way. They are drawn a little bigger than their
 bodies and with no circle behind them. The name above every champion is in its team's colour, which is how
 a sprite shows the team. The work is split in three, so animations can be added as data:
 
@@ -1252,7 +1296,12 @@ icon is dropping a file of that name in the folder. An ability whose file has an
 `hammerdrop`, since its picture is `drop.png`), and everything that draws one asks `abilityIconName` for the file's name.
 `ui/ability-icon-urls.ts` finds the files (Vite's
 `import.meta.glob`, so a new file is picked up by the dev server), and `ui/ability-icon.ts` makes the element. An
-ability with no file, or whose file will not load, shows a dim "N/A" tile with the tooltip "Icon not available" in its place.
+ability with no file, or whose file will not load, shows a dim "N/A" tile with the tooltip "Icon not available" in its place. The abilities that are new with the Sage and the Monk need
+their pictures: `pulse`, `vinebolt`, `rejuvenate`, `link`, `linkheal`, `flurry` and `guard`.
+
+**Ability tooltips** tell the numbers of an ability, found in the ability itself (`abilityNumbers`, from what its effects say they are made of): its **damage**, the **burn** a second, the **heal** and the
+**shield**, each worked out for the champion as it is and told with what it is made of, such as `60 + 20% of missing health + 40% Arcane`. Retuning an ability retunes its tooltip. A heal that a pulse
+repeats (the Medic's bot) is told for a second (`Heal 36/s`); the damage of a pulse is told as it is, for each.
 
 Stacks are drawn as pips under the body, by the pure function `layoutStackPips` (`render/stack-pips.ts`).
 There are two kinds, told apart by shape, colour and row, so two with similar colours can never
@@ -1268,10 +1317,10 @@ list for its kind.
 Per-unit stats live on a `Champion` (`packages/shared/src/champions.ts`): max
 HP, move speed, radius, attack damage, speed, range, windup (a share of the attack, below), and an ability kit in
 Q/W/E/R slot order, plus a description and passive text for champion select.
-Characters have no shield of their own. There are ten champions: Cursebearer, Archer, Swordsman, Capricorn, Soldier, Grenadier, Trinketmaster, Ninja, Hammer, and Chain (all below).
+Characters have no shield of their own. There are thirteen champions: Cursebearer, Archer, Swordsman, Capricorn, Soldier, Grenadier, Trinketmaster, Ninja, Hammer, Chain, Cloak, Sage, and Monk (all below).
 Health and damage are whole numbers in the hundreds. To add a champion, add another
 `new Champion({...})` to the list in `champions.ts`; the select screen lists every
-champion in that map. Arena size, tick rate, and network timing remain global
+champion in that map, four across. Arena size, tick rate, and network timing remain global
 constants in `constants.ts`.
 
 A champion's auto attack is its `onAttackHit` effect list, which defaults to
@@ -1355,11 +1404,11 @@ drops the aim without casting. Quick cast casts the moment the key goes down. In
 with nothing to aim (targeting `none`) casts on the press. Pressing another ability key while
 aiming moves the aim to it. A skillshot's indicator is just its band. An ability aimed at a point
 or a unit also gets a ring at its range around the champion. The indicator is where it would go: a band along the quantized direction, a circle at the point held to range, or a ring
-on the enemy under the cursor, which turns red when that enemy is beyond the ability's range. The
+on the enemy under the cursor, which turns amber when that enemy is beyond the ability's range (the champion walks up to it, then casts: see "An ability
+aimed at an enemy out of its reach"). The
 reach is measured centre to centre on the simulator's position of the enemy, not where it is drawn
 (remote champions are drawn a little in the past), by `withinCastRange`, the same test the
-simulator uses to accept a cast. The client refuses a unit cast out of range with a message
-instead of sending one the simulator would silently drop. The band's width and the circle's radius come from the ability's
+simulator uses to accept a cast. The band's width and the circle's radius come from the ability's
 `indicator` (`{ width }` or `{ radius }`), which reads the size of what the ability fires (for
 example Spout's `SPOUT_RADIUS`, or `soldierBolt.radius * 2`), so retuning a hitbox moves its
 indicator with it. A circle can have a second one inside it, `{ radius, innerRadius }`, for an
@@ -1709,6 +1758,89 @@ lags. A **disarm** (`disarm(ticks)`, the status `disarm`, labelled `disarmed`) s
 nothing else, as a silence stops casting and nothing else. All of it is tested in `tests/effects-named.test.ts`, with the kits in
 `tests/hammer.test.ts` and `tests/chain.test.ts`.
 
+**Cloak** is a melee assassin who vanishes, frightens what is near when he appears, and finishes what he has frightened. P: when he
+stops being invisible, whether the time runs out or he attacks or casts and is seen, every enemy near him (`FEAR_RADIUS`) is **feared**: it
+runs straight away from him, at its own move speed, for `FEAR_TICKS`, cannot attack or cast, ignores what it is told to do, and has a cast it had started stopped
+with nothing spent. He does `FEAR_BONUS` more damage, to a feared enemy, with every hit, an auto or an ability (`ChampionDef.bonusAgainst`: a share of every hit
+that he does to a unit that has a status of that kind that he put on it), and killing a **champion** (a player: a monster does not count) makes every ability he has ready
+on the tick of the kill (`resetsCooldownsOnKill`). Q, Ghost, makes him invisible and faster for two seconds, and is the one thing he does that does not show him
+(`keepsInvisibility`): an auto, and any other ability, does, and does what ending it does *before* it lands, so a hit from invisibility is at the feared. Each enemy he
+fears also carries a marker of his (`FEAR_KEY`, "feared lately", for `FEAR_MEMORY_TICKS`). While he is invisible, a violet ring as big as the fear (`FEAR_RADIUS`) is drawn
+round him, for the player who controls him, so they can see who would be caught when he is seen: the champion says how far it reaches (`leaveInvisibilityRadius`),
+the renderer passes it on only while he is invisible (`IndicatorInput.local.revealRadius`), and `IndicatorLayer` draws it whatever the graphics menu says, since it is
+part of what he is about to do and not scenery. W, Knives, throws a fan of five knives,
+and hurts every enemy in the cone they make once (`enemiesInCone`), as Akali's Q does: the damage is done to everyone in the cone when it is cast, and the knives are
+only seen flying out. The page draws the cone as a wedge when it is being aimed. E, Cut Through, is a dash of a fixed length, `CUT_RANGE` (which is also how far away
+the enemy it is aimed at can be), toward that enemy, that hurts every enemy it touches on the way. It is the same length whichever enemy it is aimed at: one that is nearer is
+gone through and overshot by the difference, and one exactly that far is ended up on top of. If the one it touches carries his marker it gives a share of itself back
+(`CUT_REFUND`), and spends the marker, so using it again on the same enemy does not, until he has feared it again. It always gives Knives back.
+
+The engine got a few things for him. Two statuses, `fear` and `invisible` (`fear(ticks)` and `invisible(ticks)`, which are the owner's: a fear is its fearer's, which is
+who it runs from). A fear is a stun that also walks the unit (`isStunned` is "cannot act", for both), and a move or attack order given to a feared character
+is dropped. An **invisible** character cannot be attacked, or aimed an ability that has a unit to aim at, by an enemy, and a turret does not see it, and a monster does
+not notice it; what lands on the ground still hits it, since it does not need to see it. A monster that is already after it is not fooled out of the fight: it keeps its
+target (`thinkMonsters` leaves the one it is after in its sight), stays in `chase` and does not go home and heal, though it cannot strike what it cannot see, and it goes after
+it again when it is seen, which is how a monster that has been frightened by Cloak (who has just shown himself) is still on him afterwards. The page does not draw an invisible enemy, nor let one be picked
+(`TeamVision.isVisible`), and draws a champion that is invisible, to its own team, at `INVISIBLE_ALPHA`. A champion says what it does on ceasing to be
+invisible with `onLeaveInvisibility` (an effect list, run where it stands); the simulator runs it when the time is up (`computeFrame`, once everyone is where the
+tick put them) and when it attacks or casts (`revealed`). `enemiesInCone(range, { cos, sin })` is a selector, for the cone with its point at the cast origin, opening
+along the aim: it is given the cosine and the sine of half the angle as numbers written out, and not worked out, so that every peer has exactly the same, and the
+ability's `indicator.coneHalfAngle` (in radians) is what the page draws, which a test checks agrees. `spawnEntity(def, { spread })` throws a copy for each turn
+(a cosine and a sine, written out the same way), a fan. `towardTarget(distance)` is an anchor, the point that far from the caster on the line to the unit a cast is aimed at,
+which a dash goes `toward` so that it is always that long, whatever the distance to the unit. `Champion.castableAbilities()` is every ability a champion can cast, its recasts too. All of it is tested in `tests/cloak.test.ts` and
+`tests/effects-named.test.ts`.
+
+**Sage** is a ranged healer who marks enemies and feeds on them. P: Heal Pulse and Vine Bolt put a **mend** (`SAGE_KEY`, for `SAGE_MARK_TICKS`) on each enemy they hit, one on
+each at the most, however many hit it (it is a marker with a `cap` of 1, and a hit renews it). An auto on a mended enemy, **hers or anyone's on her side**, heals whoever made it (`SAGE_HEAL`, with
+`SAGE_HEAL_SCALING`) and gives them `SAGE_HASTE` move speed for `SAGE_HASTE_TICKS`, and uses the mend up: the next auto on the same enemy heals no one unless she has mended it again. The amount is worked
+out from **her** arcane and not the arcane of whoever hit, since it is her passive. The speed is the one status of the name `SAGE_HASTE_NAME`, renewed by the next auto and not added to. It is in every champion's
+autos (`popMends` in `champions.ts`, as Monk's Flurry is), since any champion can be on her side: it runs as her, and only for a champion of her team. Each Sage's mend is its own, so an enemy
+that two Sages have mended is two, and one auto uses up both and is healed for each; a mend that a Sage left behind when she died can still be used until it runs out. An auto at a target that is dodging it
+uses nothing. Q, Heal Pulse, goes out from her to `PULSE_RADIUS`: it heals every ally in it (herself too), and hurts, mends and shoves back every enemy in it,
+away from where she cast it. W, Vine Bolt, is a bolt that pierces: it goes through every enemy on its line, once each, and hurts, roots and mends each. E, Rejuvenate, heals a teammate
+or herself for a set amount that grows with her arcane and a share of the health they are missing (`linear(scaled(REJUVENATE_HEAL, REJUVENATE_SCALING), REJUVENATE_MISSING, missingHealth())`), and
+its tooltip tells all three (the flat amount, the share of what is missing, the arcane). It is aimed at a unit like Cloak's Cut Through, but at a teammate (`targetsAllies`, below). It is tested in
+`tests/sage.test.ts`.
+
+**Monk** is a melee guardian who ties himself to a teammate. P: `MONK_DAMAGE_REDUCTION` of every hit he takes is not taken (`ChampionDef.damageReduction`: whatever the source, a burn too, on
+top of his resistance and before his shields), and each auto he makes takes `MONK_AUTO_REFUND_TICKS` off the cooldown of Link, Link Heal, Flurry and Guard. Q, Link, is aimed at a teammate or at
+himself. Cast on a teammate it **links** them: `LINK_SHARE` of every hit they take is Monk's to take instead (`ChampionDef.damageLink`), for as long as the link lasts, which is
+until it is cut, either of them dies, or the teammate gets **too far away**: the tick they are farther from him than `LINK_BREAK_RANGE` (body middle to body middle; more than a cast reaches, so a link
+made at the farthest is not broken as it is made) the link breaks, as he would cut it himself (the marker comes off, the entity ends, and Link starts its whole cooldown over). The entity sees to it, on its
+tick (`linkStretched`, `cutLink`), and it does not come back when they are close again. Cast on himself with no link up, it heals him (`LINK_HEAL`, with `LINK_HEAL_SCALING`) and links no one.
+
+The link is a `LINK_KEY` marker of Monk's on the teammate, with no end, and a `link` entity on Monk (`visual: 'hidden'`: it is not drawn) that is only there to put the key on its recast, as the
+stick is for Stick. While it is out Q is **Link Heal** (`linkheal`, a cooldown of its own, `LINK_HEAL_COOLDOWN_TICKS`), and it is cast on a unit: on the linked teammate it heals them
+(the same heal) and **keeps the link**; on **himself** it **cuts** the link (the marker comes off, the entity ends, and Link starts its whole cooldown over), heals no one, and costs none of Link Heal's
+cooldown (it is given back, so a cut is never kept waiting on a heal); on anyone else it does nothing and is given back whole. **The teammate does not have to be pointed at**: Link Heal says
+`targetsLinked`, so the page casts it on the unit he has linked wherever the cursor is (on nothing, or on another teammate), and on himself only when the cursor is over him, or **Alt** is held
+(`ClientGameState.linkedUnit` finds the linked unit from the markers). Out of its reach he walks up to the teammate to heal them, as he does to cast anything at a unit. A heal does put Link Heal on its cooldown, which an auto in a fight
+hurries along, so for that time the link cannot be cut.
+
+The page draws the link as a **beam** on the ground between the two, from the edge of the teammate's body to the edge of Monk's, a pale line with gold dashes running along it from the teammate to him
+(the way the damage goes), under the champions (`render/link-layer.ts`, `layoutLinks` and `beamDashes`; `RenderedCharacter.linkedBy` says who holds a link). It is not a pip under the teammate: the
+mark is a marker like any other, but it is left out of the pips (`stack-pips.ts`). There is no beam while either is dead or out of the frame, or while their bodies touch.
+
+W, Flurry, gives Monk, and the teammate he has linked, the next `FLURRY_AUTOS` autos: each is
+quicker (`FLURRY_ATTACK_SPEED` more attacks a second, until the last of them) and slows what it hits (`FLURRY_SLOW`). It is an **auto reset** (`resetAutoTimer`, as Lunge is): it has no windup,
+so it can be cast between autos, and Monk's next one is ready at once; the linked teammate's auto timer is not reset. E, Guard, shields Monk and his linked teammate alike
+(`GUARD_SHIELD`), or Monk alone, with a bigger shield (`GUARD_SHIELD_ALONE`), if he has no link. The heal and the shields grow with his **arcane** and not his health (`LINK_HEAL_SCALING`, `GUARD_SCALING`: 2 for each point, so about 8 more for each level, as his arcane grows by 4 a level), and the
+tooltips tell it. It is tested in `tests/monk.test.ts`.
+
+The engine got a few things for them. An ability can be **for allies**: `targetsAllies: true` on a unit-targeted ability makes its target a teammate or the caster itself (never a structure),
+and not an enemy; an invisible teammate can be aimed at. One out of reach is walked up to and cast on, as an enemy is (`driveAttacks`). On the page `getAllyNear` picks the target, so
+pointing at yourself casts on yourself, and pointing at an enemy or at nothing says `Aim <ability> at a teammate, or at yourself.` Holding **Alt** while pressing the key casts an ability for
+allies on the champion itself, at once, wherever the cursor is, with no aim (`ClientGameState.abilitySelfCasts` says which keys do: the ability on the key now, so Link's recast does too; `createCastOrder`'s
+`selfCast`). On any other ability Alt does nothing: it is cast as always. Alt is kept from opening the browser's menu bar while a game is played. `ChampionDef.damageReduction` is a share of every hit
+that a champion does not take (it is multiplied in with its resistance statuses and its resistance stat: `applyDamage`). `ChampionDef.damageLink` names a marker key and a share: a unit
+that carries a marker of that key from a champion that is alive hands that champion the share of each hit it takes (`Simulator.damageLinks`). The champion takes its share from its
+own resistance, reduction and shields, with none of the attacker's item effects, and it is credited to whoever struck, so a Monk killed by a teammate's share was killed by the
+attacker; shares that add to more than the whole are cut down in proportion. A champion that dies lets go of what it linked, its markers of that key coming off every unit. `SimReader.unitsMarkedBy(key, ownerId)` and the selector
+`markedUnits(key)` find the units a champion has marked (the link's teammate). `mark` takes `bearer: true` to give a marker that belongs to the unit that carries it, so it can spend it
+itself (`stacks(key, self())`), and a duration of `Infinity` for one that has no end. `endNamed(name)` ends every status of that name that anyone gave a unit at once. Flurry's charges are bearer
+markers, and spending them is part of every champion's autos (`Champion.attackEffects`), since the teammate can be any champion: an auto with a charge slows its target and spends the
+charge, the last one also ends the attack speed (`endNamed`), and an auto at a target that is dodging it spends one and slows no one.
+
 One key doing two things is the ability's `recast`. Stick names `recast: 'recall'`, and `recall` is an
 ability in full, with its own cooldown, that the key becomes while it can be cast. What can be cast
 is the ability's `requires`: `{ entity: 'stick', out: true }` means only while the caster has a stick
@@ -1859,7 +1991,10 @@ about one round trip plus `GAME_REMOTE_RENDER_BUFFER_TICKS` in the past, so the
 orders that shape their path have already arrived and they are not corrected on
 every order. Their displayed position still eases toward that target, with a
 catch-up speed that grows toward a 3x cap as the gap widens, and snaps when a
-respawn teleports them.
+respawn teleports them: a jump of more than `REMOTE_SNAP_DISTANCE` (150 px) is a snap, and so is the
+frame a dead body comes back on, however short the jump (a monster that died a short way from its post
+used to be drawn sliding home as it came back). The sprite's `CharacterAnimator` likewise forgets where a body was while it is dead, so a short
+respawn is not read as a step: no walk clip, and no turning to face the spawn point. `tests/respawn-render.test.ts` plays this at frame rate for the slime and the golem.
 
 ## Hosting on a VPS
 

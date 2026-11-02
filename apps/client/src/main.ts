@@ -2,6 +2,7 @@ import './style.css'
 import { createChampionSelect } from './champion-select.ts'
 import { startGame } from './game.ts'
 import { abilityIconUrl } from './ui/ability-icon-urls.ts'
+import { element, requireElement } from './ui/dom.ts'
 import { lobbySummary } from './ui/results.ts'
 import {
   GAME_MODES,
@@ -56,6 +57,8 @@ const modeWarning = requiredElement<HTMLParagraphElement>('#mode-warning')
 const respawnInput = requiredElement<HTMLInputElement>('#rule-respawn')
 const captureRow = requiredElement<HTMLElement>('#rule-capture-row')
 const captureInput = requiredElement<HTMLInputElement>('#rule-capture')
+const goldRow = requiredElement<HTMLElement>('#rule-gold-row')
+const goldInput = requiredElement<HTMLInputElement>('#rule-gold')
 const loseItemsRow = requiredElement<HTMLElement>('#rule-lose-items-row')
 const loseItemsInput = requiredElement<HTMLInputElement>('#rule-lose-items')
 const limitList = requiredElement<HTMLDivElement>('#rule-limits')
@@ -104,11 +107,7 @@ function createSessionId(): string {
 }
 
 function requiredElement<T extends HTMLElement>(selector: string): T {
-  const element = document.querySelector<T>(selector)
-  if (!element) {
-    throw new Error(`The lobby page is missing the required element: ${selector}`)
-  }
-  return element
+  return requireElement<T>(document, selector, 'lobby')
 }
 
 async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
@@ -143,6 +142,24 @@ function lobbyRequest<T = { lobby: Lobby }>(
   body: Record<string, unknown> = {},
 ): Promise<T> {
   return request<T>(`/api/lobbies/${encodeURIComponent(lobby.code)}/${action}`, method, { sessionId, ...body })
+}
+
+// Asks the lobby server to do something in the lobby the player is in, and keeps the lobby it answers with. Nothing if there is no lobby or the server
+// turns it down: the reason is shown as a message, or handed to `onError`.
+async function lobbyAction(
+  action: string,
+  body: Record<string, unknown> = {},
+  onError: (text: string) => void = (text) => setLobbyMessage(text, true),
+): Promise<{ lobby: Lobby } | undefined> {
+  if (!currentLobby) return undefined
+  try {
+    const result = await lobbyRequest(currentLobby, action, 'POST', body)
+    currentLobby = result.lobby
+    return result
+  } catch (error) {
+    onError(errorMessage(error))
+    return undefined
+  }
 }
 
 function setEntryMessage(text: string, isError = false): void {
@@ -190,48 +207,21 @@ function renderLobby(lobby: Lobby): void {
         ? 'Game finished'
         : 'Start game'
   for (const player of lobby.players) {
-    const item = document.createElement('li')
-    item.className = 'player-row'
-    const indicator = document.createElement('span')
-    indicator.className = player.id === lobby.leaderId ? 'player-icon leader-icon' : 'player-icon'
-    indicator.textContent = player.id === lobby.leaderId ? '♛' : '♟'
-    indicator.setAttribute('aria-label', player.id === lobby.leaderId ? 'Leader' : 'Player')
+    const leads = player.id === lobby.leaderId
     const team = getTeam(player.team)
-    const swatch = document.createElement('span')
-    swatch.className = 'team-swatch'
+    const indicator = element('span', leads ? 'player-icon leader-icon' : 'player-icon', leads ? '♛' : '♟')
+    indicator.setAttribute('aria-label', leads ? 'Leader' : 'Player')
+    const swatch = element('span', 'team-swatch')
     swatch.style.background = team.color
     swatch.setAttribute('aria-hidden', 'true')
-    const name = document.createElement('span')
-    name.textContent = player.name
     // The name of the team as well as its colour, so it does not rest on telling colours apart.
-    const teamName = document.createElement('span')
-    teamName.className = 'team-name'
-    teamName.textContent = team.name
-    item.append(indicator, swatch, name, teamName)
+    const item = element('li', 'player-row', indicator, swatch, element('span', '', player.name), element('span', 'team-name', team.name))
     // Who is still in the game, for a lobby whose players have gone back to it while it goes on.
     if (lobby.game.playingPlayerIds.includes(player.id) && (lobby.game.status === 'running' || lobby.game.status === 'finished')) {
-      const playing = document.createElement('span')
-      playing.className = 'player-status'
-      playing.textContent = lobby.game.status === 'finished' ? 'Results' : 'In game'
-      item.append(playing)
+      item.append(element('span', 'player-status', lobby.game.status === 'finished' ? 'Results' : 'In game'))
     }
-
-    if (player.id !== lobby.leaderId && isLeader) {
-      const actions = document.createElement('span')
-      actions.className = 'player-actions'
-
-      const promoteButton = document.createElement('button')
-      promoteButton.type = 'button'
-      promoteButton.textContent = 'Promote'
-      promoteButton.addEventListener('click', () => void managePlayer('leader', player))
-
-      const kickButton = document.createElement('button')
-      kickButton.type = 'button'
-      kickButton.textContent = 'Kick'
-      kickButton.addEventListener('click', () => void managePlayer('players/kick', player))
-
-      actions.append(promoteButton, kickButton)
-      item.append(actions)
+    if (!leads && isLeader) {
+      item.append(element('span', 'player-actions', playerButton('Promote', 'leader', player), playerButton('Kick', 'players/kick', player)))
     }
     playerList.append(item)
   }
@@ -239,15 +229,11 @@ function renderLobby(lobby: Lobby): void {
   renderTeamPicker(lobby)
 
   const previousLatestId = chatMessages.lastElementChild?.getAttribute('data-message-id')
-  chatMessages.replaceChildren()
-  for (const message of lobby.messages) {
-    const item = document.createElement('li')
-    item.dataset.messageId = String(message.id)
-    const author = document.createElement('strong')
-    author.textContent = `${message.name}: `
-    item.append(author, document.createTextNode(message.text))
-    chatMessages.append(item)
-  }
+  chatMessages.replaceChildren(...lobby.messages.map((chat) => {
+    const item = element('li', '', element('strong', '', `${chat.name}: `), chat.text)
+    item.dataset.messageId = String(chat.id)
+    return item
+  }))
   const latestMessage = lobby.messages.at(-1)
   if (latestMessage && String(latestMessage.id) !== previousLatestId) {
     chatMessages.lastElementChild?.scrollIntoView({ block: 'nearest' })
@@ -255,15 +241,22 @@ function renderLobby(lobby: Lobby): void {
   syncChampionSelect(lobby)
 }
 
+// A button on a player's row, for the leader to promote or kick them with.
+function playerButton(label: string, action: 'leader' | 'players/kick', player: Player): HTMLButtonElement {
+  const button = element('button', '', label)
+  button.type = 'button'
+  button.addEventListener('click', () => void managePlayer(action, player))
+  return button
+}
+
 // One button per team in its colour, the player's own ringed. Teams can only be changed in the
 // lobby, so the buttons are off once a game is starting, and so are those of teams that are full.
 function renderTeamPicker(lobby: Lobby): void {
   const own = lobby.players.find((player) => player.id === sessionId)?.team
   const others = lobby.players.filter((player) => player.id !== sessionId).map((player) => player.team)
-  teamPicker.replaceChildren()
-  for (const team of GAME_TEAMS) {
+  teamPicker.replaceChildren(...GAME_TEAMS.map((team) => {
     const full = !teamHasRoom(others, team.id)
-    const button = document.createElement('button')
+    const button = element('button')
     button.type = 'button'
     button.style.background = team.color
     button.title = full ? `${team.name} (full)` : team.name
@@ -271,8 +264,8 @@ function renderTeamPicker(lobby: Lobby): void {
     button.setAttribute('aria-pressed', String(team.id === own))
     button.disabled = lobby.game.status !== 'idle' || full
     button.addEventListener('click', () => void chooseTeam(team.id))
-    teamPicker.append(button)
-  }
+    return button
+  }))
 }
 
 respawnInput.min = String(RESPAWN_SECONDS.min)
@@ -286,23 +279,20 @@ captureInput.step = '1'
 // capture the flag. A limit of 0 is no limit.
 const limitRows = new Map<GameMode, { row: HTMLElement; input: HTMLInputElement }>()
 for (const mode of GAME_MODES) {
-  const row = document.createElement('label')
-  row.className = 'rule-row'
-  row.hidden = true
-  const text = document.createElement('span')
-  text.textContent = `${mode.limitLabel} (0 for no limit)`
-  const input = document.createElement('input')
+  const input = element('input')
   input.type = 'number'
   input.min = '0'
   input.max = String(mode.maxLimit)
   input.step = '1'
   input.addEventListener('change', () => void changeRules({ scoreLimits: { [mode.id]: input.valueAsNumber } }))
-  row.append(text, input)
+  const row = element('label', 'rule-row', element('span', '', `${mode.limitLabel} (0 for no limit)`), input)
+  row.hidden = true
   limitList.append(row)
   limitRows.set(mode.id, { row, input })
 }
 respawnInput.addEventListener('change', () => void changeRules({ respawnSeconds: respawnInput.valueAsNumber }))
 captureInput.addEventListener('change', () => void changeRules({ captureSeconds: captureInput.valueAsNumber }))
+goldInput.addEventListener('change', () => void changeRules({ gold: goldInput.checked }))
 loseItemsInput.addEventListener('change', () => void changeRules({ loseItemsOnDeath: loseItemsInput.checked }))
 
 // A number box shows what the lobby says, unless it is the one being typed in, or its change is on its way.
@@ -312,7 +302,8 @@ function showNumber(input: HTMLInputElement, value: number, force: boolean): voi
 }
 
 // The leader's rules: how long a champion stays dead, how long the hill takes to capture (only for a game on
-// the hill), whether a death costs a champion its items (only for core destruction, the mode that has them), and the
+// the hill), whether there is gold and a shop and whether a death costs a champion its items (only for core destruction, the mode that has them: with no gold there are no
+// items to lose, so that one is put away), and the
 // limit of the mode that is selected. Everyone sees them; only the leader can change them, and only until the game starts.
 function renderRules(lobby: Lobby, isLeader: boolean, force = false): void {
   const editable = isLeader && lobby.game.status === 'idle'
@@ -321,7 +312,10 @@ function renderRules(lobby: Lobby, isLeader: boolean, force = false): void {
   captureRow.hidden = lobby.mode !== 'koth'
   captureInput.disabled = !editable
   showNumber(captureInput, lobby.rules.captureSeconds, force)
-  loseItemsRow.hidden = lobby.mode !== 'core'
+  goldRow.hidden = lobby.mode !== 'core'
+  goldInput.disabled = !editable
+  if (force || !rulesChangePending) goldInput.checked = lobby.rules.gold
+  loseItemsRow.hidden = lobby.mode !== 'core' || !lobby.rules.gold
   loseItemsInput.disabled = !editable
   // Like a number box, it keeps what was just clicked while the change is on its way.
   if (force || !rulesChangePending) loseItemsInput.checked = lobby.rules.loseItemsOnDeath
@@ -336,18 +330,14 @@ function renderRules(lobby: Lobby, isLeader: boolean, force = false): void {
 async function changeRules(change: RulesChange): Promise<void> {
   if (!currentLobby) return
   rulesChangePending = true
-  try {
-    const result = await lobbyRequest(currentLobby, 'rules', 'POST', change)
-    currentLobby = result.lobby
-    setLobbyMessage('')
-  } catch (error) {
-    setLobbyMessage(errorMessage(error), true)
+  const result = await lobbyAction('rules', change, (text) => {
+    setLobbyMessage(text, true)
     // Whatever was typed was not taken, so the boxes go back to what the lobby has.
     if (currentLobby) renderRules(currentLobby, currentLobby.leaderId === sessionId, true)
-  } finally {
-    rulesChangePending = false
-    if (currentLobby) renderLobby(currentLobby)
-  }
+  })
+  if (result) setLobbyMessage('')
+  rulesChangePending = false
+  if (currentLobby) renderLobby(currentLobby)
 }
 
 // What is happening to the game that has begun, who is in it, how the last one ended, and the leader's way
@@ -372,19 +362,13 @@ async function endGame(): Promise<void> {
     ? 'Close the game? Anyone still looking at its results goes back to the lobby.'
     : 'End the game for everyone? They go straight back to the lobby, and the team that is ahead wins.'
   if (!window.confirm(question)) return
-  try {
-    const result = await lobbyRequest(currentLobby, 'end')
-    currentLobby = result.lobby
-    renderLobby(result.lobby)
-  } catch (error) {
-    setLobbyMessage(errorMessage(error), true)
-  }
+  const result = await lobbyAction('end')
+  if (result) renderLobby(result.lobby)
 }
 
 for (const mode of GAME_MODES) {
-  const option = document.createElement('option')
+  const option = element('option', '', mode.name)
   option.value = mode.id
-  option.textContent = mode.name
   modeSelect.append(option)
 }
 
@@ -397,9 +381,8 @@ function renderMapPicker(lobby: Lobby, isLeader: boolean, map: MapSummary | unde
   if (listKey !== shownMaps) {
     shownMaps = listKey
     mapSelect.replaceChildren(...lobby.maps.map((candidate) => {
-      const option = document.createElement('option')
+      const option = element('option', '', candidate.problem ? `${candidate.name} (cannot be played on)` : candidate.name)
       option.value = candidate.id
-      option.textContent = candidate.problem ? `${candidate.name} (cannot be played on)` : candidate.name
       option.disabled = candidate.problem !== undefined
       return option
     }))
@@ -440,46 +423,29 @@ async function chooseMap(id: string): Promise<void> {
   if (!currentLobby) return
   const before = currentLobby
   mapChangePending = true
-  try {
-    const result = await lobbyRequest(currentLobby, 'map', 'POST', { map: id })
-    currentLobby = result.lobby
+  const result = await lobbyAction('map', { map: id })
+  if (result) {
     const chosen = result.lobby.maps.find((candidate) => candidate.id === result.lobby.map)
     // A mode the new map cannot be played in is dropped for the default one, which is worth saying.
     setLobbyMessage(before.mode !== result.lobby.mode && chosen
       ? `${chosen.name} has no ${getGameMode(before.mode).name}, so the mode is now ${getGameMode(result.lobby.mode).name}.`
       : '')
-  } catch (error) {
-    setLobbyMessage(errorMessage(error), true)
-  } finally {
-    mapChangePending = false
-    if (currentLobby) renderLobby(currentLobby)
   }
+  mapChangePending = false
+  if (currentLobby) renderLobby(currentLobby)
 }
 
 async function chooseMode(mode: string): Promise<void> {
   if (!currentLobby || !isGameMode(mode)) return
   modeChangePending = true
-  try {
-    const result = await lobbyRequest(currentLobby, 'mode', 'POST', { mode })
-    currentLobby = result.lobby
-    setLobbyMessage('')
-  } catch (error) {
-    setLobbyMessage(errorMessage(error), true)
-  } finally {
-    modeChangePending = false
-    if (currentLobby) renderLobby(currentLobby)
-  }
+  if (await lobbyAction('mode', { mode })) setLobbyMessage('')
+  modeChangePending = false
+  if (currentLobby) renderLobby(currentLobby)
 }
 
 async function chooseTeam(team: number): Promise<void> {
-  if (!currentLobby) return
-  try {
-    const result = await lobbyRequest(currentLobby, 'team', 'POST', { team })
-    currentLobby = result.lobby
-    renderLobby(result.lobby)
-  } catch (error) {
-    setLobbyMessage(errorMessage(error), true)
-  }
+  const result = await lobbyAction('team', { team })
+  if (result) renderLobby(result.lobby)
 }
 
 const championSelect = createChampionSelect({
@@ -520,16 +486,13 @@ async function sendSelectionRequest(
   action: 'pick' | 'lock' | 'cancel-start',
   body: Record<string, unknown>,
 ): Promise<void> {
-  if (!currentLobby) return
-  try {
-    const result = await lobbyRequest(currentLobby, action, 'POST', body)
-    currentLobby = result.lobby
-    renderLobby(result.lobby)
-    if (result.lobby.game.status === 'starting') void enterGame(result.lobby)
-  } catch (error) {
-    championSelect.setMessage(errorMessage(error), true)
+  const result = await lobbyAction(action, body, (text) => {
+    championSelect.setMessage(text, true)
     championSelect.discardPendingPick()
-  }
+  })
+  if (!result) return
+  renderLobby(result.lobby)
+  if (result.lobby.game.status === 'starting') void enterGame(result.lobby)
 }
 
 async function managePlayer(action: 'leader' | 'players/kick', player: Player): Promise<void> {
@@ -539,14 +502,10 @@ async function managePlayer(action: 'leader' | 'players/kick', player: Player): 
     : `Kick ${player.name} from the lobby?`
   if (!window.confirm(confirmation)) return
 
-  try {
-    const result = await lobbyRequest(currentLobby, action, 'POST', { targetSessionId: player.id })
-    currentLobby = result.lobby
-    renderLobby(result.lobby)
-    setLobbyMessage(action === 'leader' ? `${player.name} is now the leader.` : `${player.name} was kicked.`)
-  } catch (error) {
-    setLobbyMessage(errorMessage(error), true)
-  }
+  const result = await lobbyAction(action, { targetSessionId: player.id })
+  if (!result) return
+  renderLobby(result.lobby)
+  setLobbyMessage(action === 'leader' ? `${player.name} is now the leader.` : `${player.name} was kicked.`)
 }
 
 function showLobby(lobby: Lobby, player: Player): void {
@@ -562,20 +521,22 @@ function showLobby(lobby: Lobby, player: Player): void {
   if (lobby.game.status === 'starting') void enterGame(lobby)
 }
 
-async function createLobby(): Promise<void> {
-  createButton.disabled = true
-  setEntryMessage('Creating lobby…')
+// Makes a lobby or joins one, with the button that asked for it off while that is under way.
+async function openLobby(path: string, button: HTMLButtonElement | null, pending: string): Promise<void> {
+  if (button) button.disabled = true
+  setEntryMessage(pending)
   try {
-    const result = await request<LobbyResponse>('/api/lobbies', 'POST', {
-      sessionId,
-      name: usernameInput.value,
-    })
+    const result = await request<LobbyResponse>(path, 'POST', { sessionId, name: usernameInput.value })
     showLobby(result.lobby, result.player)
   } catch (error) {
     setEntryMessage(errorMessage(error), true)
   } finally {
-    createButton.disabled = false
+    if (button) button.disabled = false
   }
+}
+
+function createLobby(): Promise<void> {
+  return openLobby('/api/lobbies', createButton, 'Creating lobby…')
 }
 
 async function joinLobby(event: SubmitEvent): Promise<void> {
@@ -586,20 +547,7 @@ async function joinLobby(event: SubmitEvent): Promise<void> {
     return
   }
 
-  const submitButton = joinForm.querySelector<HTMLButtonElement>('button[type="submit"]')
-  if (submitButton) submitButton.disabled = true
-  setEntryMessage('Joining lobby…')
-  try {
-    const result = await request<LobbyResponse>(`/api/lobbies/${encodeURIComponent(code)}/join`, 'POST', {
-      sessionId,
-      name: usernameInput.value,
-    })
-    showLobby(result.lobby, result.player)
-  } catch (error) {
-    setEntryMessage(errorMessage(error), true)
-  } finally {
-    if (submitButton) submitButton.disabled = false
-  }
+  await openLobby(`/api/lobbies/${encodeURIComponent(code)}/join`, joinForm.querySelector<HTMLButtonElement>('button[type="submit"]'), 'Joining lobby…')
 }
 
 async function refreshLobby(): Promise<void> {
@@ -636,18 +584,14 @@ async function sendChatMessage(event: SubmitEvent): Promise<void> {
 
   const sendButton = chatForm.querySelector<HTMLButtonElement>('button[type="submit"]')
   if (sendButton) sendButton.disabled = true
-  try {
-    const result = await lobbyRequest(currentLobby, 'messages', 'POST', { text })
-    currentLobby = result.lobby
+  const result = await lobbyAction('messages', { text })
+  if (result) {
     renderLobby(result.lobby)
     chatInput.value = ''
     setLobbyMessage('')
-  } catch (error) {
-    setLobbyMessage(errorMessage(error), true)
-  } finally {
-    if (sendButton) sendButton.disabled = false
-    chatInput.focus()
   }
+  if (sendButton) sendButton.disabled = false
+  chatInput.focus()
 }
 
 function beginPolling(intervalMs = LOBBY_POLL_MS): void {

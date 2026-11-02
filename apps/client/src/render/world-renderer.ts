@@ -11,16 +11,19 @@ import { DEFAULT_EFFECTS, type EffectSettings } from './effect-settings.ts'
 import { HitboxLayer } from './hitbox-layer.ts'
 import { IndicatorLayer } from './indicator-layer.ts'
 import { KillRewardLayer } from './kill-reward-layer.ts'
+import { LinkLayer } from './link-layer.ts'
 import type { KillRewardView } from './kill-reward.ts'
+import { BushAreaLayer } from './bush-area.ts'
 import type { MapView } from './map-view.ts'
 import { ObjectiveLayer } from './objective-layer.ts'
 import { ShopAreaLayer } from './shop-area.ts'
 import { TurretRangeLayer } from './turret-range.ts'
 import type { ModeView } from '../ui/mode-hud.ts'
-import type { ShopZone, VisionMask } from '../../../../packages/shared/src/index.ts'
+import type { Rect, ShopZone, VisionMask } from '../../../../packages/shared/src/index.ts'
 
-// What a frame with no shops says, one array every time so the shop layer does not take it for something new to draw.
+// What a frame with no shops says, one array every time so the shop layer does not take it for something new to draw. The same for bushes.
 const NO_SHOPS: readonly ShopZone[] = []
+const NO_BUSHES: readonly Rect[] = []
 
 // Everything the world is drawn from on one frame. It is plain data, worked out by whoever runs the
 // game, so the renderer knows nothing of the network or the simulation.
@@ -42,6 +45,8 @@ export type WorldFrame = {
   mode?: ModeView
   // The shops, which heal the team that owns them, tinted on the ground. Left out, there are none.
   shops?: readonly ShopZone[]
+  // The bushes, which hide whoever stands in them (see `Terrain.bushAt`), marked with a green box. Left out, there are none.
+  bushes?: readonly Rect[]
   // The kills the controlled champion has just made, each told once, for the gold and experience shown over where it fell.
   rewards?: readonly KillRewardView[]
   // The way the controlled champion is walking, from where it is, for the debug view.
@@ -67,14 +72,16 @@ export type WorldRendererOptions = {
 //   shop areas     the green tint over each shop, which is a healing area (`ShopAreaLayer`)
 //   objectives     the hill, and the flags' bases and flags on the ground (`ObjectiveLayer`)
 //   ground         telegraphs and fields, under the champions so they never hide them
+//   links          the beam between a champion and the teammate it has linked to itself (`LinkLayer`)
 //   turret ranges  the faint circle round each turret, out to the end of its reach (`TurretRangeLayer`)
 //   indicators     the attack range ring, the aimed ability's indicator, attack reticles
 //   depth          the champions' bodies and what stands up out of the map (the faces of walls: `MapView.sorted`),
 //                  in order of how far down the map each stands, so a champion walks behind a wall and in front
 //                  of another (see depth.ts). It is a `RenderLayer`: they stay in the scene where they are for
 //                  where they are drawn, and this says when.
+//   bushes         the green box over each bush (`BushAreaLayer`), over the champions so one standing in a bush is seen through it
 //   carried flags  the flag a champion carries, over it
-//   air            shots and bolts, which fly over the champions
+//   air           shots and bolts, which fly over the champions
 //   fog            the darkness over what the team cannot see (`FogLayer`): over everything drawn above, which is
 //                  why what stands in it is left out of the frame and not just darkened
 //   names          the champions' names and bars, over the fog and the walls, so they are never lost behind either
@@ -88,8 +95,10 @@ export class WorldRenderer {
   private readonly depth = new RenderLayer({ sortableChildren: true })
   private readonly characters: CharacterLayer
   private readonly entities = new EntityLayer()
+  private readonly links = new LinkLayer()
   private readonly objectives = new ObjectiveLayer()
   private readonly shopAreas = new ShopAreaLayer()
+  private readonly bushAreas = new BushAreaLayer()
   private readonly turretRanges = new TurretRangeLayer()
   private readonly indicators = new IndicatorLayer()
   private readonly fog = new FogLayer()
@@ -105,10 +114,12 @@ export class WorldRenderer {
       this.shopAreas.view,
       this.objectives.ground,
       this.entities.ground,
+      this.links.view,
       this.turretRanges.view,
       this.indicators.view,
       this.characters.view,
       this.depth,
+      this.bushAreas.view,
       this.objectives.above,
       this.entities.air,
       this.fog.view,
@@ -149,15 +160,26 @@ export class WorldRenderer {
     this.floatingNumbers.update(characters, now)
     this.killRewards.update(frame.rewards ?? [], now)
     this.shopAreas.update(frame.shops ?? NO_SHOPS, this.effects.shopGlow)
+    this.bushAreas.update(frame.bushes ?? NO_BUSHES)
     this.characters.update(characters, localCharacterId, frame.localAttackCooldown, now, frame.unseen)
     this.entities.update(entities)
+    this.links.update(characters, now)
     this.turretRanges.update(characters, this.effects.turretRanges)
     this.objectives.update(frame.mode, characters, now)
     this.fog.update(frame.fog)
     this.hitboxes.update(characters, entities, localCharacterId, frame.debugPath)
     this.indicators.update({
       characters,
-      ...(local && !local.dead ? { local: { position: local.position, attackRange: local.attackRange } } : {}),
+      // While the champion you control is invisible and what it does on being seen reaches round it, the reach is drawn, so you can see who would be caught.
+      ...(local && !local.dead
+        ? {
+          local: {
+            position: local.position,
+            attackRange: local.attackRange,
+            ...(local.invisible && local.champion.leaveInvisibilityRadius ? { revealRadius: local.champion.leaveInvisibilityRadius } : {}),
+          },
+        }
+        : {}),
       showAttackRange: this.effects.selfAttackRange,
       ...(frame.castPreview ? { castPreview: frame.castPreview } : {}),
       attackMarkers: frame.attackMarkers,

@@ -7,7 +7,7 @@ import type {
   Vector2,
 } from './index.js'
 import { GAME_BURN_PULSE_TICKS, GAME_TPS } from './constants.js'
-import { boxTouchesCircle, type BoxShape } from './geometry.js'
+import { boxTouchesCircle, clamp, directionTo, distanceBetween, normalize, type BoxShape } from './geometry.js'
 import type { SimCharacter } from './simulator.js'
 import type { BuffableStat, ChampionStats } from './stats.js'
 import type { Terrain } from './terrain.js'
@@ -27,6 +27,8 @@ export interface SimReader {
   // A unit's markers with this key (optionally from one owner), as they stand before this
   // tick's writes. Stacks are one marker each.
   markersOn(unitId: number, key: string, ownerId?: number): Marker[]
+  // The living units that carry a marker with this key that this owner placed, sorted by ID, as they stand before this tick's writes: where a link finds who it is on.
+  unitsMarkedBy(key: string, ownerId: number): number[]
   // A unit's stats at its level, as they stand before this tick's writes (see `Champion.statsAt`).
   statsOf(unitId: number): ChampionStats | undefined
   // A unit's level, as it stands before this tick's writes (what its experience comes to).
@@ -182,8 +184,9 @@ interface EntityDefBase {
   attached?: boolean
   // How the client draws it: a small bolt (default), a large translucent field, a warning
   // circle that fills in as the entity runs out its lifetime (a telegraph), or a bright flash that
-  // is brightest as it appears and fades away over its lifetime (for the instant something goes off).
-  visual?: 'bolt' | 'field' | 'telegraph' | 'flash'
+  // is brightest as it appears and fades away over its lifetime (for the instant something goes off), or not at all (`hidden`), for one that is only there to be
+  // found by what it does (a link that puts a key on its recast), and is drawn some other way.
+  visual?: 'bolt' | 'field' | 'telegraph' | 'flash' | 'hidden'
   // Client-only fill colour for the drawing, for example '#6dd39b'.
   color?: string
 }
@@ -234,7 +237,7 @@ export type AnyEffect = (sim: never, src: EffectSource) => void
 
 // What can be said of an effect: the number it deals, the entity it sends out, the dash it starts, or the two lists it chooses between.
 export type EffectInfo =
-  | { kind: 'damage' | 'burn'; amount: AmountInfo | undefined }
+  | { kind: 'damage' | 'burn' | 'heal' | 'shield'; amount: AmountInfo | undefined }
   | { kind: 'spawn'; def: EntityDef }
   | { kind: 'dash'; def: DashDef }
   | { kind: 'branch'; then: readonly AnyEffect[]; otherwise: readonly AnyEffect[] }
@@ -260,6 +263,18 @@ export function describeAmount(amount: Amount): AmountInfo | undefined {
   return note?.kind === 'amount' ? note.info : undefined
 }
 
+// The status an effect gives a unit: what every one has, from the source that gives it, lasting `durationTicks` from now. `extra` is what only some have (`stat`, `fades`).
+function statusFor(
+  src: EffectSource,
+  id: string,
+  kind: Status['kind'],
+  durationTicks: number,
+  amount: number,
+  extra: Partial<Pick<Status, 'stat' | 'fades'>> = {},
+): Status {
+  return { id, kind, rootId: src.rootId, ownerId: src.ownerId, startTick: src.tick, endTick: src.tick + durationTicks, amount, ...extra }
+}
+
 function addRatios(left: Scaling, right: Scaling): Scaling {
   const sum: Scaling = {}
   for (const key of SCALING_KEYS) {
@@ -279,16 +294,16 @@ export const subject = (): Selector => (_sim, src) =>
 export const targetUnit = (): Selector => (_sim, src) =>
   src.aim?.mode === 'unit' ? [src.aim.unitId] : []
 
+// The living units that carry a marker of this key that the caster placed, such as the teammate a link is on. Nobody if there is none.
+export const markedUnits = (key: string): Selector => (sim, src) => sim.unitsMarkedBy(key, src.ownerId)
+
 export const castOrigin = (): Anchor => (_sim, src) => ({ ...src.at })
 
 // The point `distance` along the aimed direction from the cast origin, such as the middle of a
 // rectangle laid out in front of the caster.
 export const alongAim = (distance: number): Anchor => (sim, src) => {
-  const dir = aimDirection(sim, src)
-  const facing = dir && normalized(dir)
-  return facing
-    ? { x: src.at.x + facing.x * distance, y: src.at.y + facing.y * distance }
-    : undefined
+  const facing = aimFacing(sim, src)
+  return facing && { x: src.at.x + facing.x * distance, y: src.at.y + facing.y * distance }
 }
 
 export const aimPoint = (): Anchor => (_sim, src) =>
@@ -301,6 +316,18 @@ export const ownEntity = (defId: string): Anchor => (sim, src) => {
   return position && { ...position }
 }
 
+// The point `distance` from the caster on the line toward the unit a cast is aimed at (a unit aim), however far that unit is: where a dash of a set length toward an enemy ends up.
+// An enemy nearer than that is gone through, and the dash goes on past it by the difference; one exactly that far is ended up on top of; and it is the same length for all of them.
+// Nothing without a unit to aim at, or one standing right on the caster, which gives no direction.
+export const towardTarget = (distance: number): Anchor => (sim, src) => {
+  if (src.aim?.mode !== 'unit') return undefined
+  const from = sim.posAt(src.ownerId, src.tick)
+  const at = sim.posAt(src.aim.unitId, src.tick)
+  if (!from || !at) return undefined
+  const dir = directionTo(from, at)
+  return dir && { x: from.x + dir.x * distance, y: from.y + dir.y * distance }
+}
+
 // The point on the line from the caster to the unit hit that is just short of the caster: touching it, with `gap` to spare. It is where something dragged to
 // the caster comes to rest, beside it and not on top of it. Nothing if the unit is that close already, so it is not pushed away.
 export const besideOwner = (gap = 0): Anchor => (sim, src) => {
@@ -310,33 +337,28 @@ export const besideOwner = (gap = 0): Anchor => (sim, src) => {
   const from = sim.posAt(src.ownerId, src.tick)
   const at = sim.posAt(src.subject, src.tick)
   if (!owner || !unit || !from || !at) return undefined
-  const dx = at.x - from.x
-  const dy = at.y - from.y
-  const distance = Math.sqrt(dx * dx + dy * dy)
   const rest = owner.champion.radius + unit.champion.radius + gap
-  if (distance <= rest) return undefined
-  return { x: from.x + dx / distance * rest, y: from.y + dy / distance * rest }
+  const dir = directionTo(from, at)
+  if (!dir || distanceBetween(from, at) <= rest) return undefined
+  return { x: from.x + dir.x * rest, y: from.y + dir.y * rest }
 }
 
-export const alliesInRadius = (r: number, center: Anchor = castOrigin()): Selector => (sim, src) => {
+// Whether a unit is of the side a selector wants, as the caster sees it: its enemies or its allies (itself and its teammates).
+const isWanted = (owner: SimCharacter, unit: SimCharacter, wanted: 'enemies' | 'allies'): boolean =>
+  areEnemies(owner, unit) === (wanted === 'enemies')
+
+const unitsInRadiusOf = (wanted: 'enemies' | 'allies') => (r: number, center: Anchor = castOrigin()): Selector => (sim, src) => {
   const at = center(sim, src)
   const owner = sim.character(src.ownerId)
   if (!at || !owner) return []
   return sim.unitsInRadius(at, r, src.tick).filter((unitId) => {
     const unit = sim.character(unitId)
-    return Boolean(unit && !areEnemies(owner, unit))
+    return Boolean(unit && isWanted(owner, unit, wanted))
   })
 }
 
-export const enemiesInRadius = (r: number, center: Anchor = castOrigin()): Selector => (sim, src) => {
-  const at = center(sim, src)
-  const owner = sim.character(src.ownerId)
-  if (!at || !owner) return []
-  return sim.unitsInRadius(at, r, src.tick).filter((unitId) => {
-    const unit = sim.character(unitId)
-    return Boolean(unit && areEnemies(owner, unit))
-  })
-}
+export const alliesInRadius = unitsInRadiusOf('allies')
+export const enemiesInRadius = unitsInRadiusOf('enemies')
 
 // The caster, if its body reaches into the circle, and no one otherwise. For a blast that throws
 // its thrower clear along with everyone else near it, such as a satchel the caster can stand next to.
@@ -344,12 +366,6 @@ export const selfInRadius = (r: number, center: Anchor = castOrigin()): Selector
   const at = center(sim, src)
   if (!at) return []
   return sim.unitsInRadius(at, r, src.tick).filter((unitId) => unitId === src.ownerId)
-}
-
-// A unit vector along `dir`, or undefined for no direction.
-function normalized(dir: Vector2): Vector2 | undefined {
-  const length = Math.sqrt(dir.x * dir.x + dir.y * dir.y)
-  return length === 0 ? undefined : { x: dir.x / length, y: dir.y / length }
 }
 
 // Units whose bodies touch a rectangle, split into enemies or allies of the caster.
@@ -363,12 +379,12 @@ function unitsTouchingBox(
 ): number[] {
   const owner = sim.character(src.ownerId)
   if (!owner) return []
-  const reach = Math.sqrt(box.halfLength * box.halfLength + box.halfWidth * box.halfWidth)
+  const reach = distanceBetween({ x: 0, y: 0 }, { x: box.halfLength, y: box.halfWidth })
   return sim.unitsInRadius(center, reach, src.tick).filter((unitId) => {
     const unit = sim.character(unitId)
     const position = sim.posAt(unitId, src.tick)
     if (!unit || !position) return false
-    if (areEnemies(owner, unit) !== (wanted === 'enemies')) return false
+    if (!isWanted(owner, unit, wanted)) return false
     return boxTouchesCircle(center, facing, box, position, unit.champion.radius)
   })
 }
@@ -376,24 +392,44 @@ function unitsTouchingBox(
 // Enemies whose bodies touch a rectangle laid from the cast origin along the aim: `length` long
 // and `halfWidth` to either side, with square ends.
 export const enemiesInLine = (length: number, halfWidth: number): Selector => (sim, src) => {
-  const dir = aimDirection(sim, src)
-  const facing = dir && normalized(dir)
+  const facing = aimFacing(sim, src)
   if (!facing) return []
   const center = { x: src.at.x + facing.x * length / 2, y: src.at.y + facing.y * length / 2 }
   return unitsTouchingBox(sim, src, center, facing, { halfLength: length / 2, halfWidth }, 'enemies')
 }
 
-// For effects an entity runs on itself: the units touching its own rectangle, centred on the
-// entity and pointing the way it faces. They take the same half-extents as the entity's `box`.
-export const enemiesInBox = (halfLength: number, halfWidth: number): Selector => (sim, src) => {
-  const facing = src.aim?.mode === 'direction' ? normalized(src.aim.dir) : undefined
-  return unitsTouchingBox(sim, src, src.at, facing ?? { x: 1, y: 0 }, { halfLength, halfWidth }, 'enemies')
+// Enemies whose bodies touch a cone with its point at the cast origin, opening along the aim, `range` long, and as wide as `half` says: the cosine and the sine of half the
+// angle it opens by (written out as numbers, so that every peer works from exactly the same ones), which has to be under a right angle. A body is in it when any of it
+// is: its middle may be a body's width outside the edges. Each is in it once, however many knives are drawn.
+export const enemiesInCone = (range: number, half: { cos: number; sin: number }): Selector => (sim, src) => {
+  const facing = aimFacing(sim, src)
+  const owner = sim.character(src.ownerId)
+  if (!facing || !owner) return []
+  return sim.unitsInRadius(src.at, range, src.tick).filter((unitId) => {
+    const unit = sim.character(unitId)
+    const position = sim.posAt(unitId, src.tick)
+    if (!unit || !position || !areEnemies(owner, unit)) return false
+    const dx = position.x - src.at.x
+    const dy = position.y - src.at.y
+    const reach = unit.champion.radius
+    const forward = dx * facing.x + dy * facing.y
+    // Behind the point of the cone, the nearest part of it is the point itself.
+    if (forward < 0) return distanceBetween(src.at, position) <= reach
+    // Otherwise, how far the middle is outside the nearer edge (negative if it is inside).
+    const across = Math.abs(dx * -facing.y + dy * facing.x)
+    return across * half.cos - forward * half.sin <= reach
+  })
 }
 
-export const alliesInBox = (halfLength: number, halfWidth: number): Selector => (sim, src) => {
-  const facing = src.aim?.mode === 'direction' ? normalized(src.aim.dir) : undefined
-  return unitsTouchingBox(sim, src, src.at, facing ?? { x: 1, y: 0 }, { halfLength, halfWidth }, 'allies')
+// For effects an entity runs on itself: the units touching its own rectangle, centred on the
+// entity and pointing the way it faces. They take the same half-extents as the entity's `box`.
+const unitsInBoxOf = (wanted: 'enemies' | 'allies') => (halfLength: number, halfWidth: number): Selector => (sim, src) => {
+  const facing = src.aim?.mode === 'direction' ? normalize(src.aim.dir) : undefined
+  return unitsTouchingBox(sim, src, src.at, facing ?? { x: 1, y: 0 }, { halfLength, halfWidth }, wanted)
 }
+
+export const enemiesInBox = unitsInBoxOf('enemies')
+export const alliesInBox = unitsInBoxOf('allies')
 
 // Effects
 
@@ -426,18 +462,8 @@ export const slow = (
   durationTicks: number,
   to: Selector = subject(),
 ): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
-  const amount = Math.max(0, Math.min(1, resolveAmount(fraction, sim, src)))
-  for (const unitId of to(sim, src)) {
-    sim.addStatus(unitId, {
-      id: `${src.id}:slow`,
-      kind: 'slow',
-      rootId: src.rootId,
-      ownerId: src.ownerId,
-      startTick: src.tick,
-      endTick: src.tick + durationTicks,
-      amount,
-    })
-  }
+  const amount = resolveFraction(fraction, sim, src)
+  for (const unitId of to(sim, src)) sim.addStatus(unitId, statusFor(src, `${src.id}:slow`, 'slow', durationTicks, amount))
 }
 
 // `shared` names the shield for its owner: `${ownerId}:shield:${shared}`. Effects can look it up
@@ -449,39 +475,36 @@ export const shield = (
   durationTicks: number,
   to: Selector = self(),
   options: { shared?: string } = {},
-): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
-  const value = Math.max(0, Math.round(resolveAmount(amount, sim, src)))
-  for (const unitId of to(sim, src)) {
-    sim.addStatus(unitId, {
-      id: options.shared === undefined ? `${src.id}:shield` : `${src.ownerId}:shield:${options.shared}`,
-      kind: 'shield',
-      rootId: src.rootId,
-      ownerId: src.ownerId,
-      startTick: src.tick,
-      endTick: Number.isFinite(durationTicks) ? src.tick + durationTicks : Number.MAX_SAFE_INTEGER,
-      amount: value,
-    })
-  }
-}
+): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => noted((sim, src) => {
+  const value = resolveCount(amount, sim, src)
+  const id = options.shared === undefined ? `${src.id}:shield` : `${src.ownerId}:shield:${options.shared}`
+  // A shield with no end ends on the last tick there is.
+  const lasts = Math.min(durationTicks, Number.MAX_SAFE_INTEGER - src.tick)
+  for (const unitId of to(sim, src)) sim.addStatus(unitId, statusFor(src, id, 'shield', lasts, value))
+}, { kind: 'shield', amount: describeAmount(amount) })
 
 // Places `count` markers (one per stack). A `cap` makes them a stack: only the newest that
 // many of this key and owner stay on the unit, and applying more refreshes all of their timers.
+// With `bearer`, the markers belong to the unit that carries them and not to the caster: charges the unit spends itself (`stacks(key, self())`, `popMarkers(key, self())`),
+// such as a buff one champion gives a teammate for the teammate's next autos.
 export const mark = (
   key: string,
   durationTicks: number,
   to: Selector = subject(),
-  options: { count?: number; cap?: number } = {},
+  options: { count?: number; cap?: number; bearer?: boolean } = {},
 ): Effect<SimReader & Pick<SimWriter, 'addMarker'>> => (sim, src) => {
   const count = options.count ?? 1
+  // A marker with no end (a duration of `Infinity`) ends on the last tick there is.
+  const lasts = Math.min(durationTicks, Number.MAX_SAFE_INTEGER - src.tick)
   for (const unitId of to(sim, src)) {
     for (let index = 0; index < count; index += 1) {
       sim.addMarker(unitId, {
         id: `${src.id}:mark:${key}:${index}`,
         key,
         rootId: src.rootId,
-        ownerId: src.ownerId,
+        ownerId: options.bearer ? unitId : src.ownerId,
         startTick: src.tick,
-        endTick: src.tick + durationTicks,
+        endTick: src.tick + lasts,
         ...(options.cap === undefined ? {} : { cap: options.cap }),
       })
     }
@@ -607,19 +630,11 @@ export const haste = (
 ): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
   const amount = Math.max(0, resolveAmount(fraction, sim, src))
   if (amount === 0) return
+  const id = options.named !== undefined
+    ? namedStatusId(src, options.named, 'haste')
+    : options.shared === undefined ? `${src.id}:haste` : `${src.rootId}:haste:${options.shared}`
   for (const unitId of to(sim, src)) {
-    sim.addStatus(unitId, {
-      id: options.named !== undefined
-        ? namedStatusId(src, options.named, 'haste')
-        : options.shared === undefined ? `${src.id}:haste` : `${src.rootId}:haste:${options.shared}`,
-      kind: 'haste',
-      rootId: src.rootId,
-      ownerId: src.ownerId,
-      startTick: src.tick,
-      endTick: src.tick + durationTicks,
-      amount,
-      ...(options.fades ? { fades: true } : {}),
-    })
+    sim.addStatus(unitId, statusFor(src, id, 'haste', durationTicks, amount, options.fades ? { fades: true } : {}))
   }
 }
 
@@ -638,15 +653,7 @@ export const burn = (
       resolveAmount(damagePerSecond, sim, { ...src, subject: unitId }) * GAME_BURN_PULSE_TICKS / GAME_TPS,
     ))
     if (perPulse === 0) continue
-    sim.addStatus(unitId, {
-      id: `${src.id}:burn`,
-      kind: 'burn',
-      rootId: src.rootId,
-      ownerId: src.ownerId,
-      startTick: src.tick,
-      endTick: src.tick + durationTicks,
-      amount: perPulse,
-    })
+    sim.addStatus(unitId, statusFor(src, `${src.id}:burn`, 'burn', durationTicks, perPulse))
   }
 }, { kind: 'burn', amount: describeAmount(damagePerSecond) })
 
@@ -657,19 +664,10 @@ export const resist = (
   to: Selector = self(),
   options: { named?: string } = {},
 ): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
-  const amount = Math.max(0, Math.min(1, resolveAmount(fraction, sim, src)))
+  const amount = resolveFraction(fraction, sim, src)
   if (amount === 0) return
-  for (const unitId of to(sim, src)) {
-    sim.addStatus(unitId, {
-      id: options.named === undefined ? `${src.id}:resist` : namedStatusId(src, options.named, 'resist'),
-      kind: 'resist',
-      rootId: src.rootId,
-      ownerId: src.ownerId,
-      startTick: src.tick,
-      endTick: src.tick + durationTicks,
-      amount,
-    })
-  }
+  const id = options.named === undefined ? `${src.id}:resist` : namedStatusId(src, options.named, 'resist')
+  for (const unitId of to(sim, src)) sim.addStatus(unitId, statusFor(src, id, 'resist', durationTicks, amount))
 }
 
 // Adds `amount` to one of the stats a unit has (the same points an item adds) while the status lasts: attack damage, attack speed (attacks a
@@ -685,18 +683,8 @@ export const statBuff = (
 ): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
   const value = Math.max(0, resolveAmount(amount, sim, src))
   if (value === 0) return
-  for (const unitId of to(sim, src)) {
-    sim.addStatus(unitId, {
-      id: options.named === undefined ? `${src.id}:stat:${stat}` : namedStatusId(src, options.named, `stat:${stat}`),
-      kind: 'stat',
-      stat,
-      rootId: src.rootId,
-      ownerId: src.ownerId,
-      startTick: src.tick,
-      endTick: src.tick + durationTicks,
-      amount: value,
-    })
-  }
+  const id = options.named === undefined ? `${src.id}:stat:${stat}` : namedStatusId(src, options.named, `stat:${stat}`)
+  for (const unitId of to(sim, src)) sim.addStatus(unitId, statusFor(src, id, 'stat', durationTicks, value, { stat }))
 }
 
 // How many ticks are left, at `tick`, of the statuses that `ownerId` has given a unit under this name (`named`): the longest of them, or 0 for none. It is what a
@@ -730,17 +718,30 @@ export const prolong = (
   }
 }
 
-// A health cost: it ignores shields and resistance and can bring a unit down to 1, never to 0.
-export const loseHealth = (
+// Ends, at once, every status of this name that anyone has given a unit (`named`, on `haste`, `resist` and `statBuff`; the name is after the giver's id in the
+// status's own): a buff that was for a number of uses, and is over with the last of them. A status is over on the tick it ends on, so these are gone from the next.
+export const endNamed = (
+  name: string,
+  to: Selector = self(),
+): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
+  for (const unitId of to(sim, src)) {
+    for (const status of sim.statusesOn(unitId)) {
+      if (new RegExp(`^\\d+:${name}:`).test(status.id)) sim.addStatus(unitId, { ...status, endTick: Math.min(status.endTick, src.tick + 1) })
+    }
+  }
+}
+
+// An effect that changes the health of each unit it selects by a whole amount, read for that unit.
+const changeHealth = (type: 'heal' | 'lose-health') => (
   amount: Amount,
   to: Selector = self(),
 ): Effect<SimReader & Pick<SimWriter, 'emitEvent'>> => (sim, src) => {
   for (const unitId of to(sim, src)) {
-    const value = Math.max(0, Math.round(resolveAmount(amount, sim, { ...src, subject: unitId })))
+    const value = resolveCount(amount, sim, { ...src, subject: unitId })
     if (value === 0) continue
     sim.emitEvent({
-      type: 'lose-health',
-      id: `${src.id}:lose-health:u${unitId}`,
+      type,
+      id: `${src.id}:${type}:u${unitId}`,
       rootId: src.rootId,
       ownerId: src.ownerId,
       unitId,
@@ -749,23 +750,14 @@ export const loseHealth = (
   }
 }
 
+// A health cost: it ignores shields and resistance and can bring a unit down to 1, never to 0.
+export const loseHealth = changeHealth('lose-health')
+
+// What it gives back is told by a tooltip, with the share of the health a unit is missing that it can add (see `missingHealth`).
 export const heal = (
   amount: Amount,
   to: Selector = self(),
-): Effect<SimReader & Pick<SimWriter, 'emitEvent'>> => (sim, src) => {
-  for (const unitId of to(sim, src)) {
-    const value = Math.max(0, Math.round(resolveAmount(amount, sim, { ...src, subject: unitId })))
-    if (value === 0) continue
-    sim.emitEvent({
-      type: 'heal',
-      id: `${src.id}:heal:u${unitId}`,
-      rootId: src.rootId,
-      ownerId: src.ownerId,
-      unitId,
-      amount: value,
-    })
-  }
-}
+): Effect<SimReader & Pick<SimWriter, 'emitEvent'>> => noted(changeHealth('heal')(amount, to), { kind: 'heal', amount: describeAmount(amount) })
 
 // How much health the first selected unit is missing, for damage that grows as a target weakens.
 export const missingHealth = (
@@ -782,10 +774,7 @@ export const subjectWithin = (range: number) => (sim: SimReader, src: EffectSour
   if (src.subject === null) return false
   const from = sim.posAt(src.ownerId, src.tick)
   const to = sim.posAt(src.subject, src.tick)
-  if (!from || !to) return false
-  const dx = to.x - from.x
-  const dy = to.y - from.y
-  return Math.sqrt(dx * dx + dy * dy) <= range
+  return from !== undefined && to !== undefined && distanceBetween(from, to) <= range
 }
 
 // Crowd control. A root stops walking but not attacks or casts; a stun also stops those
@@ -794,22 +783,15 @@ export const subjectWithin = (range: number) => (sim: SimReader, src: EffectSour
 // spent and nothing lands or launches. A silence stops casting abilities, and nothing else: the
 // unit can still walk, attack, and finish a cast it had already begun. A disarm is the other way
 // round: it stops starting an auto attack, and nothing else. The unit can still walk, cast, and go
-// after its target (it waits in reach, and attacks once the disarm is over).
-const crowdControl = (kind: 'root' | 'stun' | 'blind' | 'silence' | 'disarm') => (
+// after its target (it waits in reach, and attacks once the disarm is over). A fear stops acting as a stun does, and walks the unit away from whoever feared it, at its own
+// move speed, whatever it was told to do (see the simulator); the status is the fearer's, which is who it runs from. Being invisible is a status too, for as long as it lasts:
+// an enemy cannot see or aim at one that is, and it is over (and what it does when it is, see `ChampionDef.onLeaveInvisibility`) as soon as it attacks or casts, except
+// an ability that keeps it (`AbilityDef.keepsInvisibility`).
+const crowdControl = (kind: 'root' | 'stun' | 'blind' | 'silence' | 'disarm' | 'fear' | 'invisible' | 'dodge', defaultTo = subject) => (
   durationTicks: number,
-  to: Selector = subject(),
+  to: Selector = defaultTo(),
 ): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
-  for (const unitId of to(sim, src)) {
-    sim.addStatus(unitId, {
-      id: `${src.id}:${kind}`,
-      kind,
-      rootId: src.rootId,
-      ownerId: src.ownerId,
-      startTick: src.tick,
-      endTick: src.tick + durationTicks,
-      amount: 1,
-    })
-  }
+  for (const unitId of to(sim, src)) sim.addStatus(unitId, statusFor(src, `${src.id}:${kind}`, kind, durationTicks, 1))
 }
 
 export const root = crowdControl('root')
@@ -817,6 +799,8 @@ export const stun = crowdControl('stun')
 export const blind = crowdControl('blind')
 export const silence = crowdControl('silence')
 export const disarm = crowdControl('disarm')
+export const fear = crowdControl('fear')
+export const invisible = crowdControl('invisible')
 
 // Teleports the units to a point, at once: a blink. They are there on the next frame, with
 // nothing in between to hit them or be hit, and a root does not hold them. A character in the
@@ -854,20 +838,16 @@ export const knockback = (
   for (const unitId of to(sim, src)) {
     const from = sim.posAt(unitId, src.tick)
     if (!from) continue
-    let dx = src.aim?.mode === 'direction' ? src.aim.dir.x : from.x - src.at.x
-    let dy = src.aim?.mode === 'direction' ? src.aim.dir.y : from.y - src.at.y
-    const length = Math.sqrt(dx * dx + dy * dy)
-    if (length === 0) continue
-    dx /= length
-    dy /= length
+    const dir = src.aim?.mode === 'direction' ? normalize(src.aim.dir) : directionTo(src.at, from)
+    if (!dir) continue
     let push = distance
     if (options.pastEnd !== undefined && src.travelEnd) {
       // How much of the way to the end of the travel lies along the push; none if already past it.
-      const toEnd = (src.travelEnd.x - from.x) * dx + (src.travelEnd.y - from.y) * dy
+      const toEnd = (src.travelEnd.x - from.x) * dir.x + (src.travelEnd.y - from.y) * dir.y
       push = Math.min(push, Math.max(0, toEnd) + options.pastEnd)
     }
     if (push <= 0) continue
-    sim.startDash(unitId, { x: from.x + dx * push, y: from.y + dy * push }, speed)
+    sim.startDash(unitId, { x: from.x + dir.x * push, y: from.y + dir.y * push }, speed)
   }
 }
 
@@ -894,15 +874,7 @@ export const attackRangeBonus = (
   const amount = Math.max(0, resolveAmount(range, sim, src))
   if (amount === 0) return
   for (const unitId of to(sim, src)) {
-    sim.addStatus(unitId, {
-      id: `${src.id}:attackrange`,
-      kind: 'attackrange',
-      rootId: src.rootId,
-      ownerId: src.ownerId,
-      startTick: src.tick,
-      endTick: src.tick + durationTicks,
-      amount,
-    })
+    sim.addStatus(unitId, statusFor(src, `${src.id}:attackrange`, 'attackrange', durationTicks, amount))
   }
 }
 
@@ -926,13 +898,10 @@ function dashEnd(
         : aim?.mode === 'unit'
           ? sim.posAt(aim.unitId, src.tick)
           : undefined
-  if (!point) return undefined
-  const dx = point.x - from.x
-  const dy = point.y - from.y
-  const distance = Math.sqrt(dx * dx + dy * dy)
-  if (distance === 0) return undefined
-  if (distance <= maxDistance) return { x: point.x, y: point.y }
-  return { x: from.x + dx / distance * maxDistance, y: from.y + dy / distance * maxDistance }
+  const dir = point && directionTo(from, point)
+  if (!point || !dir) return undefined
+  if (distanceBetween(from, point) <= maxDistance) return { x: point.x, y: point.y }
+  return { x: from.x + dir.x * maxDistance, y: from.y + dir.y * maxDistance }
 }
 
 // What a dash does as it goes. The effects run when the dash does, not when it is ordered: an enemy
@@ -983,7 +952,7 @@ export const dash = (
       if (!from) continue
       const end = dashEnd(sim, src, from, maxDistance, options.toward)
       if (!end) continue
-      const travel = Math.sqrt((end.x - from.x) ** 2 + (end.y - from.y) ** 2)
+      const travel = distanceBetween(from, end)
       const ticks = typeof options.over === 'function' ? Math.max(1, options.over(sim, src)) : options.over
       sim.startDash(unitId, end, ticks === undefined ? speed : travel * GAME_TPS / ticks, {
         ...(options.through ? { through: true } : {}),
@@ -996,22 +965,7 @@ export const dash = (
 
 // The units dodge every auto attack aimed at them while it lasts: the swing, and any shot that
 // reaches them, is spent and nothing lands. Abilities are not dodged.
-export const dodge = (
-  durationTicks: number,
-  to: Selector = self(),
-): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
-  for (const unitId of to(sim, src)) {
-    sim.addStatus(unitId, {
-      id: `${src.id}:dodge`,
-      kind: 'dodge',
-      rootId: src.rootId,
-      ownerId: src.ownerId,
-      startTick: src.tick,
-      endTick: src.tick + durationTicks,
-      amount: 1,
-    })
-  }
-}
+export const dodge = crowdControl('dodge', self)
 
 export const popMarkers = (
   key: string,
@@ -1026,7 +980,7 @@ export const refundCooldown = (
   fraction: Amount,
   to: Selector = self(),
 ): Effect<SimReader & Pick<SimWriter, 'emitEvent'>> => (sim, src) => {
-  const value = Math.max(0, Math.min(1, resolveAmount(fraction, sim, src)))
+  const value = resolveFraction(fraction, sim, src)
   if (value === 0) return
   for (const unitId of to(sim, src)) {
     sim.emitEvent({
@@ -1087,7 +1041,7 @@ export const reduceCooldown = (
   ticks: Amount,
   to: Selector = self(),
 ): Effect<SimReader & Pick<SimWriter, 'emitEvent'>> => (sim, src) => {
-  const value = Math.max(0, Math.round(resolveAmount(ticks, sim, src)))
+  const value = resolveCount(ticks, sim, src)
   if (value === 0) return
   for (const unitId of to(sim, src)) {
     sim.emitEvent({
@@ -1121,6 +1075,9 @@ export const spawnEntity = (
     // How many ticks this one lasts, worked out as it is spawned, instead of the definition's `lifetimeTicks`: a warning that lasts as long as the jump to
     // it does, which depends on how far it was aimed. (Not for one that lands at its aim, which lasts as long as it takes to get there.)
     lifetime?: (sim: SimReader, src: EffectSource) => number
+    // A fan: one copy for each of these, each turned from the aimed direction by it (a cosine and a sine, which are written out as numbers and not worked out here,
+    // so that every peer turns by exactly the same), such as the knives of a spread. Not for one that lands at its aim, or is laid in a line or a volley.
+    spread?: readonly Vector2[]
   } = {},
 ): Effect<SimReader & Pick<SimWriter, 'addEntity'>> => {
   const registered = entityDefs.get(def.id)
@@ -1129,6 +1086,9 @@ export const spawnEntity = (
   }
   if (options.lifetime && def.landAtAim) {
     throw new Error(`Entity definition "${def.id}" lands at its aim, so it lasts as long as the flight does and has no lifetime to set.`)
+  }
+  if (options.spread && (options.spread.length === 0 || def.landAtAim || options.line || options.volley)) {
+    throw new Error(`Entity definition "${def.id}" is spread in a fan, so it needs at least one turn, and cannot land at its aim or be laid in a line or a volley.`)
   }
   if (def.lifetimeTicks === undefined && !def.landAtAim && !def.stayWhile && !def.homing) {
     throw new Error(`Entity definition "${def.id}" needs lifetimeTicks, landAtAim, stayWhile or homing.`)
@@ -1173,14 +1133,11 @@ export const spawnEntity = (
       : src.aim?.mode === 'unit' ? src.aim.unitId : undefined
     if (def.homing && targetId === undefined) return
     // A rectangle needs a heading: the aimed direction, or east when there is none.
-    let facing: Vector2 | undefined
-    if (def.box) {
-      const aimed = aimDirection(sim, src) ?? { x: 1, y: 0 }
-      const length = Math.sqrt(aimed.x * aimed.x + aimed.y * aimed.y)
-      facing = length === 0 ? { x: 1, y: 0 } : { x: aimed.x / length, y: aimed.y / length }
-    }
-    const places: Array<{ at: Vector2; suffix: string; delay: number }> = []
-    if (options.line) {
+    const facing = def.box ? aimFacing(sim, src) ?? { x: 1, y: 0 } : undefined
+    const places: Array<{ at: Vector2; suffix: string; delay: number; turn?: Vector2 }> = []
+    if (options.spread) {
+      options.spread.forEach((turn, index) => places.push({ at: { ...origin }, suffix: `:${index}`, delay: 0, turn }))
+    } else if (options.line) {
       const dir = aimDirection(sim, src)
       if (!dir) return
       const { length, count } = options.line
@@ -1209,10 +1166,9 @@ export const spawnEntity = (
         const aimed = def.stopsAtWalls ? sim.terrain.clamp(src.aim.point, def.radius ?? 0) : src.aim.point
         const dx = aimed.x - place.at.x
         const dy = aimed.y - place.at.y
-        const distance = Math.sqrt(dx * dx + dy * dy)
         // Travel time follows the distance. The velocity is fitted to the whole ticks so the
         // entity ends exactly on the aimed point instead of overshooting by part of a tick.
-        lifetimeTicks = Math.max(1, Math.round(distance / def.speed * GAME_TPS))
+        lifetimeTicks = Math.max(1, Math.round(distanceBetween(place.at, aimed) / def.speed * GAME_TPS))
         velocity = { x: dx * GAME_TPS / lifetimeTicks, y: dy * GAME_TPS / lifetimeTicks }
       } else {
         const aimed = def.speed === 0 ? { x: 0, y: 0 } : aimDirection(sim, src)
@@ -1221,7 +1177,8 @@ export const spawnEntity = (
         const dir = aimed ?? (def.homing ? { x: 0, y: 0 } : undefined)
         if (!dir) return
         lifetimeTicks = options.lifetime ? Math.max(1, Math.round(options.lifetime(sim, src))) : def.lifetimeTicks
-        velocity = { x: dir.x * def.speed, y: dir.y * def.speed }
+        const heading = place.turn ? turned(dir, place.turn) : dir
+        velocity = { x: heading.x * def.speed, y: heading.y * def.speed }
         if (def.stopsAtWalls && lifetimeTicks !== undefined) {
           lifetimeTicks = Math.min(lifetimeTicks, ticksBeforeWall(sim.terrain, place.at, velocity, def.radius ?? 0))
         }
@@ -1236,12 +1193,17 @@ export const spawnEntity = (
         startTick: src.tick + place.delay,
         ...(lifetimeTicks !== undefined ? { lifetimeTicks } : {}),
         hitIds: [],
-        ...(facing ? { facing: { ...facing } } : {}),
+        ...(facing ? { facing: place.turn ? turned(facing, place.turn) : { ...facing } } : {}),
         ...(def.homing && targetId !== undefined ? { targetId } : {}),
       })
     }
   }
   return noted(spawn, { kind: 'spawn', def })
+}
+
+// A direction turned by a turn (a cosine and a sine): only multiplications and additions, so every peer gets the same answer.
+function turned(dir: Vector2, turn: Vector2): Vector2 {
+  return { x: dir.x * turn.x - dir.y * turn.y, y: dir.x * turn.y + dir.y * turn.x }
 }
 
 // How many whole ticks a body of this radius can fly from `from` at `velocity` (per second) before
@@ -1264,6 +1226,16 @@ function resolveAmount(amount: Amount, sim: SimReader, src: EffectSource): numbe
   return typeof amount === 'number' ? amount : amount(sim, src)
 }
 
+// An amount that is a share of something, held between 0 and 1.
+function resolveFraction(amount: Amount, sim: SimReader, src: EffectSource): number {
+  return clamp(resolveAmount(amount, sim, src), 0, 1)
+}
+
+// An amount that is a count of whole points, never below 0.
+function resolveCount(amount: Amount, sim: SimReader, src: EffectSource): number {
+  return Math.max(0, Math.round(resolveAmount(amount, sim, src)))
+}
+
 function aimDirection(sim: SimReader, src: EffectSource): Vector2 | undefined {
   const aim = src.aim
   if (aim?.mode === 'direction') return { ...aim.dir }
@@ -1272,9 +1244,11 @@ function aimDirection(sim: SimReader, src: EffectSource): Vector2 | undefined {
     : aim?.mode === 'unit'
       ? sim.posAt(aim.unitId, src.tick)
       : undefined
-  if (!toward) return undefined
-  const dx = toward.x - src.at.x
-  const dy = toward.y - src.at.y
-  const length = Math.sqrt(dx * dx + dy * dy)
-  return length === 0 ? undefined : { x: dx / length, y: dy / length }
+  return toward && directionTo(src.at, toward)
+}
+
+// The aimed direction as a unit vector, or nothing for no direction.
+function aimFacing(sim: SimReader, src: EffectSource): Vector2 | undefined {
+  const dir = aimDirection(sim, src)
+  return dir && normalize(dir)
 }
