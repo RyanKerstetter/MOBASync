@@ -1,8 +1,9 @@
 import type { RenderedCharacter } from '../game-state.ts'
 
 // The numbers that rise over a champion: an orange `-N` for each hit it takes and a green `+N` for health it gets back (the shop's healing area,
-// an ability that heals). What is a hit and what is a heal is told from how a champion's health looked the last time the page looked, not from
-// anything the game says, so it is the same on every peer, and it shows what the champion's own health did.
+// an ability that heals). What is a hit and what is a heal is told from how a champion's health looked the last time the page looked, and so it is the same on every
+// peer, and it shows what the champion's own health did. The one thing it is told besides is how much health a champion has got back in all (`healed`), so that a heal
+// that lands with a hit is not lost in it.
 
 export const FLOATING_DAMAGE_COLOR = '#ffd27a'
 export const FLOATING_HEAL_COLOR = '#6ef2a0'
@@ -12,14 +13,16 @@ export const FLOATING_NUMBER_MS = 900
 export const FLOATING_NUMBER_RISE = 1 / 45
 
 // What a champion's health looked like: its health with its shield (what a hit takes from), its health alone and its most, and the count of
-// hits it has taken (`hpSeq`, which only damage, and a death or a respawn, add to; a heal does not).
-export type HealthLook = { total: number; hp: number; maxHp: number; hpSeq: number }
+// hits it has taken (`hpSeq`, which only damage, and a death or a respawn, add to; a heal does not). `healed` is all the health it has got back so far, once it has got any:
+// it is what tells a heal from a hit when the two come together, and the health only shows what is left of both.
+export type HealthLook = { total: number; hp: number; maxHp: number; hpSeq: number; healed?: number }
 
 export type NumberChange = { kind: 'damage' | 'heal'; amount: number }
 
 export function healthLook(character: Pick<RenderedCharacter, 'health' | 'totalShield'>): HealthLook {
   const hp = character.health?.hp ?? 0
-  return { total: hp + character.totalShield, hp, maxHp: character.health?.maxHp ?? 0, hpSeq: character.health?.hpSeq ?? 0 }
+  const healed = character.health?.healed
+  return { total: hp + character.totalShield, hp, maxHp: character.health?.maxHp ?? 0, hpSeq: character.health?.hpSeq ?? 0, ...(healed !== undefined ? { healed } : {}) }
 }
 
 // What happened to a champion between two looks, if there is a number for it:
@@ -37,6 +40,21 @@ export function floatingChange(previous: HealthLook | undefined, now: HealthLook
     return { kind: 'heal', amount: now.hp - previous.hp }
   }
   return undefined
+}
+
+// Every number there is for a champion between two looks: what `floatingChange` says, and when a hit and a heal came in the same moment (a link that breaks as the hit lands,
+// and gives back health with it), both of them. The health only shows what is left of the two, so the hit is read as that and what the heal gave back, and the heal as what it gave back.
+// Anything else is the one number `floatingChange` says, or none.
+export function floatingChanges(previous: HealthLook | undefined, now: HealthLook): NumberChange[] {
+  if (previous && now.hpSeq > previous.hpSeq) {
+    const healed = Math.max(0, (now.healed ?? 0) - (previous.healed ?? 0))
+    if (healed > 0) {
+      const lost = previous.total - now.total + healed
+      return [...(lost > 0 ? [{ kind: 'damage' as const, amount: lost }] : []), { kind: 'heal' as const, amount: healed }]
+    }
+  }
+  const change = floatingChange(previous, now)
+  return change ? [change] : []
 }
 
 // How long a champion's heals are gathered into one number. A healing area heals many times a second, and a number for each would be a pile of

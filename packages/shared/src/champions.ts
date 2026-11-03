@@ -12,6 +12,7 @@ import {
   FLURRY_SLOW_TICKS,
   FEAR_RADIUS,
   FIRST_STRIKE_COOLDOWN_TICKS,
+  LINK_BREAK_EFFECTS,
   LINK_KEY,
   LINK_SHARE,
   MONK_AUTO_REFUND_TICKS,
@@ -156,7 +157,9 @@ export interface ChampionDef {
   damageReduction?: number
   // A unit with a marker of this `key` that this champion put on it (a link) hands the champion `share` of every hit it takes, and takes that much less of it (0.4 is 40%): the champion
   // takes its share as it would any hit, from its own resistance and shields on, and it is credited to whoever struck the unit. Nothing passes while the champion is dead.
-  damageLink?: { key: string; share: number }
+  // A share that would kill the champion is not taken: the link breaks instead, its markers come off the unit, and the whole of the hit is the unit's. `onBreak` is run for the
+  // champion as that happens, before the markers are taken off so that it can still find who was linked (what the link gives back on ending, say).
+  damageLink?: { key: string; share: number; onBreak?: readonly Effect[] }
 }
 
 type StatusBonus = { kind: string; stat?: string; amount: number }
@@ -278,7 +281,7 @@ export class Champion {
   readonly leaveInvisibilityRadius: number | undefined
   // The share of every hit it takes less of, from 0 for none (see `ChampionDef`).
   readonly damageReduction: number
-  readonly damageLink: { key: string; share: number } | undefined
+  readonly damageLink: { key: string; share: number; onBreak?: readonly Effect[] } | undefined
 
   constructor(def: ChampionDef) {
     for (const abilityId of def.abilities) {
@@ -485,7 +488,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A ranged hexer that stacks curses on its prey, then cashes them in.',
     passive: `Auto attacks apply a curse stack to the target, up to ${CURSE_MAX_STACKS}. Each stack lasts ${CURSE_DURATION_TICKS / GAME_TPS} seconds.`,
     base: { maxHp: 800, attackDamage: 40, attackSpeed: 1, resistance: 0, haste: 0, arcane: 30 },
-    growth: { maxHp: 80, attackDamage: 6, attackSpeed: 0.03, resistance: 3, haste: 8, arcane: 18 },
+    growth: { maxHp: 65, attackDamage: 6, attackSpeed: 0.03, resistance: 3, haste: 8, arcane: 18 },
     moveSpeed: 140,
     radius: 20,
     attackRange: 190,
@@ -518,7 +521,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A melee duelist that builds sword stacks with every blow and spends them on bursts, roots and stuns.',
     passive: `Auto attacks give you a sword stack, up to ${SWORD_MAX_STACKS}, lasting ${SWORD_DURATION_TICKS / GAME_TPS} seconds. Each stack adds ${SWORD_DAMAGE_PER_STACK} damage to your autos and to Slash.`,
     base: { maxHp: 1000, attackDamage: 80, attackSpeed: .9, resistance: 0, haste: 0, arcane: 20 },
-    growth: { maxHp: 50, attackDamage: 3, attackSpeed: 0.03, resistance: 3, haste: 2, arcane: 4 },
+    growth: { maxHp: 75, attackDamage: 16, attackSpeed: 0.01, resistance: 8, haste: 6, arcane: 7 },
     moveSpeed: 145,
     radius: 22,
     attackRange: 90,
@@ -628,7 +631,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A hulking bruiser that toughens with every blow, leaps onto its prey and flies into a rage.',
     passive: `Auto attacks give a stack of resistance, up to ${PLATING_MAX_STACKS}. Stacks last ${PLATING_TICKS / GAME_TPS} seconds and every auto renews them.`,
     base: { maxHp: 1100, attackDamage: 70, attackSpeed: .9, resistance: 0, haste: 0, arcane: 10 },
-    growth: { maxHp: 90, attackDamage: 12, attackSpeed: 0.02, resistance: 8, haste: 6, arcane: 3 },
+    growth: { maxHp: 90, attackDamage: 10, attackSpeed: 0.02, resistance: 8, haste: 6, arcane: 3 },
     moveSpeed: 145,
     radius: 24,
     attackRange: 100,
@@ -650,7 +653,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A melee skirmisher that hooks enemies in, whirls its chains around it and dashes through fights.',
     passive: `The first auto on an enemy, or first hit on it with the edge of Whirl, deals bonus damage and heals you. Each enemy has its own ${FIRST_STRIKE_COOLDOWN_TICKS / GAME_TPS} second cooldown.`,
     base: { maxHp: 900, attackDamage: 70, attackSpeed: 1, resistance: 0, haste: 0, arcane: 10 },
-    growth: { maxHp: 65, attackDamage: 16, attackSpeed: 0.02, resistance: 4, haste: 8, arcane: 3 },
+    growth: { maxHp: 65, attackDamage: 16, attackSpeed: 0.02, resistance: 5, haste: 8, arcane: 3 },
     moveSpeed: 150,
     radius: 21,
     attackRange: 110,
@@ -684,7 +687,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A ranged healer that mends allies, roots and shoves back enemies, and feeds on the foes it has marked.',
     passive: `Heal Pulse and Vine Bolt mend the enemies they hit for ${SAGE_MARK_TICKS / GAME_TPS} seconds. An auto attack from you or an ally on a mended enemy uses up the mend to heal whoever hit it and give them ${SAGE_HASTE * 100}% move speed.`,
     base: { maxHp: 750, attackDamage: 50, attackSpeed: .9, resistance: 0, haste: 0, arcane: 30 },
-    growth: { maxHp: 55, attackDamage: 7, attackSpeed: 0.02, resistance: 3, haste: 8, arcane: 16 },
+    growth: { maxHp: 55, attackDamage: 7, attackSpeed: 0.02, resistance: 3, haste: 6, arcane: 16 },
     moveSpeed: 145,
     radius: 20,
     attackRange: 230,
@@ -700,15 +703,15 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A melee guardian that links to a teammate to share their damage, and speeds up, shields and heals the pair.',
     passive: `Takes ${MONK_DAMAGE_REDUCTION * 100}% less damage. Auto attacks take ${MONK_AUTO_REFUND_TICKS / GAME_TPS} second off the cooldown of all your abilities.`,
     base: { maxHp: 1000, attackDamage: 60, attackSpeed: .9, resistance: 0, haste: 0, arcane: 10 },
-    growth: { maxHp: 75, attackDamage: 4, attackSpeed: 0.01, resistance: 5, haste: 7, arcane: 12 },
-    moveSpeed: 145,
+    growth: { maxHp: 75, attackDamage: 4, attackSpeed: 0.01, resistance: 5, haste: 9, arcane: 12 },
+    moveSpeed: 160,
     radius: 22,
     attackRange: 95,
     attackWindup: 0.2,
-    // Q links to a teammate (and, with the link up, heals them or cuts it), W quickens the next autos, E shields.
+    // Q links to a teammate, or heals himself (and, with the link up, heals the teammate and ends the link), W quickens the next autos, E shields.
     abilities: ['link', 'flurry', 'guard'],
     damageReduction: MONK_DAMAGE_REDUCTION,
-    damageLink: { key: LINK_KEY, share: LINK_SHARE },
+    damageLink: { key: LINK_KEY, share: LINK_SHARE, onBreak: LINK_BREAK_EFFECTS },
     // Every ability he can cast has its cooldown hurried along by his autos, Link Heal (the recast on Q) too.
     onAttackHit: [
       damage(attackDamage()),

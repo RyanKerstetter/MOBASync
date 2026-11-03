@@ -33,7 +33,9 @@ import { flattenLayers, getProperty, mapWorldScale, type TiledMap, type TiledObj
 //   A monster is in the game from the start, at its point, which is its home: where it goes back to after a fight,
 //   and comes back to when it respawns. They are in every mode, and a map with none is a map with none. A point for a
 //   monster the game does not have (yet) is left out, and said so in the layout's `warnings`, so a map can keep
-//   places for monsters still to come.
+//   places for monsters still to come. A point can also have a `team-name`, the slot of spawn points whose side of the map it is on,
+//   as a turret has: the monster is in a game only when a team starts at that slot (a map for two teams played by one has the monsters
+//   of the first side only). A point with none is in every game.
 // - `turret` points, each with a `team-name` (the slot of spawn points whose team it belongs to: the team that starts there has the
 //   turret, and every other team is its enemy) and a `turret-tier` (which of the game's tiers of turret it is: see turrets.ts, where
 //   each tier's health, damage, resistance, range and the rest are). A turret stands where its point is for the whole game, is in every
@@ -69,8 +71,9 @@ const NUMBER_PROPERTY = 'spawn-number'
 
 export type MapRect = { x: number; y: number; width: number; height: number }
 
-// A monster the map has: which one, and where it starts, in whole world units.
-export type MapMonster = { monster: string; at: Vector2 }
+// A monster the map has: which one, and where it starts, in whole world units. `slot` is the slot of spawn points whose team it is for (from 1), if the point says: it is in a
+// game only when a team starts at that slot. A monster with no slot is in every game.
+export type MapMonster = { monster: string; at: Vector2; slot?: number }
 
 // A shop the map has: the slot of spawn points whose team shops there (from 1) and the rectangle, in whole world units.
 export type MapShop = { slot: number; x: number; y: number; width: number; height: number }
@@ -263,10 +266,13 @@ export function readMapLayout(map: TiledMap): MapLayout {
     const label = object.name || `monster object ${object.id}`
     const kind = getProperty(object.properties, MONSTER_PROPERTY) ?? getProperty(object.properties, MONSTER_PROPERTY_MISSPELT)
     const body = typeof kind === 'string' ? monsters.get(kind) : undefined
+    const slot = getProperty(object.properties, SLOT_PROPERTY)
     if (!object.point) {
       problems.push(`${label} is not a point (make it with Tiled's Insert Point tool).`)
     } else if (typeof kind !== 'string' || !kind.trim()) {
       problems.push(`${label} needs a ${MONSTER_PROPERTY} property that names a monster (${known}).`)
+    } else if (slot !== undefined && !isWhole(slot, 1, GAME_MAX_PLAYERS)) {
+      problems.push(`${label} needs a ${SLOT_PROPERTY} from 1 to ${GAME_MAX_PLAYERS}: the slot of spawn points whose side of the map it is on (or none, for a monster in every game).`)
     } else if (!body) {
       warnings.push(`${label} is for a monster called "${kind}", which the game does not have (only ${known}), so it is left out.`)
     } else {
@@ -276,7 +282,7 @@ export function readMapLayout(map: TiledMap): MapLayout {
       } else if (!roomFor(terrain, at, body.champion.radius)) {
         problems.push(`${label} is too close to a wall or the arena's edge: a ${body.name} would start inside it.`)
       } else {
-        camps.push({ monster: body.id, at })
+        camps.push({ monster: body.id, at, ...(slot === undefined ? {} : { slot }) })
       }
     }
   }

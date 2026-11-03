@@ -18,6 +18,7 @@ import type { MapView } from './map-view.ts'
 import { ObjectiveLayer } from './objective-layer.ts'
 import { ShopAreaLayer } from './shop-area.ts'
 import { TurretRangeLayer } from './turret-range.ts'
+import { TurretShadowLayer } from './turret-shadow.ts'
 import type { ModeView } from '../ui/mode-hud.ts'
 import type { Rect, ShopZone, VisionMask } from '../../../../packages/shared/src/index.ts'
 
@@ -71,8 +72,9 @@ export type WorldRendererOptions = {
 //   map            the ground (`MapView`), except what stands up out of it (below)
 //   shop areas     the green tint over each shop, which is a healing area (`ShopAreaLayer`)
 //   objectives     the hill, and the flags' bases and flags on the ground (`ObjectiveLayer`)
+//   tower shadows  the soft dark patch on the ground under each tower and core, in sight (`TurretShadowLayer`)
 //   ground         telegraphs and fields, under the champions so they never hide them
-//   links          the beam between a champion and the teammate it has linked to itself (`LinkLayer`)
+//   links          the beam between a champion and the teammate it has linked to itself, while either is in sight (`LinkLayer`)
 //   turret ranges  the faint circle round each turret, out to the end of its reach (`TurretRangeLayer`)
 //   indicators     the attack range ring, the aimed ability's indicator, attack reticles
 //   depth          the champions' bodies and what stands up out of the map (the faces of walls: `MapView.sorted`),
@@ -100,6 +102,7 @@ export class WorldRenderer {
   private readonly shopAreas = new ShopAreaLayer()
   private readonly bushAreas = new BushAreaLayer()
   private readonly turretRanges = new TurretRangeLayer()
+  private readonly turretShadows = new TurretShadowLayer()
   private readonly indicators = new IndicatorLayer()
   private readonly fog = new FogLayer()
   private readonly floatingNumbers = new FloatingNumberLayer()
@@ -113,6 +116,7 @@ export class WorldRenderer {
       this.map.view,
       this.shopAreas.view,
       this.objectives.ground,
+      this.turretShadows.view,
       this.entities.ground,
       this.links.view,
       this.turretRanges.view,
@@ -163,7 +167,8 @@ export class WorldRenderer {
     this.bushAreas.update(frame.bushes ?? NO_BUSHES)
     this.characters.update(characters, localCharacterId, frame.localAttackCooldown, now, frame.unseen)
     this.entities.update(entities)
-    this.links.update(characters, now)
+    this.links.update(characters, now, frame.unseen)
+    this.turretShadows.update(characters)
     this.turretRanges.update(characters, this.effects.turretRanges)
     this.objectives.update(frame.mode, characters, now)
     this.fog.update(frame.fog)

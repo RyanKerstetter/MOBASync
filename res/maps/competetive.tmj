@@ -1058,7 +1058,7 @@
                     0, 0, 0, 0, 0, 724, 1001, 602, 603, 0, 0, 0, 0, 0, 548, 550,
                     0, 0, 0, 0, 0, 750, 1001, 602, 603, 0, 0, 0, 0, 573, 574, 576,
                     0, 0, 0, 0, 0, 724, 1001, 602, 775, 870, 870, 870, 870, 776, 1001, 602,
-                    0, 0, 0, 0, 0, 750, 1001, 575, 575, 896, 896, 896, 896, 896, 803, 602,
+                    0, 0, 0, 0, 0, 750, 1001, 800, 575, 896, 896, 896, 896, 896, 803, 602,
                     0, 0, 0, 0, 0, 1026, 1027, 850, 850, 850, 850, 850, 850, 850, 850, 997,
                     0, 0, 0, 0, 0, 1021, 1022, 876, 876, 876, 876, 876, 876, 876, 876, 1023,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -1308,8 +1308,8 @@
                  "rotation":0,
                  "type":"wall",
                  "visible":true,
-                 "width":136,
-                 "x":248,
+                 "width":144,
+                 "x":240,
                  "y":-552
                 }, 
                 {
@@ -1368,7 +1368,7 @@
                  "rotation":0,
                  "type":"wall",
                  "visible":true,
-                 "width":136,
+                 "width":144,
                  "x":992,
                  "y":-152
                 }, 
@@ -1380,7 +1380,7 @@
                  "rotation":0,
                  "type":"wall",
                  "visible":true,
-                 "width":136,
+                 "width":144,
                  "x":992,
                  "y":-552
                 }, 
@@ -1549,8 +1549,8 @@
                  "rotation":0,
                  "type":"wall",
                  "visible":true,
-                 "width":136,
-                 "x":376,
+                 "width":128,
+                 "x":384,
                  "y":-56
                 }, 
                 {
@@ -1621,7 +1621,7 @@
                  "rotation":0,
                  "type":"wall",
                  "visible":true,
-                 "width":136,
+                 "width":144,
                  "x":240,
                  "y":-160
                 }, 
@@ -1633,7 +1633,7 @@
                  "rotation":0,
                  "type":"wall",
                  "visible":true,
-                 "width":48,
+                 "width":40,
                  "x":200,
                  "y":-552
                 },
@@ -1646,8 +1646,8 @@
                  "rotation":0,
                  "type":"wall",
                  "visible":true,
-                 "width":48,
-                 "x":1128,
+                 "width":40,
+                 "x":1136,
                  "y":-552
                 }, 
                 {
@@ -1658,8 +1658,8 @@
                  "rotation":0,
                  "type":"wall",
                  "visible":true,
-                 "width":48,
-                 "x":1128,
+                 "width":40,
+                 "x":1136,
                  "y":-120
                 }],
          "opacity":1,
@@ -1694,7 +1694,7 @@
                  "type":"spawn",
                  "visible":true,
                  "width":0,
-                 "x":80,
+                 "x":16,
                  "y":-304
                 }, 
                 {
@@ -1718,7 +1718,7 @@
                  "type":"spawn",
                  "visible":true,
                  "width":0,
-                 "x":80,
+                 "x":16,
                  "y":-272
                 }, 
                 {
@@ -1742,7 +1742,7 @@
                  "type":"spawn",
                  "visible":true,
                  "width":0,
-                 "x":96,
+                 "x":32,
                  "y":-336
                 }, 
                 {
@@ -1766,7 +1766,7 @@
                  "type":"spawn",
                  "visible":true,
                  "width":0,
-                 "x":96,
+                 "x":32,
                  "y":-240
                 }, 
                 {
@@ -1790,7 +1790,7 @@
                  "type":"spawn",
                  "visible":true,
                  "width":0,
-                 "x":1296,
+                 "x":1360,
                  "y":-304
                 }, 
                 {
@@ -1814,7 +1814,7 @@
                  "type":"spawn",
                  "visible":true,
                  "width":0,
-                 "x":1296,
+                 "x":1360,
                  "y":-272
                 }, 
                 {
@@ -1838,7 +1838,7 @@
                  "type":"spawn",
                  "visible":true,
                  "width":0,
-                 "x":1280,
+                 "x":1344,
                  "y":-336
                 }, 
                 {
@@ -1862,7 +1862,7 @@
                  "type":"spawn",
                  "visible":true,
                  "width":0,
-                 "x":1280,
+                 "x":1344,
                  "y":-240
                 }],
          "opacity":1,
@@ -1874,6 +1874,7 @@
         {
          "draworder":"topdown",
          "id":5,
+         "locked":true,
          "name":"Object Layer",
          "objects":[
                 {
@@ -1967,7 +1968,7 @@
                  "type":"turret",
                  "visible":true,
                  "width":0,
-                 "x":240,
+                 "x":256,
                  "y":-288
                 }, 
                 {
@@ -2058,7 +2059,7 @@
                  "type":"core",
                  "visible":true,
                  "width":0,
-                 "x":32,
+                 "x":112,
                  "y":-288
                 }, 
                 {
@@ -2077,7 +2078,7 @@
                  "type":"core",
                  "visible":true,
                  "width":0,
-                 "x":1344,
+                 "x":1264,
                  "y":-288
                 }],
          "opacity":1,
@@ -2102,6 +2103,11 @@
                          "name":"monster-type",
                          "type":"string",
                          "value":"slime"
+                        }, 
+                        {
+                         "name":"team-name",
+                         "type":"int",
+                         "value":1
                         }],
                  "rotation":0,
                  "type":"monster-spawn",
@@ -2121,6 +2127,11 @@
                          "name":"monster-type",
                          "type":"string",
                          "value":"slime"
+                        }, 
+                        {
+                         "name":"team-name",
+                         "type":"int",
+                         "value":1
                         }],
                  "rotation":0,
                  "type":"monster-spawn",
@@ -2140,6 +2151,11 @@
                          "name":"monster-type",
                          "type":"string",
                          "value":"golem"
+                        }, 
+                        {
+                         "name":"team-name",
+                         "type":"int",
+                         "value":1
                         }],
                  "rotation":0,
                  "type":"monster-spawn",
@@ -2159,6 +2175,11 @@
                          "name":"monster-type",
                          "type":"string",
                          "value":"slime"
+                        }, 
+                        {
+                         "name":"team-name",
+                         "type":"int",
+                         "value":2
                         }],
                  "rotation":0,
                  "type":"monster-spawn",
@@ -2178,6 +2199,11 @@
                          "name":"monster-type",
                          "type":"string",
                          "value":"slime"
+                        }, 
+                        {
+                         "name":"team-name",
+                         "type":"int",
+                         "value":2
                         }],
                  "rotation":0,
                  "type":"monster-spawn",
@@ -2197,6 +2223,11 @@
                          "name":"monster-type",
                          "type":"string",
                          "value":"golem"
+                        }, 
+                        {
+                         "name":"team-name",
+                         "type":"int",
+                         "value":2
                         }],
                  "rotation":0,
                  "type":"monster-spawn",
@@ -2216,6 +2247,11 @@
                          "name":"monster-type",
                          "type":"string",
                          "value":"slime"
+                        }, 
+                        {
+                         "name":"team-name",
+                         "type":"int",
+                         "value":1
                         }],
                  "rotation":0,
                  "type":"monster-spawn",
@@ -2235,6 +2271,11 @@
                          "name":"monster-type",
                          "type":"string",
                          "value":"slime"
+                        }, 
+                        {
+                         "name":"team-name",
+                         "type":"int",
+                         "value":1
                         }],
                  "rotation":0,
                  "type":"monster-spawn",
@@ -2254,6 +2295,11 @@
                          "name":"monster-type",
                          "type":"string",
                          "value":"slime"
+                        }, 
+                        {
+                         "name":"team-name",
+                         "type":"int",
+                         "value":2
                         }],
                  "rotation":0,
                  "type":"monster-spawn",
@@ -2273,6 +2319,11 @@
                          "name":"monster-type",
                          "type":"string",
                          "value":"slime"
+                        }, 
+                        {
+                         "name":"team-name",
+                         "type":"int",
+                         "value":2
                         }],
                  "rotation":0,
                  "type":"monster-spawn",

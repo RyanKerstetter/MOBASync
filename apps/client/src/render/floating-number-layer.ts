@@ -3,7 +3,7 @@ import type { RenderedCharacter } from '../game-state.ts'
 import {
   FLOATING_DAMAGE_COLOR,
   FLOATING_HEAL_COLOR,
-  floatingChange,
+  floatingChanges,
   floatingNumberPose,
   floatingNumberText,
   HealMerger,
@@ -34,9 +34,10 @@ export class FloatingNumberLayer {
       activeIds.add(character.id)
       byId.set(character.id, character)
       const look = healthLook(character)
-      const change = floatingChange(this.shown.get(character.id), look)
-      if (change?.kind === 'damage') this.add(character, change, now)
-      else if (change?.kind === 'heal') this.heals.add(character.id, change.amount)
+      for (const change of floatingChanges(this.shown.get(character.id), look)) {
+        if (change.kind === 'damage') this.add(character, change, now)
+        else this.heals.add(character.id, change.amount)
+      }
       this.shown.set(character.id, look)
     }
     for (const id of this.shown.keys()) {

@@ -13,7 +13,7 @@ The client's game code is split by what it does:
 - `game.ts` runs one game: the connection to the server, the player's input, and each frame. It works out
   what to show from `ClientGameState` and hands it on; it draws nothing itself.
 - `render/` draws the world with PixiJS and knows nothing of the network or the simulation.
-  `WorldRenderer` stacks its layers in a fixed order (the map, the shops' healing areas, the hill and flags, ground effects, the turrets' ranges, indicators,
+  `WorldRenderer` stacks its layers in a fixed order (the map, the shops' healing areas, the hill and flags, the shadows under the towers, ground effects, the turrets' ranges, indicators,
   the champions and the walls together, carried flags, shots, the darkness of what the team cannot see, the champions' names
   and bars, the damage and healing numbers and what a kill paid, debug), and each frame it is given a plain
   `WorldFrame` to draw. The ground is a
@@ -53,8 +53,11 @@ updates while connected, and inactive players are removed after a short timeout.
 You can also run only one side with `npm run dev:client` or
 `npm run dev:server`.
 
-Create a lobby to get a six-character code, then share it with other players.
-Usernames default to `Player`; if a name is already in use in a lobby, a number
+Create a lobby to get a six-character code, then share it with other players. The address in the browser is the link: in a lobby
+it reads `http://<host>/?lobby=ABC123` (`searchWithLobby` in `apps/client/src/lobby-link.ts`), so copying it from the bar and sending it
+is all it takes, and whoever opens it **joins that lobby** (as the name in the username box, which they can change in the lobby; a lobby that is gone, full or in a game says so on
+the entry page, with its code left in the join box). The address goes back to what it was when the player leaves the lobby, so it never names one they are not in. Whatever else is in the
+address (`?vision=`, the lag settings) stays and goes with it, so a link copied from a page opened with them carries them too. The **Copy** button next to the code copies the code alone. Usernames default to `Player`; if a name is already in use in a lobby, a number
 is appended. Lobbies hold up to eight players (`GAME_MAX_PLAYERS`, which is also the default);
 set the `LOBBY_MAX_PLAYERS` environment variable on the server to a whole number from 1 to 8 for
 a smaller cap. Each player picks a team in the lobby from a row of coloured buttons (`GAME_TEAMS`: Red,
@@ -302,7 +305,10 @@ A map that cannot be played on is listed with what is wrong, but cannot be picke
   monster's size clear of the walls and the arena's edge, and one with no `monster-type` is refused. A point naming
   a monster the game does not have yet is left out, and the server logs a warning saying which, when a game starts
   on the map, so a map can hold places for monsters that are still to come. A map with none has none, and every
-  mode has the map's monsters.
+  mode has the map's monsters. A point can have a whole-number `team-name` (1 to 8) as well: the slot of spawn points whose side of the
+  map it is on, as for a turret. The monster is in a game **only when a team starts at that slot** (the biggest team at slot 1, the next at
+  slot 2, see `assignSpawns`), so a map for two teams played by one has the monsters of the first side alone. A point with no `team-name` is in
+  every game, and one with a `team-name` that is not a slot is refused.
 - **Turrets:** point objects of class `turret`, each with a whole-number `team-name` (1 to 8) and a whole-number
   `turret-tier` (see "Turrets"). Like a flag, the `team-name` is the slot of spawn points the turret belongs to: the
   biggest team in a game is at slot 1, so the turrets of slot 1 are its, and every other team is their enemy. A
@@ -829,6 +835,11 @@ sheets cannot be loaded it is drawn as shapes instead: a dark ring edged in its 
 stood. Its body is then gone for good, `CORPSE_SECONDS` (2) after the tick it fell on (`layoutCorpse`, the same rule a monster's body follows),
 so a turret that is already down when you join is not shown falling again. One drawn as shapes has no collapse to play, and is gone as it falls.
 
+Under it is a **shadow** on the ground (`TurretShadowLayer`, `turret-shadow.ts`): a soft dark patch, a few see-through black ellipses one inside the other so it is darkest in the middle and fades at
+the edge, wider than the tower stands and flat, lying where its foot is. It is made from the tower's `radius` (`SHADOW_WIDTH`, `SHADOW_HEIGHT`, `SHADOW_DROP`: the numbers to change to make it bigger or darker), so a bigger
+tier or the core's keep has a bigger one, and it is on the ground under the champions, the telegraphs, the link beam and the rings. It is drawn for every tower the team can see (the core's too), and not for one that is
+destroyed, or one in the dark.
+
 Round it is a **transparent circle** out to the end of its range (`TurretRangeLayer`, `turret-range.ts`): only a thin line
 in its team's colour, very faint (`TURRET_RING_EDGE_ALPHA`), with nothing filled in inside it, under the champions, so whoever stands in
 it and whatever is under it show through. It is drawn for every turret the team can see, and not for one that is
@@ -841,7 +852,7 @@ with Space, even with no champion of the team near, and a turret that is destroy
 **To add a tier:** add an entry to `TURRET_TIERS`, and put `turret` points with that `turret-tier` on a map. `tests/turrets.test.ts`
 covers the tiers, the targeting on its own (`chooseTurretTarget`), turrets in a simulator (shooting, range, destruction, rewards,
 being fixed, rolling back, snapshots), reading them from a map (including the competitive map's own), and the server starting them;
-`tests/turret-range.test.ts` covers how the page shows them. `defineTurret` in `tests/fixtures.ts` registers a tier for a test.
+`tests/turret-range.test.ts` covers how the page shows them, and `tests/turret-shadow.test.ts` their shadows. `defineTurret` in `tests/fixtures.ts` registers a tier for a test.
 
 **Not here yet**, where a game would want it: targeting other things first (minions, or whoever hit an allied champion), a lobby
 switch for whether a game has turrets, and art of its own for each tier (and a different one for each team).
@@ -1011,7 +1022,9 @@ from anywhere: a game with no shops has no area to heal in.
 - **The healing is shown** as a green `+N` that rises over the champion and fades, as a hit is an orange `-N` (`FloatingNumberLayer`, `render/floating-number.ts`).
   What is a heal is told from the champion's health: it went up while its most health and its count of hits (`hpSeq`) were as they were, so a level or an
   item that raises the most health, and a respawn, are not heals, and the number is what it got back, not what the shop gave (a champion that is nearly full gets
-  only what it was missing). The shop heals many times a second, so a champion's heals are gathered: the first is shown at once and the ones after it are
+  only what it was missing). A heal that lands in the same moment as a hit (a Monk's link that breaks as the hit lands, and gives the heal) would leave the health only showing what is
+  left of the two, so the game counts all the health a champion has got back (`health.healed`, added to by every heal, the shop's and lifesteal too), and `floatingChanges` reads the hit as what it took
+  before the heal gave back, and the heal as its own number. The shop heals many times a second, so a champion's heals are gathered: the first is shown at once and the ones after it are
   added up and shown together every `HEAL_MERGE_MS` (700 ms). Any heal is shown this way, an ability's as well as the shop's.
 - **The slots** are the grid on the right of the HUD, four across and two down (`HUD_ITEM_COLUMNS` by `HUD_ITEM_ROWS`, the one place that says so: the
   panel and the grid are sized from it): each shows the picture of the item in it, or the name of the kind, dim, when it is empty. The kinds fill it
@@ -1807,35 +1820,40 @@ top of his resistance and before his shields), and each auto he makes takes `MON
 himself. Cast on a teammate it **links** them: `LINK_SHARE` of every hit they take is Monk's to take instead (`ChampionDef.damageLink`), for as long as the link lasts, which is
 until it is cut, either of them dies, or the teammate gets **too far away**: the tick they are farther from him than `LINK_BREAK_RANGE` (body middle to body middle; more than a cast reaches, so a link
 made at the farthest is not broken as it is made) the link breaks, as he would cut it himself (the marker comes off, the entity ends, and Link starts its whole cooldown over). The entity sees to it, on its
-tick (`linkStretched`, `cutLink`), and it does not come back when they are close again. Cast on himself with no link up, it heals him (`LINK_HEAL`, with `LINK_HEAL_SCALING`) and links no one.
+tick (`linkStretched`, `cutLink`), and it does not come back when they are close again. It also breaks **when his share of a hit would kill him**: the share is not taken, the teammate takes the whole of the hit, and
+the link ends with **the same heal as Link Heal** (`LINK_BREAK_EFFECTS`: the heal, then the cut, so Link starts its whole cooldown over) given to the teammate after the hit. It is worked out from his health as it is,
+his resistance, his passive and his shields counted, so a share he lives through, with one health or with the help of a shield, is taken and the link stands. Cast on himself it heals him (`LINK_HEAL`, with `LINK_HEAL_SCALING`) and links no one.
 
 The link is a `LINK_KEY` marker of Monk's on the teammate, with no end, and a `link` entity on Monk (`visual: 'hidden'`: it is not drawn) that is only there to put the key on its recast, as the
-stick is for Stick. While it is out Q is **Link Heal** (`linkheal`, a cooldown of its own, `LINK_HEAL_COOLDOWN_TICKS`), and it is cast on a unit: on the linked teammate it heals them
-(the same heal) and **keeps the link**; on **himself** it **cuts** the link (the marker comes off, the entity ends, and Link starts its whole cooldown over), heals no one, and costs none of Link Heal's
-cooldown (it is given back, so a cut is never kept waiting on a heal); on anyone else it does nothing and is given back whole. **The teammate does not have to be pointed at**: Link Heal says
-`targetsLinked`, so the page casts it on the unit he has linked wherever the cursor is (on nothing, or on another teammate), and on himself only when the cursor is over him, or **Alt** is held
-(`ClientGameState.linkedUnit` finds the linked unit from the markers). Out of its reach he walks up to the teammate to heal them, as he does to cast anything at a unit. A heal does put Link Heal on its cooldown, which an auto in a fight
-hurries along, so for that time the link cannot be cut.
+stick is for Stick. While it is out Q is **Link Heal** (`linkheal`), the recast: it heals the linked teammate (the same heal, `LINK_HEAL` with `LINK_HEAL_SCALING`) and **ends the link** (the marker comes off, the entity
+ends, and Link starts its whole cooldown over: Link Heal's own cooldown is Link's, `LINK_COOLDOWN_TICKS`, which is how long it is before the key can be used again). So the key is for **one of three things**: with
+no link, Link on a teammate links them and on himself heals him, and with one up, the recast heals the teammate and uses the link up. Link Heal is for the linked teammate and no one else: aimed at anyone else, himself
+too, it does nothing and is given back whole, so it is not a way to heal himself. **The teammate does not have to be pointed at**: Link Heal says `targetsLinked`, so the page casts it on the unit he has linked
+wherever the cursor is (on nothing, on another teammate, or on himself), and **Alt** does not change that (`ClientGameState.linkedUnit` finds the linked unit from the markers). Out of its reach he walks up to the
+teammate to heal them, as he does to cast anything at a unit.
 
 The page draws the link as a **beam** on the ground between the two, from the edge of the teammate's body to the edge of Monk's, a pale line with gold dashes running along it from the teammate to him
 (the way the damage goes), under the champions (`render/link-layer.ts`, `layoutLinks` and `beamDashes`; `RenderedCharacter.linkedBy` says who holds a link). It is not a pip under the teammate: the
-mark is a marker like any other, but it is left out of the pips (`stack-pips.ts`). There is no beam while either is dead or out of the frame, or while their bodies touch.
+mark is a marker like any other, but it is left out of the pips (`stack-pips.ts`). It is drawn while either of the two is in sight, so a player who sees only one of them (an enemy, with the other in the dark or in a bush)
+sees the beam run out of the one they see towards the other, with the darkness over it where they cannot see (`layoutLinks` is handed the ones in sight and the `unseen`).
+There is no beam while neither is in sight, while either is dead, or while their bodies touch.
 
 W, Flurry, gives Monk, and the teammate he has linked, the next `FLURRY_AUTOS` autos: each is
 quicker (`FLURRY_ATTACK_SPEED` more attacks a second, until the last of them) and slows what it hits (`FLURRY_SLOW`). It is an **auto reset** (`resetAutoTimer`, as Lunge is): it has no windup,
 so it can be cast between autos, and Monk's next one is ready at once; the linked teammate's auto timer is not reset. E, Guard, shields Monk and his linked teammate alike
-(`GUARD_SHIELD`), or Monk alone, with a bigger shield (`GUARD_SHIELD_ALONE`), if he has no link. The heal and the shields grow with his **arcane** and not his health (`LINK_HEAL_SCALING`, `GUARD_SCALING`: 2 for each point, so about 8 more for each level, as his arcane grows by 4 a level), and the
+(`GUARD_SHIELD`) and gives them both move speed (`GUARD_HASTE`, for `GUARD_HASTE_TICKS`), or Monk alone, with a bigger shield (`GUARD_SHIELD_ALONE`) and more speed (`GUARD_HASTE_ALONE`), if he has no link. The heal and the shields grow with his **arcane** and not his health (`LINK_HEAL_SCALING`, `GUARD_SCALING`: 2 for each point, so about 8 more for each level, as his arcane grows by 4 a level), and the
 tooltips tell it. It is tested in `tests/monk.test.ts`.
 
 The engine got a few things for them. An ability can be **for allies**: `targetsAllies: true` on a unit-targeted ability makes its target a teammate or the caster itself (never a structure),
 and not an enemy; an invisible teammate can be aimed at. One out of reach is walked up to and cast on, as an enemy is (`driveAttacks`). On the page `getAllyNear` picks the target, so
 pointing at yourself casts on yourself, and pointing at an enemy or at nothing says `Aim <ability> at a teammate, or at yourself.` Holding **Alt** while pressing the key casts an ability for
-allies on the champion itself, at once, wherever the cursor is, with no aim (`ClientGameState.abilitySelfCasts` says which keys do: the ability on the key now, so Link's recast does too; `createCastOrder`'s
+allies on the champion itself, at once, wherever the cursor is, with no aim (`ClientGameState.abilitySelfCasts` says which keys do: the ability on the key now, except one that is for the linked unit, so Link Heal does not; `createCastOrder`'s
 `selfCast`). On any other ability Alt does nothing: it is cast as always. Alt is kept from opening the browser's menu bar while a game is played. `ChampionDef.damageReduction` is a share of every hit
 that a champion does not take (it is multiplied in with its resistance statuses and its resistance stat: `applyDamage`). `ChampionDef.damageLink` names a marker key and a share: a unit
 that carries a marker of that key from a champion that is alive hands that champion the share of each hit it takes (`Simulator.damageLinks`). The champion takes its share from its
-own resistance, reduction and shields, with none of the attacker's item effects, and it is credited to whoever struck, so a Monk killed by a teammate's share was killed by the
-attacker; shares that add to more than the whole are cut down in proportion. A champion that dies lets go of what it linked, its markers of that key coming off every unit. `SimReader.unitsMarkedBy(key, ownerId)` and the selector
+own resistance, reduction and shields, with none of the attacker's item effects; shares that add to more than the whole are cut down in proportion. **A share that would take the last of the champion's
+health is not taken**: the link breaks instead (`Simulator.shareKills`, which counts what `applyDamage` would: `wouldKill`), `damageLink.onBreak` is run for the champion first, while its markers are still on the unit
+to find who was linked (Monk's is `LINK_BREAK_EFFECTS`), then its markers of the key come off, and the unit takes the whole of the hit and every one after it (`Simulator.breakLink`). A champion can never die of a share. A champion that dies lets go of what it linked, its markers of that key coming off every unit. `SimReader.unitsMarkedBy(key, ownerId)` and the selector
 `markedUnits(key)` find the units a champion has marked (the link's teammate). `mark` takes `bearer: true` to give a marker that belongs to the unit that carries it, so it can spend it
 itself (`stacks(key, self())`), and a duration of `Infinity` for one that has no end. `endNamed(name)` ends every status of that name that anyone gave a unit at once. Flurry's charges are bearer
 markers, and spending them is part of every champion's autos (`Champion.attackEffects`), since the teammate can be any champion: an auto with a charge slows its target and spends the
@@ -2106,8 +2124,9 @@ is logged on a timer.
 ### HTTPS and a domain
 
 Plain `http://<ip>:5173` works for playing. Browsers disable a few features on
-non-HTTPS pages (the "Copy" button for the lobby code); the game works without
-them. For HTTPS, put a reverse proxy such as Caddy in front. With this
+non-HTTPS pages (the clipboard, so the "Copy" button of the lobby copies the code from a selection instead, and when
+a browser will not do even that, leaves it selected for Ctrl+C); the game works without
+it. For HTTPS, put a reverse proxy such as Caddy in front. With this
 `Caddyfile` it obtains a certificate automatically:
 
 ```

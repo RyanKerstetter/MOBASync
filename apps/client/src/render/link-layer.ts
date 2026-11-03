@@ -18,15 +18,19 @@ export const LINK_FLOW_SPEED = 45
 // A beam, from the teammate's body to the body of whoever holds the link.
 export type LinkBeam = { from: Vector2; to: Vector2 }
 
-// The beams to draw: one for each champion that has another linked to it, while both are alive and in the frame (so not one that is out of sight), and not touching (there
-// is no beam between two bodies that overlap).
-export function layoutLinks(characters: readonly RenderedCharacter[]): LinkBeam[] {
-  const byId = new Map(characters.map((character) => [character.id, character]))
+// The beams to draw: one for each champion that has another linked to it, while both are alive and at least one of them is in sight (`seen`; the other may be one the team
+// cannot see, which is in `unseen`: the link is shown from the one that is seen, towards the other, and the darkness over the ground is over it where the team cannot see), and not
+// touching (there is no beam between two bodies that overlap).
+export function layoutLinks(seen: readonly RenderedCharacter[], unseen: readonly RenderedCharacter[] = []): LinkBeam[] {
+  const inSight = new Set(seen.map((character) => character.id))
+  const everyone = [...seen, ...unseen]
+  const byId = new Map(everyone.map((character) => [character.id, character]))
   const beams: LinkBeam[] = []
-  for (const linked of characters) {
+  for (const linked of everyone) {
     if (linked.linkedBy === undefined || linked.dead) continue
     const holder = byId.get(linked.linkedBy)
     if (!holder || holder.dead) continue
+    if (!inSight.has(linked.id) && !inSight.has(holder.id)) continue
     const dx = holder.position.x - linked.position.x
     const dy = holder.position.y - linked.position.y
     const gap = Math.hypot(dx, dy)
@@ -64,8 +68,9 @@ export function beamDashes(beam: LinkBeam, now: number): Array<[Vector2, Vector2
 export class LinkLayer {
   readonly view = new Graphics()
 
-  update(characters: readonly RenderedCharacter[], now: number): void {
-    const beams = layoutLinks(characters)
+  // `characters` are the ones in sight and `unseen` the others (see `WorldFrame.unseen`).
+  update(characters: readonly RenderedCharacter[], now: number, unseen: readonly RenderedCharacter[] = []): void {
+    const beams = layoutLinks(characters, unseen)
     this.view.clear()
     if (beams.length === 0) return
     for (const beam of beams) this.view.moveTo(beam.from.x, beam.from.y).lineTo(beam.to.x, beam.to.y)

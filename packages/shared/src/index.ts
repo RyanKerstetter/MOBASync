@@ -102,6 +102,9 @@ export const GameHealthStatsSchema = z.object({
   hpSeq: TickSchema,
   finalizedTick: TickSchema,
   deathTick: TickSchema.optional(),
+  // All the health the character has got back so far (what a heal gave it, not what was healed: one that fills it up is only what it was missing). It is for the page, to show a
+  // heal that comes in the same moment as a hit as a number of its own, where the health alone would only show what is left of the two. Not there until there has been a heal.
+  healed: z.number().int().nonnegative().optional(),
 })
 
 export const CharacterOrderSchema = GameOrderSchema

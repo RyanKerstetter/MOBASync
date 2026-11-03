@@ -450,7 +450,7 @@ export class ClientGameState {
 
   // Aim is in arena coordinates. The ability is resolved from the slot now, so
   // the order names what was cast rather than which key was pressed. With `selfCast`, an ability for allies is cast on the champion itself, wherever the aim is (the
-  // Alt key): see `abilitySelfCasts`.
+  // Alt key), except one that is for the unit the champion has linked: see `abilitySelfCasts`.
   createCastOrder(slot: number, aim: Vector2, now = performance.now(), selfCast = false): CastAttempt {
     const ability = this.abilityInSlot(slot)
     if (!ability.ok) return ability
@@ -466,7 +466,7 @@ export class ClientGameState {
     const blocker = this.castBlocker(def, state, entityOut)
     if (blocker) return { ok: false, reason: blocker }
     const origin = state.getPosition()
-    const aimed = selfCast && def.targetsAllies
+    const aimed = selfCast && def.targetsAllies && !def.targetsLinked
       ? { ok: true as const, target: { mode: 'unit', unitId: localCharacterId } satisfies CastTarget }
       : this.castTarget(def, origin, aim, now, frame)
     if (!aimed.ok) return { ok: false, reason: aimed.reason }
@@ -477,12 +477,14 @@ export class ClientGameState {
   }
 
   // Whether the ability on a slot can be cast on the champion itself by a key (Alt): one for allies (`AbilityDef.targetsAllies`), as it is on the key now (so a recast counts).
-  // The others are cast as they always are, since there is no one to aim at but an enemy, or somewhere on the ground.
+  // The others are cast as they always are, since there is no one to aim at but an enemy, or somewhere on the ground; and so is one that is for the unit that is linked
+  // (`AbilityDef.targetsLinked`), which is never cast on the champion itself.
   abilitySelfCasts(slot: number, now = performance.now()): boolean {
     const ability = this.abilityInSlot(slot)
     if (!ability.ok) return false
     const frame = this.getSnapshotAtEstimatedTick(now)
-    return abilityOnKey(ability.def, this.entityOut(frame, ability.localCharacterId)).targetsAllies === true
+    const def = abilityOnKey(ability.def, this.entityOut(frame, ability.localCharacterId))
+    return def.targetsAllies === true && def.targetsLinked !== true
   }
 
   // Whether the ability in a slot has something to aim; a self-cast does not. A key that has
@@ -602,9 +604,9 @@ export class ClientGameState {
     }
     let unitId: number
     if (def.targetsLinked) {
-      // On whoever the champion has linked, wherever the cursor is, unless it is on the champion itself.
+      // On whoever the champion has linked, wherever the cursor is, even when it is on the champion itself.
       const self = this.localCharacterId
-      const linked = self === undefined ? undefined : this.getAllyNear(aim, now, characters)?.id === self ? self : this.linkedUnit(frame, self)
+      const linked = self === undefined ? undefined : this.linkedUnit(frame, self)
       if (linked === undefined) return { ok: false, reason: 'You have no one linked.' }
       unitId = linked
     } else {

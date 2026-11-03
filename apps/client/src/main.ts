@@ -1,6 +1,7 @@
 import './style.css'
 import { createChampionSelect } from './champion-select.ts'
 import { startGame } from './game.ts'
+import { lobbyCodeFromSearch, searchWithLobby, searchWithoutLobby } from './lobby-link.ts'
 import { abilityIconUrl } from './ui/ability-icon-urls.ts'
 import { element, requireElement } from './ui/dom.ts'
 import { lobbySummary } from './ui/results.ts'
@@ -508,9 +509,21 @@ async function managePlayer(action: 'leader' | 'players/kick', player: Player): 
   setLobbyMessage(action === 'leader' ? `${player.name} is now the leader.` : `${player.name} was kicked.`)
 }
 
+// The address of the page names the lobby the player is in (`?lobby=ABC123`), so it can be copied from the bar and sent to a friend, who joins by opening it.
+// With no code it names none. The rest of the address (the page's testing options) stays as it was.
+function showLobbyInAddress(code?: string): void {
+  const search = code === undefined ? searchWithoutLobby(window.location.search) : searchWithLobby(window.location.search, code)
+  try {
+    window.history.replaceState(null, '', window.location.pathname + search + window.location.hash)
+  } catch {
+    // A page that may not change its address (in a frame, say) is as it was, and the lobby works all the same.
+  }
+}
+
 function showLobby(lobby: Lobby, player: Player): void {
   currentLobby = lobby
   activeCode.textContent = lobby.code
+  showLobbyInAddress(lobby.code)
   lobbyUsernameInput.value = player.name
   usernameInput.value = player.name
   renderLobby(lobby)
@@ -644,6 +657,7 @@ function returnToEntry(): void {
   lobbyPanel.hidden = true
   entryPanel.hidden = false
   setLobbyMessage('')
+  showLobbyInAddress()
 }
 
 // A player goes back to the lobby, and the game goes on without them (if it is not over). They can see who is
@@ -790,6 +804,7 @@ async function returnFromGame(): Promise<void> {
 }
 const COPY_SUCCESS_MS = 2000
 const COPY_FAILURE_MS = 8000
+
 let copyResetTimer: number | undefined
 
 // Says how copying went on the button itself and right beside it, since that is where the player is
@@ -807,22 +822,44 @@ function showCopyResult(failure?: string): void {
   }, failure === undefined ? COPY_SUCCESS_MS : COPY_FAILURE_MS)
 }
 
-// When the page cannot copy the code, it selects it, so copying it by hand is one Ctrl+C away.
-function failCopy(reason: string): void {
+// A page that is not on HTTPS has no clipboard to write to, so it copies the code from a selection of it, as pages did before there was
+// one. When that fails too, the code is left selected, so copying it by hand is one Ctrl+C away.
+function copyFromSelection(reason: string): void {
   window.getSelection()?.selectAllChildren(activeCode)
-  showCopyResult(reason)
+  let copied = false
+  try {
+    copied = document.execCommand('copy')
+  } catch {
+    // It is the same as it not copying: the selection is there to be copied by hand.
+  }
+  showCopyResult(copied ? undefined : `${reason} The code is selected: press Ctrl+C to copy it yourself.`)
 }
 
 copyButton.addEventListener('click', () => {
   if (!currentLobby) return
   if (!navigator.clipboard) {
-    failCopy('Copying needs HTTPS, so the code is selected: press Ctrl+C to copy it yourself.')
+    copyFromSelection('Copying needs HTTPS.')
     return
   }
   void navigator.clipboard.writeText(currentLobby.code)
     .then(() => showCopyResult())
-    .catch((error: unknown) => failCopy(`Could not copy (${errorMessage(error)}). The code is selected: press Ctrl+C.`))
+    .catch((error: unknown) => copyFromSelection(`Could not copy (${errorMessage(error)}).`))
 })
+
+// A page opened at a link to a lobby (`?lobby=ABC123`, which is what the address says in a lobby) joins it, as it is the whole of what the link is for: they are who the
+// name box says, and can rename themselves in the lobby. One that cannot be joined (there is no such lobby, it is full or is in a game) is not left in the address, and its code is left in
+// the join box with what went wrong.
+const linkedCode = lobbyCodeFromSearch(window.location.search)
+if (linkedCode) {
+  codeInput.value = linkedCode
+  void openLobby(
+    `/api/lobbies/${encodeURIComponent(linkedCode)}/join`,
+    joinForm.querySelector<HTMLButtonElement>('button[type="submit"]'),
+    `Joining lobby ${linkedCode}…`,
+  ).then(() => {
+    if (!currentLobby) showLobbyInAddress()
+  })
+}
 
 window.addEventListener('beforeunload', () => {
   if (!currentLobby) return

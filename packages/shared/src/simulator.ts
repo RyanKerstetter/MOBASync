@@ -1170,7 +1170,13 @@ export class Simulator {
       const decision = think(monster, body, state.ai ?? { mode: 'idle' }, others, (from, to) => this.ground.walkDistance(from, to, radius))
       state.ai = decision.state
       if (decision.reset) {
-        state.health = { hp: state.health.maxHp, maxHp: state.health.maxHp, hpSeq: state.health.hpSeq + 1, finalizedTick: tick }
+        state.health = {
+          hp: state.health.maxHp,
+          maxHp: state.health.maxHp,
+          hpSeq: state.health.hpSeq + 1,
+          finalizedTick: tick,
+          ...(state.health.healed !== undefined ? { healed: state.health.healed } : {}),
+        }
         state.statuses = []
         state.markers = []
       }
@@ -1731,6 +1737,44 @@ export class Simulator {
     return links.sort((left, right) => left.ownerId - right.ownerId)
   }
 
+  // Whether a share of a hit that the champion would take through its link would take the last of its health, from its own resistance and shields on.
+  private shareKills(ownerId: number, amount: number, states: ReadonlyMap<number, GameFrameCharacter>): boolean {
+    const linker = this.characters.get(ownerId)
+    const linkerState = states.get(ownerId)
+    if (!linker || !linkerState) return false
+    return wouldKill(linkerState, amount, statsOfState(linker, linkerState)?.resistance ?? 0, linker.champion.damageReduction)
+  }
+
+  // A champion's link to the unit that was hit breaks, as the share it would take of the hit would kill it (see `ChampionDef.damageLink`). What the champion does as the link ends
+  // (`onBreak`) is run for it first, while its markers are still on the unit to be found, and then they come off, so the unit takes the whole of this hit and every one after.
+  private breakLink(
+    ownerId: number,
+    event: DamageEvent,
+    unit: GameFrameCharacter,
+    context: TickContext,
+    states: ReadonlyMap<number, GameFrameCharacter>,
+    tick: number,
+  ): void {
+    const link = this.characters.get(ownerId)?.champion.damageLink
+    const linkerState = states.get(ownerId)
+    if (!link || !linkerState) return
+    if (link.onBreak) {
+      const written = context.markerRemovals.length
+      runEffects(link.onBreak, context, {
+        id: `link-break:${ownerId}:u${unit.characterId}:t${tick}`,
+        rootId: event.rootId,
+        ownerId,
+        tick,
+        at: { ...linkerState.position },
+        aim: null,
+        subject: unit.characterId,
+      })
+      // The effects ran after the tick's marker removals were done, so what they took off is taken off now.
+      for (const removal of context.markerRemovals.slice(written)) removeMarkers(states, removal)
+    }
+    removeMarkers(states, { unitId: unit.characterId, key: link.key, ownerId })
+  }
+
   // How long an ability's whole cooldown is for this character: the ability's own, shortened by its haste.
   private cooldownOf(def: AbilityDef, characterId: number, state: GameFrameCharacter): number {
     return hastedCooldownTicks(def.cooldownTicks, statsOfState(this.characters.get(characterId), state)?.haste ?? 0)
@@ -1867,19 +1911,7 @@ export class Simulator {
       }
     }
     // Pops land before new stacks so one tick can pop a unit and re-apply to it.
-    for (const { unitId, key, ownerId, count } of context.markerRemovals) {
-      const state = states.get(unitId)
-      if (!state) continue
-      const matching = state.markers.filter((marker) => marker.key === key && marker.ownerId === ownerId)
-      // A set number goes oldest first, the order they were placed in.
-      const removed = new Set(
-        matching
-          .sort((left, right) => left.startTick - right.startTick || compareStrings(left.id, right.id))
-          .slice(0, count ?? matching.length)
-          .map((marker) => marker.id),
-      )
-      state.markers = state.markers.filter((marker) => !removed.has(marker.id))
-    }
+    for (const removal of context.markerRemovals) removeMarkers(states, removal)
     const markedStates = new Set<GameFrameCharacter>()
     for (const { unitId, marker } of context.markerWrites) {
       const state = states.get(unitId)
@@ -1920,18 +1952,24 @@ export class Simulator {
             : event
           const strike = this.itemStrike(hit, state, states, tick)
           // A unit that a champion has linked to itself hands that champion a share of the hit (see `ChampionDef.damageLink`), which the champion takes as it would any
-          // other, from its own resistance and shields on. The hit is credited to whoever struck it, so the champion that dies of its share was killed by them.
-          const links = this.damageLinks(event.targetId, state, states)
+          // other, from its own resistance and shields on. A share that would kill the champion is not taken: that link breaks, and its share stays with the unit.
+          let links = this.damageLinks(event.targetId, state, states)
+          for (;;) {
+            const fitNow = fitOf(links)
+            const lethal = links.find((link) => this.shareKills(link.ownerId, strike.amount * link.share * fitNow, states))
+            if (!lethal) break
+            this.breakLink(lethal.ownerId, event, state, context, states, tick)
+            links = links.filter((link) => link !== lethal)
+          }
           const linkedShare = links.reduce((total, link) => total + link.share, 0)
           // Shares that add up to more than the whole hit (two champions linked to one unit) are cut down to fit, in proportion.
-          const fit = linkedShare > 1 ? 1 / linkedShare : 1
+          const fit = fitOf(links)
           for (const link of links) {
             const linker = this.characters.get(link.ownerId)
             const linkerState = states.get(link.ownerId)
             if (!linker || !linkerState) continue
-            const linkerHadHealth = (linkerState.health?.hp ?? 0) > 0
+            // What is left of the links is a share that the champion lives through, so it is never the one that kills it.
             applyDamage(linkerState, strike.amount * link.share * fit, tick, statsOfState(linker, linkerState)?.resistance ?? 0, linker.champion.damageReduction)
-            if (linkerHadHealth && linkerState.health?.hp === 0) killers.set(link.ownerId, event.ownerId)
           }
           const resistance = statsOfState(this.characters.get(event.targetId), state)?.resistance ?? 0
           const dealt = applyDamage(
@@ -2218,11 +2256,54 @@ function damageSource(event: DamageEvent): 'attack' | 'item' | 'ability' {
   return event.id.startsWith(ITEM_SOURCE_PREFIX) ? 'item' : 'ability'
 }
 
-// Gives the character health back, up to the most it can have. One that is dead, or has no health left, has none to give.
+// Gives the character health back, up to the most it can have. One that is dead, or has no health left, has none to give. What it got back is added to what it has got back in all (`healed`).
 function healCharacter(state: GameFrameCharacter, amount: number): void {
   const health = state.health
   if (!health || !(amount > 0) || health.deathTick !== undefined || health.hp <= 0) return
-  health.hp = Math.min(health.maxHp, health.hp + amount)
+  const gained = Math.min(health.maxHp, health.hp + amount) - health.hp
+  health.hp += gained
+  if (gained > 0) health.healed = (health.healed ?? 0) + gained
+}
+
+// What a hit comes to once the character's resistance and `reduction` have taken what they take off it, in whole points and before its shields (see `applyDamage`).
+function damageAfterResistance(state: GameFrameCharacter, amount: number, resistanceStat: number, reduction: number): number {
+  const resistance = Math.min(0.9, state.statuses.reduce(
+    (total, status) => status.kind === 'resist' ? total + status.amount : total,
+    0,
+  ))
+  return Math.max(0, Math.round(amount * (1 - resistance) * (1 - reduction) * statMultiplier(resistanceStat)))
+}
+
+// Whether a hit would take the last of the character's health, which is what `applyDamage` would leave it with: the shields take what they can of it first.
+function wouldKill(state: GameFrameCharacter, amount: number, resistanceStat = 0, reduction = 0): boolean {
+  const health = state.health
+  if (!health || health.deathTick !== undefined) return false
+  const shield = state.statuses.reduce((total, status) => status.kind === 'shield' ? total + status.amount : total, 0)
+  return damageAfterResistance(state, amount, resistanceStat, reduction) - shield >= health.hp
+}
+
+// The share of what is handed to links that each one's amount is cut down to, so that what they take is no more than the whole hit.
+function fitOf(links: ReadonlyArray<{ share: number }>): number {
+  const total = links.reduce((sum, link) => sum + link.share, 0)
+  return total > 1 ? 1 / total : 1
+}
+
+// Takes markers off a unit (a pop): every one of the key that the owner placed, or `count` of them, the oldest first.
+function removeMarkers(
+  states: ReadonlyMap<number, GameFrameCharacter>,
+  { unitId, key, ownerId, count }: { unitId: number; key: string; ownerId: number; count?: number },
+): void {
+  const state = states.get(unitId)
+  if (!state) return
+  const matching = state.markers.filter((marker) => marker.key === key && marker.ownerId === ownerId)
+  // A set number goes oldest first, the order they were placed in.
+  const removed = new Set(
+    matching
+      .sort((left, right) => left.startTick - right.startTick || compareStrings(left.id, right.id))
+      .slice(0, count ?? matching.length)
+      .map((marker) => marker.id),
+  )
+  state.markers = state.markers.filter((marker) => !removed.has(marker.id))
 }
 
 // Takes the damage off the health, and says how much it was: the damage less what the character's resistance takes off it (see `statReduction`)
@@ -2232,11 +2313,7 @@ function healCharacter(state: GameFrameCharacter, amount: number): void {
 function applyDamage(state: GameFrameCharacter, amount: number, tick: number, resistanceStat = 0, reduction = 0): number {
   const health = state.health
   if (!health || health.deathTick !== undefined) return 0
-  const resistance = Math.min(0.9, state.statuses.reduce(
-    (total, status) => status.kind === 'resist' ? total + status.amount : total,
-    0,
-  ))
-  let remaining = Math.max(0, Math.round(amount * (1 - resistance) * (1 - reduction) * statMultiplier(resistanceStat)))
+  let remaining = damageAfterResistance(state, amount, resistanceStat, reduction)
   const dealt = remaining
   if (remaining === 0) return 0
   // Shield statuses absorb first, soonest-expiring first.
@@ -2280,6 +2357,8 @@ function respawnCharacter(character: SimCharacter, state: GameFrameCharacter, ti
     maxHp,
     hpSeq: health.hpSeq + 1,
     finalizedTick: tick,
+    // What it has got back so far goes on counting across a death, as the count of hits does.
+    ...(health.healed !== undefined ? { healed: health.healed } : {}),
   }
   state.nextAttackTick = tick
   state.cooldowns = {}

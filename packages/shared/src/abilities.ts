@@ -91,9 +91,9 @@ export interface AbilityDef {
   targeting: CastTarget['mode']
   // For a unit-targeted ability: it is aimed at a teammate, or at the caster itself, and not at an enemy. Its target does not need to be seen to be aimed at.
   targetsAllies?: true
-  // For one that is for allies: the page casts it on the unit the caster has linked to itself (`ChampionDef.damageLink`), wherever the cursor is, and on the caster only when
-  // the cursor is on it (or the self-cast key is held). So it needs no one under the cursor, and a teammate does not have to be pointed at. What the cast does with whoever it is on
-  // is the ability's own (Link Heal heals the linked unit, and cuts the link on the caster).
+  // For one that is for allies: the page casts it on the unit the caster has linked to itself (`ChampionDef.damageLink`), wherever the cursor is, and never on the caster (the
+  // self-cast key does not make it so). So it needs no one under the cursor, and a teammate does not have to be pointed at. What the cast does with whoever it is on
+  // is the ability's own (Link Heal heals the linked unit and ends the link).
   targetsLinked?: true
   range: number
   // A point-targeted ability cannot be aimed nearer the caster than this. The client pushes the aim out
@@ -331,13 +331,14 @@ ability({
 export const EMPOWER_KEY = 'empowered'
 export const EMPOWER_DURATION_TICKS = seconds(6)
 export const EMPOWER_BONUS_DAMAGE = 30
+export const EMPOWER_BONUS_SCALING = { arcane: .3} satisfies Scaling
 const TSUNAMI_STUN_TICKS = seconds(0.6)
 // What the wave does to each enemy it passes through: the base damage, plus the caster's stats times these ratios (`scaled`).
 export const TSUNAMI_DAMAGE = 100
 export const TSUNAMI_SCALING = { arcane: 0.8 } satisfies Scaling
 const tsunamiWave = {
   id: 'tsunami-wave',
-  speed: 400,
+  speed: 600,
   box: { halfLength: 10, halfWidth: 45 },
   lifetimeTicks: seconds(0.8),
   pierce: true,
@@ -349,7 +350,7 @@ ability({
   id: 'tsunami',
   description: 'A wave that damages, knocks back and stuns enemies.',
   targeting: 'direction',
-  range: 320,
+  range: 340,
   windUpTicks: 5,
   backswingTicks: 4,
   cooldownTicks: seconds(9),
@@ -1155,7 +1156,7 @@ const firstStrikeOn = (to: Selector): Effect<SimContext> => (sim, src) => {
 
 // Chain's Hook: a shot that drags the first enemy it hits to him, and drops it touching him. The drag is a dash of the enemy's, so it cannot attack or cast
 // until it lands, and it goes over whatever is between.
-const HOOK_RANGE = 280
+const HOOK_RANGE = 220
 const HOOK_SPEED = 720
 export const HOOK_DAMAGE = 60
 export const HOOK_SCALING = { attackDamage: 0.5 } satisfies Scaling
@@ -1276,7 +1277,7 @@ ability({
 // Chain's Lunge: a short dash the way it is aimed, with no target, that quickens his attacks and readies his next auto at once. It has no windup, so it is cast
 // while Whirl charges.
 const LUNGE_RANGE = 120
-const LUNGE_SPEED = 400
+const LUNGE_SPEED = 300
 export const LUNGE_ATTACK_SPEED = 0.4
 export const LUNGE_BUFF_TICKS = seconds(3)
 ability({
@@ -1410,7 +1411,7 @@ ability({
 export const SAGE_KEY = 'mended'
 export const SAGE_MARK_TICKS = seconds(5)
 export const SAGE_HEAL = 20
-export const SAGE_HEAL_SCALING = { arcane: 0.15 } satisfies Scaling
+export const SAGE_HEAL_SCALING = { arcane: 0.3 } satisfies Scaling
 export const SAGE_HASTE = 0.2
 export const SAGE_HASTE_TICKS = seconds(1.5)
 // The name of the one haste her autos keep renewing (see `haste`), so the autos after the first do not add another.
@@ -1420,7 +1421,7 @@ const mendEnemy: Effect = mark(SAGE_KEY, SAGE_MARK_TICKS, subject(), { cap: 1 })
 // Sage's Heal Pulse: a ring that goes out from her. It heals every ally in it (herself too), and hurts, pushes away and mends every enemy in it.
 export const PULSE_RADIUS = 190
 export const PULSE_HEAL = 50
-export const PULSE_HEAL_SCALING = { arcane: 0.5 } satisfies Scaling
+export const PULSE_HEAL_SCALING = { arcane: 0.4 } satisfies Scaling
 export const PULSE_DAMAGE = 50
 export const PULSE_DAMAGE_SCALING = { arcane: 0.5 } satisfies Scaling
 const PULSE_KNOCKBACK = 120
@@ -1441,7 +1442,7 @@ ability({
   range: 0,
   windUpTicks: 6,
   backswingTicks: 4,
-  cooldownTicks: seconds(12),
+  cooldownTicks: seconds(16),
   apply: [
     heal(scaled(PULSE_HEAL, PULSE_HEAL_SCALING), alliesInRadius(PULSE_RADIUS)),
     damage(scaled(PULSE_DAMAGE, PULSE_DAMAGE_SCALING), enemiesInRadius(PULSE_RADIUS)),
@@ -1453,9 +1454,9 @@ ability({
 
 // Sage's Vine Bolt: a bolt that goes through every enemy on its way, and hurts, roots and mends each.
 const VINE_RANGE = 520
-const VINE_SPEED = 850
+const VINE_SPEED = 550
 export const VINE_DAMAGE = 50
-export const VINE_SCALING = { arcane: 0.6 } satisfies Scaling
+export const VINE_SCALING = { arcane: 0.5 } satisfies Scaling
 export const VINE_ROOT_TICKS = seconds(1)
 const vineBolt = {
   id: 'vine-bolt',
@@ -1474,7 +1475,7 @@ ability({
   range: VINE_RANGE,
   windUpTicks: 6,
   backswingTicks: 3,
-  cooldownTicks: seconds(9),
+  cooldownTicks: seconds(11),
   indicator: { width: vineBolt.radius * 2 },
   apply: [spawnEntity(vineBolt)],
 })
@@ -1482,7 +1483,7 @@ ability({
 // Sage's Rejuvenate: heals a teammate, or herself, by a set amount and a share of the health they are missing.
 export const REJUVENATE_HEAL = 60
 export const REJUVENATE_SCALING = { arcane: 0.4 } satisfies Scaling
-export const REJUVENATE_MISSING = 0.2
+export const REJUVENATE_MISSING = 0.15
 ability({
   id: 'rejuvenate',
   name: 'Rejuvenate',
@@ -1492,7 +1493,7 @@ ability({
   range: 450,
   windUpTicks: 4,
   backswingTicks: 3,
-  cooldownTicks: seconds(10),
+  cooldownTicks: seconds(14),
   apply: [heal(linear(scaled(REJUVENATE_HEAL, REJUVENATE_SCALING), REJUVENATE_MISSING, missingHealth()), targetUnit())],
 })
 
@@ -1507,15 +1508,18 @@ export const MONK_AUTO_REFUND_TICKS = seconds(1)
 // death takes it with the rest of their markers, and Monk's death takes it off whoever has it (see `ChampionDef.damageLink`); the entity has no timer either, and goes with the link. While it is
 // up, `LINK_SHARE` of every hit the teammate takes is Monk's to take. It reaches `LINK_BREAK_RANGE` and no farther: the tick the teammate is farther from Monk than that (body's middle to
 // middle) the link is cut, as he would cut it himself (the entity sees to it, on its tick, since it is the one thing that is there for as long as the link is).
+// It also breaks, and gives the same heal as Link Heal does, when his share of a hit would kill him: he does not take that share, the teammate takes the whole hit, and the link ends in the
+// heal (the simulator sees to that, as the hit lands: see `ChampionDef.damageLink`).
 //
-// The key is aimed at a unit either way. With no link, Link on a teammate links them, and on himself heals him. With one up the key is Link Heal (`linkheal`, the recast), which on the linked teammate
-// heals them and keeps the link, and on himself cuts the link: the cut gives Link Heal its cooldown back, so it never keeps him from cutting, and starts Link's whole cooldown over. On anyone else
-// it does nothing, and is given back whole.
+// The key is cast on a unit while there is no link: on a teammate it links them, and on himself it heals him. With one up the key is Link Heal (`linkheal`, the recast), which heals the
+// linked teammate and ends the link (the heal uses the link up), and starts Link's whole cooldown over. It is for the teammate he has linked and no one else: aimed at anyone else it does
+// nothing, and is given back whole. Its own cooldown is Link's, since that is how long it is before the key can be used again.
 export const LINK_KEY = 'linked'
+export const LINK_COOLDOWN_TICKS = seconds(14)
 export const LINK_SHARE = 0.4
 // The heal and the shields grow with his arcane (see `scaled`), which is 10 at level 1 and grows by 4 a level: 2 for each point is about 8 more for each level he gains.
-export const LINK_HEAL = 80
-export const LINK_HEAL_SCALING = { arcane: 1 } satisfies Scaling
+export const LINK_HEAL = 160
+export const LINK_HEAL_SCALING = { arcane: 1.5 } satisfies Scaling
 // How far apart the two can get before the link breaks. More than Link reaches to be cast (so a link made at the farthest is not broken the moment it is made), and about what two
 // champions on one side of a fight are from one another and no more.
 export const LINK_BREAK_RANGE = 500
@@ -1541,6 +1545,9 @@ const cutLink: readonly Effect[] = [
   removeEntities('link'),
   startCooldown('link'),
 ]
+// How a link ends in a heal: the teammate is given the heal, then the link is cut. It is what Link Heal does, and it is what the link does when a share of a hit would kill Monk
+// (`ChampionDef.damageLink`'s `onBreak`), so the one gives what the other does.
+export const LINK_BREAK_EFFECTS: readonly Effect[] = [heal(linkHeal, linkedAlly), ...cutLink]
 const linkBond = {
   id: 'link',
   speed: 0,
@@ -1553,13 +1560,13 @@ const linkBond = {
 ability({
   id: 'link',
   name: 'Link',
-  description: 'Links to a teammate and takes some of their damage, until they get too far away. Cast on yourself to heal.',
+  description: 'Links to a teammate and takes some of their damage, until they get too far away or it would kill you. Cast on yourself to heal.',
   targeting: 'unit',
   targetsAllies: true,
   range: 450,
   windUpTicks: 3,
   backswingTicks: 3,
-  cooldownTicks: seconds(14),
+  cooldownTicks: LINK_COOLDOWN_TICKS,
   // Only one link at a time. While it is up, this key is Link Heal instead.
   requires: { entity: 'link', out: false },
   recast: 'linkheal',
@@ -1571,35 +1578,25 @@ ability({
     ),
   ],
 })
-export const LINK_HEAL_COOLDOWN_TICKS = seconds(6)
 ability({
   id: 'linkheal',
   name: 'Link Heal',
-  description: 'Heals your linked teammate and keeps the link. Aim it at yourself, or hold Alt, to cut the link.',
+  description: 'Heals your linked teammate and ends the link.',
   targeting: 'unit',
   targetsAllies: true,
   targetsLinked: true,
   range: 450,
   windUpTicks: 3,
   backswingTicks: 3,
-  cooldownTicks: LINK_HEAL_COOLDOWN_TICKS,
+  cooldownTicks: LINK_COOLDOWN_TICKS,
   requires: { entity: 'link', out: true },
   apply: [
     when<SimContext>(
-      castOnSelf,
-      [
-        ...cutLink,
-        // A cut is not a heal: it costs none of Link Heal's cooldown.
-        refundCooldown('linkheal', 1),
-      ],
-      [
-        when<SimContext>(
-          aimedAtLinked,
-          [heal(linkHeal, linkedAlly)],
-          // Someone who is not linked: nothing to give, so nothing is spent.
-          [refundCooldown('linkheal', 1)],
-        ),
-      ],
+      aimedAtLinked,
+      // The heal goes first, to whoever is linked, and then the link is cut.
+      LINK_BREAK_EFFECTS,
+      // Anyone else, himself too: nothing to give, so nothing is spent.
+      [refundCooldown('linkheal', 1)],
     ),
   ],
 })
@@ -1630,15 +1627,19 @@ ability({
   ],
 })
 
-// Monk's Guard: a shield for Monk and the teammate he has linked, or a bigger one for Monk alone if there is none.
+// Monk's Guard: a shield and a burst of speed for Monk and the teammate he has linked, or a bigger shield and a bigger burst for Monk alone if there is none.
 export const GUARD_SHIELD = 100
 export const GUARD_SHIELD_ALONE = 160
 export const GUARD_SCALING = { arcane: 1 } satisfies Scaling
 export const GUARD_TICKS = seconds(4)
+// The move speed it gives (see `haste`): a share of each one's own, and more for Monk when he has no one to share it with.
+export const GUARD_HASTE = 0.30
+export const GUARD_HASTE_ALONE = 0.45
+export const GUARD_HASTE_TICKS = seconds(2)
 ability({
   id: 'guard',
   name: 'Guard',
-  description: 'Shields you and your linked teammate. With no link, you get a bigger shield.',
+  description: 'Shields you and your linked teammate and speeds you both up. With no link, you get more of both.',
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
@@ -1647,8 +1648,14 @@ ability({
   apply: [
     when<SimContext>(
       isLinked,
-      [shield(scaled(GUARD_SHIELD, GUARD_SCALING), GUARD_TICKS, selfAndLinked)],
-      [shield(scaled(GUARD_SHIELD_ALONE, GUARD_SCALING), GUARD_TICKS, self())],
+      [
+        shield(scaled(GUARD_SHIELD, GUARD_SCALING), GUARD_TICKS, selfAndLinked),
+        haste(GUARD_HASTE, GUARD_HASTE_TICKS, selfAndLinked),
+      ],
+      [
+        shield(scaled(GUARD_SHIELD_ALONE, GUARD_SCALING), GUARD_TICKS, self()),
+        haste(GUARD_HASTE_ALONE, GUARD_HASTE_TICKS, self()),
+      ],
     ),
   ],
 })

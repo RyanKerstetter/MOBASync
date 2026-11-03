@@ -6,6 +6,7 @@ import { HITBOX_COLORS, hitboxShapes } from '../apps/client/src/render/hitboxes.
 import { ServerGameState } from '../apps/server/src/game-state.ts'
 import {
   flattenLayers,
+  GAME_MAX_PLAYERS,
   GAME_MONSTER_TEAM,
   GameSnapshotSchema,
   getMonster,
@@ -82,6 +83,9 @@ const camp = (kind: unknown, x: number, y: number, extra: Record<string, unknown
   properties: kind === undefined ? [] : [{ name: property, type: 'string', value: kind }],
   ...extra,
 })
+// A monster point on one side of the map: the `team-name` is the slot of spawn points whose side it is.
+const campOf = (slot: unknown, kind: string, x: number, y: number) =>
+  camp(kind, x, y, { properties: [{ name: 'monster-type', type: 'string', value: kind }, { name: 'team-name', type: 'int', value: slot }] })
 const problemsOf = (objects: unknown[]): string => {
   try {
     readMapLayout(mapWith(objects))
@@ -121,6 +125,27 @@ test('every monster point on the competitive map is a monster in the game, but t
   assert.equal(layout.warnings.length, points.filter((kind) => !monsters.has(kind)).length, 'and says which it left out')
 })
 
+test('a monster point can say which side of the map it is on, by the team-name of the slot of spawn points, and one that does not is for every game', () => {
+  const layout = readMapLayout(mapWith([campOf(2, 'wolf', 400, 300), campOf(1, 'slime', 200, 300), camp('slime', 100, 300)]))
+  assert.deepEqual(layout.monsters, [
+    { monster: 'wolf', at: { x: 1200, y: 900 }, slot: 2 },
+    { monster: 'slime', at: { x: 600, y: 900 }, slot: 1 },
+    { monster: 'slime', at: { x: 300, y: 900 } },
+  ])
+  assert.equal('slot' in layout.monsters[2], false, 'none is none, and not undefined')
+})
+
+test('a monster point on the competitive map is on the side its team-name says', () => {
+  const map = parseTiledMap(JSON.parse(readFileSync(new URL('../res/maps/competetive.tmj', import.meta.url), 'utf-8')))
+  const points = flattenLayers(map.layers).flatMap(({ layer }) => layer.type === 'objectgroup' ? layer.objects : [])
+    .filter((object) => (object.class ?? object.type) === 'monster-spawn')
+    .filter((object) => monsters.has(String(getProperty(object.properties, 'monster-type') ?? getProperty(object.properties, 'monester-type'))))
+  const slots = points.map((object) => getProperty(object.properties, 'team-name'))
+  assert.ok(slots.length > 0 && slots.every((slot) => typeof slot === 'number'), 'every one of them has a team-name')
+  assert.deepEqual(readMapLayout(map).monsters.map((camp) => camp.slot), slots, 'and the layout has it')
+  assert.ok(new Set(slots).size > 1, 'on more than one side')
+})
+
 test('a monster point that is not right says which, and what is wrong', () => {
   assert.match(problemsOf([camp('wolf', 400, 300, { point: false, width: 5, height: 5 })]), /camp-wolf is not a point/)
   assert.match(problemsOf([camp(undefined, 400, 300)]), /camp-undefined needs a monster-type property that names a monster \(slime, golem, wolf/)
@@ -130,6 +155,10 @@ test('a monster point that is not right says which, and what is wrong', () => {
   // The wolf is 22 across from its middle, a third of that in map pixels, so one a pixel from the edge has no room.
   assert.match(problemsOf([camp('wolf', 1, 300)]), /camp-wolf is too close to a wall or the arena's edge: a Wolf would start inside it/)
   assert.deepEqual(readMapLayout(mapWith([camp('wolf', 8, 300)])).monsters.length, 1, 'with room for its size it is fine')
+  // A team-name has to be a slot, or be left off.
+  for (const slot of [0, GAME_MAX_PLAYERS + 1, 1.5, 'one']) {
+    assert.match(problemsOf([campOf(slot, 'wolf', 400, 300)]), /camp-wolf needs a team-name from 1 to \d+/, String(slot))
+  }
 })
 
 // ---------------------------------------------------------------------------- the server
@@ -166,6 +195,43 @@ test('the server starts a game with the map\'s monsters, after the players, in t
     [3, 't-camp-grunt', undefined],
     [4, 't-camp-grunt', undefined],
   ])
+})
+
+// A map with a camp on each of three sides, and one on none: where each is stands for which it is.
+const SIDES = [1, 2, 3].map((slot) => ({ monster: grunt.id, at: { x: 1000 + slot * 100, y: 700 }, slot }))
+const NEUTRAL = { monster: grunt.id, at: { x: 2000, y: 700 } }
+const bothSides = { ...withCamps, monsters: [...SIDES, NEUTRAL] }
+
+// Where the monsters of a game started, in the order they are in it.
+function campsOf(map: typeof bothSides, who: ReadonlyArray<{ id: string; name: string; team: number }>): Array<{ x: number; y: number }> {
+  const game = new ServerGameState([])
+  game.beginSelection(who, map, 'deathmatch', { scoreLimit: 3 })
+  for (const player of who) game.lockChampion(player.id)
+  game.begin(who)
+  return [...game.simulator.characters.values()].filter((character) => character.monster).map((character) => character.initialPosition)
+}
+
+test('a monster of a slot is in the game only when a team starts at that slot, and one of no slot is in every game', () => {
+  const at = (...camps: Array<{ at: { x: number; y: number } }>) => camps.map((each) => each.at)
+  // Two teams start at the first two slots, so the first two sides' monsters are in, and the third's is not.
+  assert.deepEqual(campsOf(bothSides, players), at(SIDES[0], SIDES[1], NEUTRAL))
+  // One player is one team, at the first slot: only that side has its monsters.
+  assert.deepEqual(campsOf(bothSides, players.slice(0, 1)), at(SIDES[0], NEUTRAL))
+  // And a team is at the first slot whatever it is called.
+  assert.deepEqual(campsOf(bothSides, [{ id: 'b', name: 'Bob', team: 2 }]), at(SIDES[0], NEUTRAL))
+})
+
+test('a third team brings the third side\'s monsters, and a side with no team has none, whichever sides the teams are at', () => {
+  const three = [
+    { id: 'a', name: 'Ann', team: 1 },
+    { id: 'b', name: 'Bob', team: 2 },
+    { id: 'c', name: 'Cat', team: 3 },
+  ]
+  assert.deepEqual(campsOf(bothSides, three), [...SIDES, NEUTRAL].map((each) => each.at), 'every side has a team')
+  // A side with no team has no monsters, wherever the sides with teams are.
+  const onlySecond = { ...bothSides, monsters: [SIDES[1], NEUTRAL] }
+  assert.deepEqual(campsOf(onlySecond, players.slice(0, 1)), [NEUTRAL.at], 'the second side, with one team')
+  assert.deepEqual(campsOf(onlySecond, players), [SIDES[1].at, NEUTRAL.at], 'and with two')
 })
 
 test('a game on a map with no monsters has none, and the next game is not given the last one\'s', () => {

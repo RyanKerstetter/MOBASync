@@ -190,10 +190,12 @@ export class ServerGameState {
 
     this.status = GameStatusSchema.enum.starting
     this.readyPlayers.clear()
-    // Each shop is for the team that starts at its slot, as a turret is (the biggest team at the first slot): a slot nobody starts at has no shop in the game.
-    const shopTeams = rankTeams(teams)
+    // The team that starts at each slot of the map's spawn points: the biggest team at the first slot, and so on. What the map has for a slot (a shop, a turret, a monster)
+    // is in the game only when a team starts there.
+    const slotTeams = rankTeams(teams)
+    // Each shop is for the team that starts at its slot, as a turret is: a slot nobody starts at has no shop in the game.
     const shops = this.shops.flatMap((shop) => {
-      const team = shopTeams[shop.slot - 1]
+      const team = slotTeams[shop.slot - 1]
       return team === undefined ? [] : [{ team, x: shop.x, y: shop.y, width: shop.width, height: shop.height }]
     })
     this.simulator.reset(this.terrain, setup, shops)
@@ -215,15 +217,17 @@ export class ServerGameState {
         teams[index],
       )
     })
-    // The map's monsters come with the game, after the players, so every player's character has the ID it always had.
+    // The map's monsters come with the game, after the players, so every player's character has the ID it always had. One that is for a slot
+    // (the side of the map it is on) comes only when a team starts there: a map for two teams played by one has the monsters of its side alone. A monster
+    // of no slot comes to every game.
     for (const camp of this.monsters) {
+      if (camp.slot !== undefined && slotTeams[camp.slot - 1] === undefined) continue
       const id = this.nextCharacterId
       this.nextCharacterId += 1
       this.simulator.addMonster(id, getMonster(camp.monster), camp.at)
     }
     // And its turrets, each on the team that starts at the slot it is for (the biggest team at slot 1, as for spawn points). A game with
     // no team for a slot, a map for two teams played by one, has no turret there.
-    const slotTeams = rankTeams(teams)
     for (const post of this.turrets) {
       const team = slotTeams[post.slot - 1]
       if (team === undefined) continue
