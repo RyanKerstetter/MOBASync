@@ -31,7 +31,9 @@ const RATIO_NAMES: Readonly<Record<'arcane' | 'attackDamage' | 'maxHealth' | 'he
   health: 'Health',
 }
 
-const KIND_LABELS = { damage: 'Damage', burn: 'Burn', heal: 'Heal', shield: 'Shield' } as const
+const KIND_LABELS = { damage: 'Damage', burn: 'Burn', burnPerStack: 'Burn per stack', bleed: 'Bleed', spore: 'Spore', heal: 'Heal', shield: 'Shield' } as const
+// The kinds that are told as an amount a second.
+const PER_SECOND_KINDS: ReadonlySet<keyof typeof KIND_LABELS> = new Set(['burn', 'burnPerStack', 'bleed', 'spore'])
 
 // 0.8 is "80%" and 0.06 is "6%".
 const percent = (ratio: number): string => `${Number((ratio * 100).toFixed(1))}%`
@@ -40,11 +42,12 @@ const secondsText = (ticks: number): string => `${Number((ticks / GAME_TPS).toFi
 
 // What an amount is made of, such as "60 + 30 per stack + 50% Attack damage", or nothing for one that is only a number (it is the value already).
 export function amountFormula(amount: AmountInfo): string | undefined {
-  const { base, perStack, perMissingHealth, ratios } = amount
+  const { base, perStack, perMissingHealth, ratios, healthLost } = amount
   // What it grows with, after the base.
   const grows: string[] = []
   if (perStack !== 0) grows.push(`${amountText(perStack)} per stack`)
   if (perMissingHealth !== 0) grows.push(`${percent(perMissingHealth)} of missing health`)
+  if (healthLost && healthLost.share !== 0) grows.push(`${percent(healthLost.share)} of health lost in the last ${secondsText(healthLost.ticks)}`)
   for (const key of ['arcane', 'attackDamage', 'maxHealth', 'health'] as const) {
     const ratio = ratios[key]
     if (ratio) grows.push(`${percent(ratio)} ${RATIO_NAMES[key]}`)
@@ -71,7 +74,7 @@ export function abilityTooltip(abilityId: string, input: AbilityTooltipInput): I
     const detail = amountFormula(amount)
     return {
       label: KIND_LABELS[kind],
-      value: kind === 'burn' || perSecond ? `${value}/s` : value,
+      value: PER_SECOND_KINDS.has(kind) || perSecond ? `${value}/s` : value,
       ...(detail === undefined ? {} : { detail }),
     }
   })

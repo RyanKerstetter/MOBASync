@@ -27,6 +27,7 @@ import {
   scaled,
   Simulator,
   Terrain,
+  walkingSpeed,
   withItems,
   type ChampionStats,
   type Inventory,
@@ -55,9 +56,9 @@ const quick = defineItem({ id: 't-quick', name: 'Test Quick', slot: 'weapon', co
 const treads = defineItem({ id: 't-treads', name: 'Test Treads', slot: 'boots', cost: part(0.2), stats: { moveSpeed: 100 } })
 const scope = defineItem({ id: 't-scope', name: 'Test Scope', slot: 'accessory', cost: part(0.2), stats: { attackRange: 100 } })
 
-defineAbility({ id: 't-it-blast', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [damage(100, enemiesInRadius(400))] })
+defineAbility({ id: 't-it-blast', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [damage(100, enemiesInRadius(400))] })
 // Deals 100 and half of the caster's arcane.
-defineAbility({ id: 't-it-spell', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [damage(scaled(100, { arcane: 0.5 }), enemiesInRadius(400))] })
+defineAbility({ id: 't-it-spell', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [damage(scaled(100, { arcane: 0.5 }), enemiesInRadius(400))] })
 const fighter = defineChampion({
   id: 't-it-fighter',
   name: 'Item Fighter',
@@ -183,9 +184,10 @@ test('what a champion carries adds up, and an id that is not an item adds nothin
   const everything = defineItem({ id: 't-everything', name: 'All', slot: 'accessory', cost: 1, stats: { maxHp: 10, attackDamage: 1, attackSpeed: 0.5, resistance: 2, haste: 3, arcane: 4, attackRange: 25, moveSpeed: 15 } })
   const total = withItems(stats, { accessory: everything.id })
   assert.deepEqual(
-    [total.maxHp, total.attackDamage, total.attackSpeed, total.resistance, total.haste, total.attackRange, total.moveSpeed],
-    [1010, 51, 1.5, 12, 8, 175, 215],
+    [total.maxHp, total.attackDamage, total.attackSpeed, total.resistance, total.haste, total.attackRange],
+    [1010, 51, 1.5, 12, 8, 175],
   )
+  assert.equal(total.moveSpeed, 200 + walkingSpeed(0, everything.stats.moveSpeed ?? 0), 'what the items add to the move speed has the game\'s multiplier in it, as the stats given already do')
   assert.equal(total.arcane, 15)
   assert.equal(stats.maxHp, 1000, 'and the stats it was given are as they were')
   assert.deepEqual(withItems(stats, undefined), stats)
@@ -386,8 +388,8 @@ test('move speed adds to how fast a champion walks', () => {
     run(simulator, 1, 61)
     return (simulator.at(61).get(1)?.getPosition().x ?? 0) - 600
   }
-  assert.ok(Math.abs(walked([]) - 200) < 1e-6, 'a second at 200 is 200')
-  assert.ok(Math.abs(walked([treads.id]) - 300) < 1e-6, 'and at 300 is 300')
+  assert.ok(Math.abs(walked([]) - walkingSpeed(fighter.moveSpeed)) < 1e-6, 'a second at 200 is 200')
+  assert.ok(Math.abs(walked([treads.id]) - walkingSpeed(fighter.moveSpeed, treads.stats.moveSpeed ?? 0)) < 1e-6, 'and at 300 is 300')
 })
 
 test('what a champion has comes back with it when it respawns, and the health is the most it can have', () => {

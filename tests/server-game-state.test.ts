@@ -7,6 +7,7 @@ import {
   GAME_MAX_PLAYERS,
   Terrain,
   GAME_TPS,
+  walkingSpeed,
   type GameMode,
 } from '../packages/shared/src/index.ts'
 import { brawler, cursebearer, trinketmaster } from './fixtures.ts'
@@ -39,7 +40,7 @@ test('server derives attack damage through the shared simulator without health r
   const meeting = { x: targetStart.x - champion.attackRange / 2, y: targetStart.y }
   const walk = game.acceptOrder('player-1', { id: 'player-1:1', seq: 1, tick: 1, type: 'move', target: meeting })
   assert.equal(walk.ack.status, 'accepted')
-  const walkTicks = Math.ceil((meeting.x - attackerStart.x) / (champion.moveSpeed / GAME_TPS)) + 2
+  const walkTicks = Math.ceil((meeting.x - attackerStart.x) / (walkingSpeed(champion.moveSpeed) / GAME_TPS)) + 2
   for (let tick = 1; tick <= walkTicks; tick += 1) game.advanceTick()
 
   const attackTick = game.simulator.tick + 1

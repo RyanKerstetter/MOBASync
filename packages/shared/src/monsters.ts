@@ -176,10 +176,10 @@ export const monsters: ReadonlyMap<string, Monster> = new Map([
     description: 'A slow, soft monster that hops after whoever comes near and bumps them for a little damage.',
     // What each bump does, and how long after one starts until it can bump again. It gains a level each time it is killed, and each level adds
     // its growth to the health and the damage (the same amount every time).
-    base: { maxHp: 500, attackDamage: 25, attackSpeed: attackEvery(1) },
-    growth: { maxHp: 100, attackDamage: 5 },
+    base: { maxHp: 500, attackDamage: 15, attackSpeed: attackEvery(1) },
+    growth: { maxHp: 100, attackDamage: 0 },
     // Slower than every champion, so it can be walked away from.
-    moveSpeed: 115,
+    moveSpeed: 100,
     radius: 20,
     // How near (middle to middle) it has to be to bump someone: a little past touching them.
     attackRange: 60,
@@ -193,8 +193,7 @@ export const monsters: ReadonlyMap<string, Monster> = new Map([
       // inside. When it is full the monster ignores everyone and goes home, and the bar is shown under it.
       deaggroRange: 300,
       deaggroTicks: seconds(3),
-      // It first appears 5 seconds into the game.
-      spawnOffsetTicks: seconds(5),
+      spawnOffsetTicks: seconds(10),
       returnSpeedMultiplier: RETURN_SPEED,
       respawnTicks: seconds(30),
     },
@@ -210,12 +209,12 @@ export const monsters: ReadonlyMap<string, Monster> = new Map([
     name: 'Golem',
     description: 'A huge, slow rock monster that guards the middle of the map. It hits very hard, but seldom.',
     // What each blow does, and how long after one starts until it can strike again.
-    base: { maxHp: 1500, attackDamage: 40, attackSpeed: attackEvery(2.5) },
-    growth: { maxHp: 300, attackDamage: 10 },
+    base: { maxHp: 1200, attackDamage: 30, attackSpeed: attackEvery(2.5) },
+    growth: { maxHp: 200, attackDamage: 5 },
     moveSpeed: 90,
     radius: 48,
     // How near (middle to middle) it has to be to strike: its arms reach well past its body.
-    attackRange: 110,
+    attackRange: 90,
     // How much of each attack it takes to rise up and come down before the blow lands: 0.7 s of its 2.5 s.
     attackWindup: 0.28,
     abilities: [],
@@ -226,14 +225,13 @@ export const monsters: ReadonlyMap<string, Monster> = new Map([
       // inside. When it is full the monster ignores everyone and goes home, and the bar is shown under it.
       deaggroRange: 400,
       deaggroTicks: seconds(3),
-      // It first appears 20 seconds into the game, long after the slimes.
-      spawnOffsetTicks: seconds(20),
+      spawnOffsetTicks: seconds(35),
       returnSpeedMultiplier: RETURN_SPEED,
       respawnTicks: seconds(60),
     },
     // The big prize of the map: much more than a slime, and the only one that pays shards.
-    reward: { gold: 50, xp: 100, shards: 1 },
-    xpGrowth: 25,
+    reward: { gold: 50, xp: 150, shards: 1 },
+    xpGrowth: 50,
   }),
   // A placeholder to build on, which no map has yet.
   new Monster({

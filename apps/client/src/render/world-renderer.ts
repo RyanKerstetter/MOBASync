@@ -40,6 +40,8 @@ export type WorldFrame = {
   // What the ability being aimed would do if its key were let go now.
   castPreview?: CastPreview
   attackMarkers: readonly AttackMarker[]
+  // How many times its own size the marker on the enemy being attacked is drawn (the graphics menu). Left out, its own size.
+  lockMarkerScale?: number
   // The character a left click picked, which is ringed on the ground.
   selectedId?: number
   // The hill or the flags of the game mode, if it has any.
@@ -188,6 +190,7 @@ export class WorldRenderer {
       showAttackRange: this.effects.selfAttackRange,
       ...(frame.castPreview ? { castPreview: frame.castPreview } : {}),
       attackMarkers: frame.attackMarkers,
+      ...(frame.lockMarkerScale !== undefined ? { lockMarkerScale: frame.lockMarkerScale } : {}),
       ...(frame.selectedId !== undefined ? { selectedId: frame.selectedId } : {}),
     })
   }

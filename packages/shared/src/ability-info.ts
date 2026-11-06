@@ -3,9 +3,10 @@ import { GAME_TPS } from './constants.js'
 import { describeEffect, SCALING_KEYS, type AmountInfo, type AnyEffect, type Scaling } from './effects.js'
 
 // What an ability puts a number on that a player wants to read, found by looking through its effects (see "Descriptions" in effects.ts): the damage it deals, the
-// damage a second it burns for, the health it gives back and the shield it gives. It is found in the ability itself, so it is the ability's own number, and retuning the
-// ability retunes this. `perSecond` is a heal that a pulse repeats (a bot that heals every half second), told as what it comes to in a second.
-export type AbilityNumber = { kind: 'damage' | 'burn' | 'heal' | 'shield'; amount: AmountInfo; perSecond?: true }
+// damage a second it burns (or bleeds) for, the health it gives back and the shield it gives. It is found in the ability itself, so it is the ability's own number, and retuning the
+// ability retunes this. `perSecond` is a heal that a pulse repeats (a bot that heals every half second), told as what it comes to in a second. A `burnPerStack` is a burn that is
+// this much a second for each stack its target carries.
+export type AbilityNumber = { kind: 'damage' | 'burn' | 'burnPerStack' | 'bleed' | 'spore' | 'heal' | 'shield'; amount: AmountInfo; perSecond?: true }
 
 // An amount as many times over as there are of it in a second.
 function times(amount: AmountInfo, factor: number): AmountInfo {
@@ -14,7 +15,13 @@ function times(amount: AmountInfo, factor: number): AmountInfo {
     const ratio = amount.ratios[key]
     if (ratio) ratios[key] = ratio * factor
   }
-  return { base: amount.base * factor, perStack: amount.perStack * factor, perMissingHealth: amount.perMissingHealth * factor, ratios }
+  return {
+    base: amount.base * factor,
+    perStack: amount.perStack * factor,
+    perMissingHealth: amount.perMissingHealth * factor,
+    ratios,
+    ...(amount.healthLost ? { healthLost: { share: amount.healthLost.share * factor, ticks: amount.healthLost.ticks } } : {}),
+  }
 }
 
 const found = new WeakMap<AbilityDef, readonly AbilityNumber[]>()
@@ -42,6 +49,9 @@ function collect(def: AbilityDef): AbilityNumber[] {
       switch (info.kind) {
         case 'damage':
         case 'burn':
+        case 'burnPerStack':
+        case 'bleed':
+        case 'spore':
         case 'heal':
         case 'shield': {
           if (!info.amount) break
@@ -89,4 +99,20 @@ export type ScalingStats = Required<Scaling>
 // as it is with none, since there is no target.
 export function amountValue(amount: AmountInfo, stats: ScalingStats): number {
   return SCALING_KEYS.reduce((sum, key) => sum + (amount.ratios[key] ?? 0) * stats[key], amount.base)
+}
+
+// What the heals an ability gives (the ones it tells: see `abilityNumbers`) come to for a caster with these stats, cast now on itself: with the share of the health it is
+// missing, and of the health it has lost lately (`healthLost`, which is given how many ticks back to look), that they add. It is what the page draws on the health bar of one whose
+// ability says so (`AbilityDef.healthBarPreview`). A heal a pulse repeats is left out, as it is not given all at once; a branch that chooses between two heals tells the bigger.
+export function healPreview(
+  def: AbilityDef,
+  stats: ScalingStats,
+  caster: { missingHealth: number; healthLost: (withinTicks: number) => number },
+): number {
+  const heals = abilityNumbers(def)
+    .filter((number) => number.kind === 'heal' && !number.perSecond)
+    .map(({ amount }) => amountValue(amount, stats)
+      + amount.perMissingHealth * caster.missingHealth
+      + (amount.healthLost ? amount.healthLost.share * caster.healthLost(amount.healthLost.ticks) : 0))
+  return Math.max(0, Math.round(Math.max(0, ...heals)))
 }

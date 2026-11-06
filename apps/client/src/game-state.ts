@@ -16,11 +16,17 @@ import {
   GAME_TPS,
   FINALIZE_LAG,
   abilityOnKey,
+  arenaMaxRounds,
+  arenaResetTick,
+  arenaRoundsToWin,
+  BACK_ABILITY_ID,
   buyProblem,
+  castRangeAgainst,
   clamp,
   distanceBetween,
   hasStatus,
   hastedCooldownTicks,
+  healPreview,
   getAbilityDef,
   getItem,
   getEntityDef,
@@ -38,6 +44,7 @@ import {
   NOT_IN_SHOP,
   quantizeDirection,
   Simulator,
+  walkingSpeed,
   withinCastRange,
   withItems,
   withStatBuffs,
@@ -65,11 +72,13 @@ import {
   type ItemSlot,
   type Marker,
   type MoveOrder,
+  type SteerOrder,
   type SimCharacter,
   type ObjectiveUnit,
   type SellOrder,
   type ShopZone,
   type SimEntity,
+  type Status,
   type Terrain,
   type Vector2,
   type XpProgress,
@@ -147,11 +156,24 @@ export type RenderedCharacter =
     // The bar over a champion that shows how long one of its statuses has left, such as a rage (see `ChampionMeterDef`): how full it is, from 0 to 1, and its
     // colour. Only there while it has any left.
     meter?: { fraction: number; color: string }
+    // For the champion you control, when one of its abilities that heals it shows on its health bar what it would heal (`AbilityDef.healthBarPreview`) and is ready: how much, in
+    // health. Left out otherwise, and when it would heal nothing.
+    healPreview?: number
+    // While it is going back (channelling Back), how far through it is, from 0 as it starts to 1 as it is taken home: the page draws it round the body for everyone who can see it.
+    // Left out otherwise.
+    backing?: number
     hasted: boolean
     slowed: boolean
     rooted: boolean
     stunned: boolean
+    // Knocked up (see `knockUp`): held as a stun holds it.
+    airborne: boolean
+    // While it is airborne, how high it is drawn, as a share of the most a knock-up lifts it: it rises and falls back over the knock-up. Left out on the ground.
+    lift?: number
     burning: boolean
+    bleeding: boolean
+    // Carrying an Ent's spore (see `spore`), which his abilities burst.
+    spored: boolean
     poisoned: boolean
     blinded: boolean
     silenced: boolean
@@ -163,7 +185,7 @@ export type RenderedCharacter =
     invisible: boolean
     // Dodging every auto attack aimed at it.
     dodging: boolean
-    // What it is in the middle of, if anything: an auto attack or an ability, windup or backswing.
+    // What it is in the middle of, if anything: an auto attack or an ability winding up.
     action?: ActionView
     // Range and cooldown include active attack-range and attack-speed bonuses.
     attackRange: number
@@ -231,6 +253,17 @@ function characterName(character: SimCharacter): string {
 // A champion's stats at the level a frame has it, with what its items and its statuses add to them.
 function statsOf(champion: Champion, state: CharacterTickSnapshot | undefined): ChampionStats {
   return withStatBuffs(withItems(champion.statsAt(state?.getLevel() ?? 1), state?.getItems()), state?.getStatuses())
+}
+
+// How high a knocked-up character is drawn at `tick`, as a share of the most a knock-up lifts it: up and back down over the knock-up that has the longest to run, as an arc.
+// Nothing on the ground.
+function liftOf(statuses: readonly Status[], tick: number): { lift?: number } {
+  const knockUp = statuses
+    .filter((status) => status.kind === 'airborne')
+    .sort((left, right) => right.endTick - left.endTick)[0]
+  if (!knockUp || knockUp.endTick <= knockUp.startTick) return {}
+  const through = clamp((tick - knockUp.startTick) / (knockUp.endTick - knockUp.startTick), 0, 1)
+  return { lift: Math.sin(Math.PI * through) }
 }
 
 function countMarkers(markers: readonly Marker[]): Record<string, number> {
@@ -404,9 +437,16 @@ export class ClientGameState {
     return { applied: true, confirmedOrders }
   }
 
-  createMoveOrder(target: Vector2, now = performance.now()): MoveOrder | undefined {
+  // `windups` is what the walk does to a windup under way (see `MoveOrderSchema`); left out, the game's own rule.
+  createMoveOrder(target: Vector2, now = performance.now(), windups: { keepAuto?: boolean; keepCast?: boolean } = {}): MoveOrder | undefined {
     if (!this.localCharacter) return undefined
-    return this.issueOrder<MoveOrder>({ tick: this.nextOrderTick(now), type: 'move', target: { ...target } }, now)
+    return this.issueOrder<MoveOrder>({ tick: this.nextOrderTick(now), type: 'move', target: { ...target }, ...windups }, now)
+  }
+
+  // Steers the controlled champion along a direction (a unit vector), or stops steering it with none: what the movement keys give (see `MovementKeys`).
+  createSteerOrder(direction: Vector2, now = performance.now(), windups: { keepAuto?: boolean; keepCast?: boolean } = {}): SteerOrder | undefined {
+    if (!this.localCharacter) return undefined
+    return this.issueOrder<SteerOrder>({ tick: this.nextOrderTick(now), type: 'steer', direction: { ...direction }, ...windups }, now)
   }
 
   createAttackOrder(targetId: number, now = performance.now()): GameAttackOrder | undefined {
@@ -450,8 +490,9 @@ export class ClientGameState {
 
   // Aim is in arena coordinates. The ability is resolved from the slot now, so
   // the order names what was cast rather than which key was pressed. With `selfCast`, an ability for allies is cast on the champion itself, wherever the aim is (the
-  // Alt key), except one that is for the unit the champion has linked: see `abilitySelfCasts`.
-  createCastOrder(slot: number, aim: Vector2, now = performance.now(), selfCast = false): CastAttempt {
+  // Alt key), except one that is for the unit the champion has linked: see `abilitySelfCasts`. `attack` is whether a windup ends the attack the champion is making (see
+  // `CastOrderSchema`); left out, it does.
+  createCastOrder(slot: number, aim: Vector2, now = performance.now(), selfCast = false, attack: { keepAttacking?: boolean } = {}): CastAttempt {
     const ability = this.abilityInSlot(slot)
     if (!ability.ok) return ability
     const { localCharacterId } = ability
@@ -472,7 +513,27 @@ export class ClientGameState {
     if (!aimed.ok) return { ok: false, reason: aimed.reason }
     const { target } = aimed
 
-    const order = this.issueOrder<CastOrder>({ tick, type: 'cast', abilityId: def.id, target, origin }, now)
+    const order = this.issueOrder<CastOrder>({ tick, type: 'cast', abilityId: def.id, target, origin, ...attack }, now)
+    return order ? { ok: true, order } : { ok: false, reason: 'The cast could not be scheduled.' }
+  }
+
+  // Back: the champion channels, and is taken to its spawn if it is left alone (see `BACK_ABILITY_ID`). Every champion has it, and it is on a key of its own, not one of its
+  // abilities. It is refused where the simulator would drop it: while the champion cannot act, or carries a flag.
+  createBackOrder(now = performance.now()): CastAttempt {
+    const localCharacterId = this.localCharacterId
+    const def = getAbilityDef(BACK_ABILITY_ID)
+    if (localCharacterId === undefined || !def) return { ok: false, reason: 'Your champion is not available.' }
+    const tick = this.nextOrderTick(now)
+    const frame = this.simulator.at(tick)
+    const state = frame.get(localCharacterId)
+    if (!state) return { ok: false, reason: 'Your champion is not available.' }
+    const blocker = this.castBlocker(def, state, this.entityOut(frame, localCharacterId))
+    if (blocker) return { ok: false, reason: blocker }
+    const objective = this.simulator.at(tick - 1).getObjective()
+    if (objective?.kind === 'ctf' && objective.flags.some((flag) => flag.carrierId === localCharacterId)) {
+      return { ok: false, reason: 'You cannot go back while you carry a flag.' }
+    }
+    const order = this.issueOrder<CastOrder>({ tick, type: 'cast', abilityId: def.id, target: { mode: 'none' }, origin: state.getPosition() }, now)
     return order ? { ok: true, order } : { ok: false, reason: 'The cast could not be scheduled.' }
   }
 
@@ -517,9 +578,13 @@ export class ClientGameState {
   ): string | undefined {
     if (!state.getAbilityCooldown(def.id).ready) return `${def.id} is on cooldown.`
     const statuses = state.getStatuses()
-    if (hasStatus(statuses, 'stun')) return 'You cannot cast while stunned.'
-    if (hasStatus(statuses, 'fear')) return 'You cannot cast while feared.'
-    if (hasStatus(statuses, 'silence')) return 'You cannot cast while silenced.'
+    // An unstoppable ability (a cleanse) is cast through all of these (see `AbilityDef.unstoppable`).
+    if (!def.unstoppable) {
+      if (hasStatus(statuses, 'stun')) return 'You cannot cast while stunned.'
+      if (hasStatus(statuses, 'airborne')) return 'You cannot cast while airborne.'
+      if (hasStatus(statuses, 'fear')) return 'You cannot cast while feared.'
+      if (hasStatus(statuses, 'silence') && !def.universal) return 'You cannot cast while silenced.'
+    }
     if (!meetsRequirement(def, entityOut, (abilityId) => !state.getAbilityCooldown(abilityId).ready) && def.requires) {
       const base = def.requires.out
         ? `${def.id} needs your ${def.requires.entity} out`
@@ -554,10 +619,12 @@ export class ClientGameState {
     const origin = frame.get(localCharacterId)?.getPosition()
     if (!origin) return undefined
     const aimed = this.castTarget(def, origin, aim, now, frame, characters)
+    // Aimed at a unit it reaches farther to (`rangeAgainst`), the ring is drawn as far as it reaches to that one.
+    const aimedUnit = aimed.ok && aimed.target.mode === 'unit' ? frame.get(aimed.target.unitId) : undefined
     return {
       abilityId: def.id,
       targeting: def.targeting,
-      range: def.range,
+      range: aimedUnit ? castRangeAgainst(def, aimedUnit.getStatuses()) : def.range,
       ...(def.minRange ? { minRange: def.minRange } : {}),
       ...(def.indicator ? { indicator: { ...def.indicator } } : {}),
       ...(aimed.ok ? { target: aimed.target } : {}),
@@ -615,9 +682,11 @@ export class ClientGameState {
       unitId = unit.id
     }
     const target: CastTarget = { mode: 'unit', unitId }
-    const unitAt = frame.get(unitId)?.getPosition()
-    // Out of its reach it is still cast: the simulator walks the champion up to the target, as it does to attack an enemy, and casts on reaching it.
-    if (!unitAt || !withinCastRange(origin, unitAt, def.range)) return { ok: true, target, outOfRange: true }
+    const unit = frame.get(unitId)
+    const unitAt = unit?.getPosition()
+    // Out of its reach it is still cast: the simulator walks the champion up to the target, as it does to attack an enemy, and casts on reaching it. Its reach can be longer to
+    // this unit than to others (`rangeAgainst`), as the simulator will measure it.
+    if (!unitAt || !withinCastRange(origin, unitAt, castRangeAgainst(def, unit?.getStatuses() ?? []))) return { ok: true, target, outOfRange: true }
     return { ok: true, target }
   }
 
@@ -801,6 +870,17 @@ export class ClientGameState {
     return state ? { position: state.getPosition(), moving: state.getMoveTarget() !== undefined } : undefined
   }
 
+  // Whether the controlled champion is standing about, free to walk and doing nothing: alive, not walking, dashing, winding anything up or going after anyone, and not
+  // feared (which walks it, and takes no orders). It is when steering that the game has stopped (a fear that ran out, a respawn) is given again.
+  isLocalIdle(now = performance.now()): boolean {
+    const state = this.localState(now)
+    if (!state || state.isDead()) return false
+    return state.getMoveTarget() === undefined
+      && state.getAction() === undefined
+      && state.getAttackTarget() === undefined
+      && !state.getStatuses().some((status) => status.kind === 'fear')
+  }
+
   getLocalAttackTarget(now = performance.now()): number | undefined {
     return this.localState(now)?.getAttackTarget()
   }
@@ -970,6 +1050,30 @@ export class ClientGameState {
       return { kind: 'core', scores: rankScores(setup.teams, pointsOf(objective.scores)), ...limit, cores: coreViews }
     }
 
+    if (setup.kind === 'arena' && objective?.kind === 'arena') {
+      const roundsToWin = arenaRoundsToWin(setup)
+      // A box for every round the game can take, filled in with who won each as they are.
+      const slots = arenaMaxRounds(setup.teams.length, roundsToWin)
+      const nextRound = arenaResetTick(objective)
+      // The round being fought is the next after those won; a round that has just been won is already on the list, and is still the one shown until the next begins.
+      const current = objective.over?.winner !== undefined ? objective.rounds.length - 1 : objective.rounds.length
+      return {
+        kind: 'arena',
+        scores: rankScores(setup.teams, pointsOf(objective.scores)),
+        limit: roundsToWin,
+        rounds: Array.from({ length: slots }, (_, index) => (objective.rounds[index] === undefined ? {} : { winner: objective.rounds[index] })),
+        current: Math.min(current, slots - 1),
+        ...(objective.over && nextRound !== undefined
+          ? {
+            over: {
+              ...(objective.over.winner !== undefined ? { winner: objective.over.winner } : {}),
+              secondsLeft: Math.max(0, (nextRound - this.estimateTick(now)) / GAME_TPS),
+            },
+          }
+          : {}),
+      }
+    }
+
     return {
       kind: 'deathmatch',
       scores: rankScores(teamsInGame(), pointsOf(objective?.kind === 'deathmatch' ? objective.scores : {})),
@@ -977,20 +1081,30 @@ export class ClientGameState {
     }
   }
 
+  // How many seconds the game has been going: the game's own clock, which is the server's tick (the tick the game began on is 0) estimated forward to this moment, so that every
+  // player's page reads the same. The clock on the screen is this (`formatGameClock`); it stops when the page is told the game is over, and not before.
+  getGameSeconds(now = performance.now()): number {
+    return Math.max(0, this.estimateTick(now)) / GAME_TPS
+  }
+
   // How long until the controlled champion is back, in seconds, while it is dead: the game's respawn time
-  // from the tick it died on, which the rules can set.
+  // from the tick it died on, which the rules can set. In arena it is back when the next round begins, which is known once the round it fell in is over.
   getRespawnSecondsLeft(now = performance.now()): number | undefined {
     if (this.localCharacterId === undefined) return undefined
     const frame = this.getSnapshotAtEstimatedTick(now)
     const deathTick = frame.get(this.localCharacterId)?.getDeathTick()
-    if (deathTick === undefined || !this.simulator.canRespawn(this.localCharacterId, frame)) return undefined
-    return Math.max(0, (deathTick + this.simulator.respawnTicks - this.estimateTick(now)) / GAME_TPS)
+    if (deathTick === undefined) return undefined
+    const nextRound = arenaResetTick(frame.getObjective())
+    if (nextRound !== undefined) return Math.max(0, (nextRound - this.estimateTick(now)) / GAME_TPS)
+    if (!this.simulator.canRespawn(this.localCharacterId, frame)) return undefined
+    return Math.max(0, (deathTick + this.simulator.respawnTicksFor(this.localCharacterId, frame) - this.estimateTick(now)) / GAME_TPS)
   }
 
-  // Whether the controlled champion is dead for good: in Core Destruction, its team's core is broken, so it will not respawn.
+  // Whether the controlled champion is dead for good: in Core Destruction, its team's core is broken, so it will not respawn. In arena, it is out until the round is over.
   isLocalOutOfTheGame(now = performance.now()): boolean {
     if (this.localCharacterId === undefined) return false
     const frame = this.getSnapshotAtEstimatedTick(now)
+    if (arenaResetTick(frame.getObjective()) !== undefined) return false
     return frame.get(this.localCharacterId)?.isDead() === true && !this.simulator.canRespawn(this.localCharacterId, frame)
   }
 
@@ -1021,12 +1135,14 @@ export class ClientGameState {
         continue
       }
       for (const death of at.deaths) {
-        if (death.killerId !== localId) continue
+        const assisted = death.assistId === localId
+        if (death.killerId !== localId && !assisted) continue
         // A victim cannot die twice in the frames the simulator keeps (it takes longer than that to come back), so a death of the same victim as
         // near as that to one already told is that kill again, moved to another tick by a late order, and is not told twice.
         const told = this.rewardedAt.get(death.victimId)
         if (told !== undefined && Math.abs(death.tick - told) <= GAME_SNAPSHOT_HISTORY_TICKS) continue
-        const paid = this.simulator.paidFor(death, at)
+        // An assist is paid experience only, a share of the kill's (see `assistXp`).
+        const paid = assisted ? { gold: 0, xp: this.simulator.assistPaidFor(death, at) } : this.simulator.paidFor(death, at)
         const position = at.get(death.victimId)?.getPosition()
         if (!paid || !position || (paid.gold <= 0 && paid.xp <= 0)) continue
         this.rewardedAt.set(death.victimId, death.tick)
@@ -1061,11 +1177,15 @@ export class ClientGameState {
     }
     const victim = person(death.victimId)
     if (!victim) return
+    // A monster falling is not news: the feed is for players, and for the structures they bring down.
+    if (this.simulator.characters.get(death.victimId)?.monster) return
     const killer = death.killerId === undefined ? undefined : person(death.killerId)
+    const assist = death.assistId === undefined ? undefined : person(death.assistId)
     this.killFeed = [...this.killFeed, {
       id,
       victim,
       ...(killer ? { killer } : {}),
+      ...(killer && assist ? { assist } : {}),
       at: performance.now(),
     }]
   }
@@ -1133,11 +1253,17 @@ export class ClientGameState {
         stacks: countMarkers(state?.getMarkers() ?? []),
         ...(linkedBy !== undefined ? { linkedBy } : {}),
         ...(meterDef && meterLeft > 0 ? { meter: { fraction: Math.min(1, meterLeft / meterDef.ticks), color: meterDef.color } } : {}),
+        ...this.healPreviewOf(character, state, snapshot.tick),
+        ...this.backingOf(state, now),
         hasted: hasStatus(statuses, 'haste'),
         slowed: hasStatus(statuses, 'slow'),
         rooted: hasStatus(statuses, 'root'),
         stunned: hasStatus(statuses, 'stun'),
+        airborne: hasStatus(statuses, 'airborne'),
+        ...liftOf(statuses, this.estimateTick(now)),
         burning: hasStatus(statuses, 'burn'),
+        bleeding: hasStatus(statuses, 'bleed'),
+        spored: hasStatus(statuses, 'spore'),
         poisoned: hasStatus(statuses, 'poison'),
         blinded: hasStatus(statuses, 'blind'),
         silenced: hasStatus(statuses, 'silence'),
@@ -1155,6 +1281,34 @@ export class ClientGameState {
       if (!activeCharacterIds.has(characterId)) this.renderedRemotePositions.delete(characterId)
     }
     return characters
+  }
+
+  // What the champion you control would heal now with an ability of its that shows that on its health bar (`AbilityDef.healthBarPreview`) and is ready to cast: the most of them, if
+  // any heals anything. Nothing for any other character.
+  private healPreviewOf(character: SimCharacter, state: CharacterTickSnapshot | undefined, tick: number): { healPreview?: number } {
+    if (character.id !== this.localCharacterId || !state || state.isDead()) return {}
+    const health = state.getHealthState()
+    const stats = statsOf(character.champion, state)
+    if (!health || !stats) return {}
+    const caster = { arcane: stats.arcane, attackDamage: stats.attackDamage, maxHealth: stats.maxHp, health: health.hp, level: state.getLevel() }
+    let most = 0
+    for (const abilityId of character.champion.castableAbilities()) {
+      const def = getAbilityDef(abilityId)
+      if (!def?.healthBarPreview || !state.getAbilityCooldown(def.id).ready) continue
+      most = Math.max(most, healPreview(def, caster, {
+        missingHealth: health.maxHp - health.hp,
+        healthLost: (withinTicks) => state.getHealthLostSince(tick - withinTicks),
+      }))
+    }
+    return most > 0 ? { healPreview: most } : {}
+  }
+
+  // How far through going back a character is (see `RenderedCharacter.backing`), read at the estimated tick and not the frame's, so the ring goes round smoothly between frames.
+  private backingOf(state: CharacterTickSnapshot | undefined, now: number): { backing?: number } {
+    const action = state?.getAction()
+    if (!action || action.kind !== 'cast' || action.abilityId !== BACK_ABILITY_ID) return {}
+    const length = action.launchTick - action.startTick
+    return { backing: length <= 0 ? 1 : clamp((this.estimateTick(now) - action.startTick) / length, 0, 1) }
   }
 
   getEntities(now = performance.now()): RenderedEntity[] {
@@ -1208,7 +1362,7 @@ export class ClientGameState {
     if (!state || !action) return {}
     // An ability with no windup goes off the moment it is cast, so there is no casting to show.
     if (action.kind === 'cast' && (getAbilityDef(action.abilityId)?.windUpTicks ?? 0) <= 0) return {}
-    const length = action.endTick - action.startTick
+    const length = action.launchTick - action.startTick
     const progress = length <= 0 ? 1 : clamp((this.estimateTick(now) - action.startTick) / length, 0, 1)
     let aimAt: Vector2 | undefined
     if (action.kind === 'attack') aimAt = snapshot.get(action.targetId)?.getPosition()
@@ -1370,7 +1524,7 @@ export class ClientGameState {
       return { position: rendered.position, dead }
     }
 
-    const moveSpeed = character.champion.moveSpeed + (itemTotals(snapshot.get(characterId)?.getItems()).moveSpeed ?? 0)
+    const moveSpeed = walkingSpeed(character.champion.moveSpeed, itemTotals(snapshot.get(characterId)?.getItems()).moveSpeed ?? 0)
     const distancePerTick = moveSpeed / GAME_TPS
     const positionErrorInTicks = distance / distancePerTick
     const catchupSpeedMultiplier = 1

@@ -13,6 +13,7 @@ import {
   monsters,
   Simulator,
   Terrain,
+  walkingSpeed,
   type DeathRecord,
   type HillArea,
   type ModeSetup,
@@ -194,7 +195,7 @@ for (const id of ['slime', 'golem']) {
     const hit = withPlayer(camp(monster), home(140), slowpoke)
     hit.addOrder(PLAYER, { id: 'hit', seq: 1, tick: spawned + 1, type: 'attack', targetId: MONSTER })
     // Long enough to walk up to them, wind up, and hit them four times.
-    const last = spawned + Math.ceil(140 / monster.champion.moveSpeed * GAME_TPS) + monster.champion.attackWindupTicks + 4 * attackCooldownTicks + 30
+    const last = spawned + Math.ceil(140 / walkingSpeed(monster.champion.moveSpeed) * GAME_TPS) + monster.champion.attackWindupTicks + 4 * attackCooldownTicks + 30
     const hits: number[] = []
     let health = slowpoke.maxHp
     play(hit, last, (tick) => {

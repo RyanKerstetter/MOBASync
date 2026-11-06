@@ -32,7 +32,6 @@ const hopper = (() => {
     targeting: 'point',
     range: 500,
     windUpTicks: 0,
-    backswingTicks: 0,
     cooldownTicks: 60,
     apply: [blink(aimPoint())],
   })

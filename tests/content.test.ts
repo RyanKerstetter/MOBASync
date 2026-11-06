@@ -3,6 +3,7 @@ import test from 'node:test'
 import { ServerGameState } from '../apps/server/src/game-state.ts'
 import {
   abilityDefs,
+  BACK_TICKS,
   champions,
   monsters,
   DEFAULT_CHAMPION_ID,
@@ -15,7 +16,7 @@ import {
   type Champion,
   type Vector2,
 } from '../packages/shared/src/index.ts'
-import { SHADOW_AUTO_BONUS, SHADOW_KEY } from '../packages/shared/src/abilities.ts'
+import { SHADOW_AUTO_BONUS, SHADOW_KEY, WINDUP_TICKS } from '../packages/shared/src/abilities.ts'
 import { testSpawns } from './test-spawns.ts'
 
 // These check the real roster is well-formed and that every ability and auto attack actually
@@ -74,7 +75,9 @@ function castable(champion: Champion): string[] {
 test('every ability is well-formed and belongs to a champion or a monster', () => {
   const used = new Set([...champions.values(), ...[...monsters.values()].map((monster) => monster.champion)].flatMap(castable))
   for (const def of abilityDefs.values()) {
-    assert.ok(used.has(def.id), `${def.id} is on a champion`)
+    // An ability every champion has (Back) is not on any one's list, and has nothing to wait for.
+    const everyones = def.universal === true
+    assert.ok(everyones || used.has(def.id), `${def.id} is on a champion`)
     if (def.requires) {
       assert.ok(getEntityDef(def.requires.entity), `${def.id} needs ${def.requires.entity}, which exists`)
     }
@@ -84,8 +87,10 @@ test('every ability is well-formed and belongs to a champion or a monster', () =
       assert.equal(recast.targeting === 'none' || recast.targeting === def.targeting, true, `${def.id}'s recast can be aimed`)
     }
     assert.ok(Number.isInteger(def.windUpTicks) && def.windUpTicks >= 0, `${def.id} windup`)
-    assert.ok(Number.isInteger(def.backswingTicks) && def.backswingTicks >= 0, `${def.id} backswing`)
-    assert.ok(Number.isInteger(def.cooldownTicks) && def.cooldownTicks > 0, `${def.id} cooldown`)
+    // An ability has no windup, or one of the kinds there are (`WINDUP_TICKS`), or is Back, which is a channel of its own; and none has a backswing.
+    assert.ok(def.windUpTicks === 0 || (Object.values(WINDUP_TICKS) as number[]).includes(def.windUpTicks) || def.windUpTicks === BACK_TICKS, `${def.id} winds up for a kind of windup the game has`)
+    assert.equal('backswingTicks' in def, false, `${def.id} has no backswing`)
+    assert.ok(Number.isInteger(def.cooldownTicks) && (def.cooldownTicks > 0 || everyones), `${def.id} cooldown`)
     assert.ok(def.range >= 0, `${def.id} range`)
     assert.ok(def.apply.length > 0, `${def.id} does something`)
     if (def.indicator?.innerRadius !== undefined) {

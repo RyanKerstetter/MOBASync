@@ -70,8 +70,8 @@ const held = (simulator: Simulator, id: number) => {
 
 // ---------------------------------------------------------------------------- the rule
 
-test('gold is on by default, and is a rule that is on or off', () => {
-  assert.equal(defaultRules().gold, true)
+test('a lobby starts without gold, and gold is a rule that is on or off', () => {
+  assert.equal(defaultRules().gold, false)
   assert.deepEqual(readRulesChange({ gold: false }), { change: { gold: false } })
   assert.deepEqual(readRulesChange({ gold: true }), { change: { gold: true } }, 'on is a change like off')
   for (const bad of ['no', 0, 1, null]) {
@@ -79,24 +79,25 @@ test('gold is on by default, and is a rule that is on or off', () => {
     assert.ok('problem' in read, `${String(bad)} was refused`)
     assert.match('problem' in read ? read.problem : '', /must be on or off/)
   }
-  const off = applyRulesChange(defaultRules(), { gold: false })
-  assert.equal(off.gold, false)
-  assert.equal(applyRulesChange(off, { respawnSeconds: 9 }).gold, false, 'a change to something else leaves it as it was')
-  assert.equal(applyRulesChange(off, { gold: true }).gold, true)
-  assert.equal(defaultRules().gold, true, 'and the defaults are not changed by it')
+  const on = applyRulesChange(defaultRules(), { gold: true })
+  assert.equal(on.gold, true)
+  assert.equal(applyRulesChange(on, { respawnSeconds: 9 }).gold, true, 'a change to something else leaves it as it was')
+  assert.equal(applyRulesChange(on, { gold: false }).gold, false)
+  assert.equal(defaultRules().gold, false, 'and the defaults are not changed by it')
 })
 
 test('a game of core destruction is told it has no gold when the rule is off, and no other game is, nor one with it on', () => {
   const off = applyRulesChange(defaultRules(), { gold: false })
   assert.equal(modeRules(off, 'core').noGold, true)
   for (const mode of ['deathmatch', 'koth', 'ctf'] as const) assert.equal('noGold' in modeRules(off, mode), false, `not for ${mode}`)
-  assert.equal('noGold' in modeRules(defaultRules(), 'core'), false, 'on is not there, so what a game is by default is as it was')
+  assert.equal(modeRules(defaultRules(), 'core').noGold, true, 'and a lobby that has not been touched is without it')
+  assert.equal('noGold' in modeRules(applyRulesChange(defaultRules(), { gold: true }), 'core'), false, 'on is not there, so a game with gold is as it was')
   // Rules that were made without a word of gold, such as a lobby from before there was the rule, are a game with gold.
   const { gold: _gold, ...old } = defaultRules()
   assert.equal('noGold' in modeRules(old as ReturnType<typeof defaultRules>, 'core'), false)
 
   assert.equal((createModeSetup('core', [1, 2], CORES, modeRules(off, 'core')) as { noGold?: true }).noGold, true)
-  assert.equal('noGold' in createModeSetup('core', [1, 2], CORES, modeRules(defaultRules(), 'core')), false)
+  assert.equal('noGold' in createModeSetup('core', [1, 2], CORES, modeRules(applyRulesChange(defaultRules(), { gold: true }), 'core')), false)
 })
 
 test('the rule is in the snapshot of a game that has it, and a page that joins the game gets it with it', () => {

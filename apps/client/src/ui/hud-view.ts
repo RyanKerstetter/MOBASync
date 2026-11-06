@@ -48,6 +48,8 @@ export type HudInput = {
   respawnSeconds?: number
   // The controlled champion is dead and will not come back (see `GameState.isLocalOutOfTheGame`).
   out?: boolean
+  // What the bar says then: that its core is down, if this is left out.
+  outText?: string
   abilities: readonly AbilitySlotView[]
 }
 
@@ -248,7 +250,7 @@ export function createHudView(container: HTMLElement, handlers?: HudHandlers) {
         healthShield.style.width = `${readout.shieldPercent}%`
         healthText.textContent = readout.shield ? `${readout.health}  ${readout.shield}` : readout.health
       }
-      if (input.dead && input.out) healthText.textContent = OUT_TEXT
+      if (input.dead && input.out) healthText.textContent = input.outText ?? OUT_TEXT
       else if (input.dead && input.respawnSeconds !== undefined) healthText.textContent = respawnText(input.respawnSeconds)
       while (slots.length < input.abilities.length) {
         const slot: HudSlot = {

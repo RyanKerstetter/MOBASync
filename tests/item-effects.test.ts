@@ -45,11 +45,11 @@ const gear = (id: string, slot: ItemSlot, effects: readonly ItemEffect[], stats:
 }).id
 
 // Flat damage, so what an item makes of it can be told from what the item adds to the stats.
-defineAbility({ id: 't-ie-blast', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [damage(100, enemiesInRadius(400))] })
+defineAbility({ id: 't-ie-blast', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [damage(100, enemiesInRadius(400))] })
 // The same, ready again almost at once, to cast again before an effect's cooldown is over.
-defineAbility({ id: 't-ie-jab', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 30, apply: [damage(100, enemiesInRadius(400))] })
+defineAbility({ id: 't-ie-jab', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 30, apply: [damage(100, enemiesInRadius(400))] })
 // A burn, 40 a second: 20 for each pulse.
-defineAbility({ id: 't-ie-torch', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [burn(scaled(40, {}), 180, enemiesInRadius(400))] })
+defineAbility({ id: 't-ie-torch', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [burn(scaled(40, {}), 180, enemiesInRadius(400))] })
 
 const fighter = defineChampion({
   id: 't-ie-fighter',

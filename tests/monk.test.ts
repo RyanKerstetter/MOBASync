@@ -129,7 +129,8 @@ const linkHeal = Math.round(LINK_HEAL + (LINK_HEAL_SCALING.arcane ?? 0) * monk.s
 // what is left to them. The tick the first blow lands on, which is the one the brute is told to attack on.
 const monkShare = (blow: number): number => Math.round(blow * LINK_SHARE * (1 - MONK_DAMAGE_REDUCTION) * monkResists)
 const teammateTakesOf = (blow: number, share = 1): number => Math.round(blow * share * teammateResists)
-const FIRST_BLOW = 20
+// The link is cast on tick 5 (see `fight`) and has gone off a windup later; the first blow lands a few ticks after that, with the link up.
+const FIRST_BLOW = goesOff('link', 5) + 3
 // A body with a blow of this size, that otherwise is the brute.
 const striker = (blow: number): Champion => new Champion({
   id: `t-monk-striker-${blow}`,
@@ -153,7 +154,7 @@ function blowSharing(points: number): number {
 function fight(linked: boolean, who: Champion = brute): Simulator {
   const simulator = scene([{ at: { x: HOME.x, y: HOME.y + 120 }, who: teammate, team: 1 }, { at: { x: HOME.x + 300, y: HOME.y + 120 }, who }])
   if (linked) simulator.addOrder(1, cast(5, 'link', at(2)))
-  simulator.addOrder(3, attack(20, 2))
+  simulator.addOrder(3, attack(FIRST_BLOW, 2))
   return simulator
 }
 
@@ -268,11 +269,11 @@ test('a teammate who goes out toward the edge of the link and comes back keeps i
 })
 
 test('a hit on the linked teammate is shared: Monk takes his share of it, and the teammate the rest', () => {
-  const frame = fight(true).at(20)
+  const frame = fight(true).at(FIRST_BLOW)
   assert.equal(teammate.maxHp - hp(frame, 2), teammateTakes(1 - LINK_SHARE))
   assert.equal(monk.maxHp - hp(frame, 1), monkTakes(LINK_SHARE))
 
-  const unlinked = fight(false).at(20)
+  const unlinked = fight(false).at(FIRST_BLOW)
   assert.equal(teammate.maxHp - hp(unlinked, 2), teammateTakes(1), 'and with no link the teammate takes all of it')
   assert.equal(hp(unlinked, 1), monk.maxHp, 'and Monk none')
 })
@@ -323,7 +324,7 @@ test('what breaks the link is his health as it is: a share he would have lived t
   assert.equal(hp(simulator.at(landing(lived)), 1), worn, 'the last of the blows he lives through takes him down to what is left')
   assert.equal(marks(simulator.at(landing(lived)), 2, LINK_KEY).length, 1, 'with the link still up')
   const breaking = simulator.at(landing(lived + 1))
-  assert.equal(hp(breaking, 1), worn, 'the next would kill him, so he is not hurt by it')
+  assert.equal(hp(breaking, 1), Math.min(monk.maxHp, worn + linkHeal), 'the next would kill him, so he is not hurt by it, and the break heals him as Link Heal does')
   assert.equal(marks(breaking, 2, LINK_KEY).length, 0, 'and the link is broken')
 })
 
@@ -334,8 +335,8 @@ test('his shield counts toward what he can take, so a share that health and shie
   assert.ok(monkShare(survivable) >= monk.maxHp, 'a share that his health alone could not take')
   const guarded = (blow: number): Simulator => {
     const simulator = fight(true, striker(blow))
-    // After the link has gone off and its backswing is over, and well before the blow lands.
-    simulator.addOrder(1, cast(14, 'guard', none))
+    // Right after the link has gone off (guard has no windup), and before the blow lands.
+    simulator.addOrder(1, cast(goesOff('link', 5) + 1, 'guard', none))
     return simulator
   }
 
@@ -393,7 +394,6 @@ defineAbility({
   targetsAllies: true,
   range: 450,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: 6000,
   apply: [mark(BOND_KEY, Infinity, targetUnit(), { cap: 1 })],
 })
@@ -444,6 +444,10 @@ test('link heal on the linked teammate heals them and ends the link: no more sha
   const missing = teammate.maxHp - hp(before, 2)
   assert.ok(missing > 0, 'the teammate was hurt, so there is something to heal')
   assert.equal(hp(frame, 2) - hp(before, 2), Math.min(missing, linkHeal), 'the teammate is healed by what the link says, or what they are missing if that is less')
+  // And Monk is too, for the whole of it: the link took a share of the blows, so he has something to be given back, and the heal is not shared out between them.
+  const monkMissing = monk.maxHp - hp(before, 1)
+  assert.ok(monkMissing > 0, 'Monk was hurt too, by his share of the blows')
+  assert.equal(hp(frame, 1) - hp(before, 1), Math.min(monkMissing, linkHeal), 'Monk is healed by the same, or what he is missing if that is less')
   assert.equal(marks(frame, 2, LINK_KEY).length, 0, 'the link is used up: it is off them')
   assert.equal(entitiesOf(frame, 1, 'link').length, 0, 'and gone with it, so the key is Link again at once')
   assert.equal(ready(frame, 1, 'link'), false, 'link starts its cooldown now')
@@ -452,7 +456,7 @@ test('link heal on the linked teammate heals them and ends the link: no more sha
   assert.equal(abilityDefs.get('link')?.cooldownTicks, LINK_COOLDOWN_TICKS)
 
   // The next blow is all the teammate's.
-  const second = 20 + BLOW_EVERY
+  const second = FIRST_BLOW + BLOW_EVERY
   assert.equal(hp(simulator.at(second - 1), 2) - hp(simulator.at(second), 2), teammateTakes(1))
   assert.equal(hp(simulator.at(second - 1), 1), hp(simulator.at(second), 1), 'and Monk takes none of it')
 })
@@ -501,8 +505,8 @@ test('link heal on someone he has not linked heals no one and is given back whol
   ])
   simulator.addOrder(1, cast(5, 'link', at(2)))
   // A brute for each of them, so both are hurt and a heal on either would show.
-  simulator.addOrder(4, attack(20, 2))
-  simulator.addOrder(5, attack(20, 3))
+  simulator.addOrder(4, attack(FIRST_BLOW, 2))
+  simulator.addOrder(5, attack(FIRST_BLOW, 3))
   simulator.addOrder(1, cast(60, 'linkheal', at(3)))
   const landing = goesOff('linkheal', 60)
   const frame = simulator.at(landing)
@@ -553,7 +557,7 @@ test('the link is over when Monk dies, and when the teammate dies', () => {
   const afterMonk = monkDies.at(60)
   assert.equal(entitiesOf(afterMonk, 1, 'link').length, 0, 'the link is gone')
   assert.equal(marks(afterMonk, 2, LINK_KEY).length, 0, 'and so is the mark on the teammate')
-  const second = 20 + BLOW_EVERY
+  const second = FIRST_BLOW + BLOW_EVERY
   assert.equal(hp(monkDies.at(second - 1), 2) - hp(monkDies.at(second), 2), teammateTakes(1), 'a blow is the teammate\'s alone')
 
   const mateDies = fight(true)
@@ -862,7 +866,8 @@ test('with the link up the Q key is Link Heal, which goes to the linked teammate
   const heal = gameState.createCastOrder(slot, { x: 900, y: 900 }, now)
   assert.ok(heal.ok)
   assert.deepEqual([heal.order.abilityId, heal.order.target], ['linkheal', at(2)], 'so the cast is for them with the cursor nowhere near')
-  const onHim = gameState.createCastOrder(slot, { x: 100, y: 100 }, now)
+  // The cast above is in this page's game now and has no windup, so it is spent: a page of its own for the next.
+  const onHim = linkedClient().gameState.createCastOrder(slot, { x: 100, y: 100 }, now)
   assert.ok(onHim.ok)
   assert.deepEqual([onHim.order.abilityId, onHim.order.target], ['linkheal', at(2)], 'and with it on him')
 })
@@ -906,7 +911,8 @@ test('the alt key leaves Link Heal and the abilities with no one to aim at as th
   const recast = gameState.createCastOrder(key('link'), faraway, now, true)
   assert.ok(recast.ok)
   assert.deepEqual([recast.order.abilityId, recast.order.target], ['linkheal', at(2)], 'and with Alt held it still goes to them')
-  const plain = gameState.createCastOrder(key('link'), { x: 300, y: 100 }, now)
+  // A page of its own, since the cast above is in this one's game and has no windup, so it is spent.
+  const plain = linkedClient().gameState.createCastOrder(key('link'), { x: 300, y: 100 }, now)
   assert.ok(plain.ok)
   assert.deepEqual(plain.order.target, at(2), 'as it does without')
 

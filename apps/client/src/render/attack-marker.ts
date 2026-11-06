@@ -25,13 +25,14 @@ export function chooseAttackMarkers(input: {
   return markers
 }
 
-// Small and close to the body: a hint, not a second outline.
+// Small and close to the body: a hint, not a second outline. `scale` draws it bigger, the gap to the body and the ticks alike (the lock, by the
+// graphics menu's attack marker size).
 const GAP = 3
 const TICK_LENGTH = 5
 
-export function layoutAttackMarker(bodyRadius: number): AttackMarkerShape {
-  const inner = bodyRadius + GAP
-  const outer = inner + TICK_LENGTH
+export function layoutAttackMarker(bodyRadius: number, scale = 1): AttackMarkerShape {
+  const inner = bodyRadius + GAP * scale
+  const outer = inner + TICK_LENGTH * scale
   return {
     ticks: [
       { from: { x: 0, y: -outer }, to: { x: 0, y: -inner } },
@@ -46,4 +47,11 @@ export function layoutAttackMarker(bodyRadius: number): AttackMarkerShape {
 export const ATTACK_MARKER_STYLE: Record<AttackMarkerKind, { color: string; width: number; alpha: number }> = {
   hover: { color: '#ffd27a', width: 1.5, alpha: 0.8 },
   locked: { color: '#ff5a5f', width: 2, alpha: 0.95 },
+}
+
+// How a marker is drawn, at a scale: as big as `layoutAttackMarker` makes it, and as much thicker. The lock is drawn at `lockScale`, and the hover at its own size.
+export function attackMarkerLook(kind: AttackMarkerKind, bodyRadius: number, lockScale = 1): { shape: AttackMarkerShape; stroke: { color: string; width: number; alpha: number } } {
+  const scale = kind === 'locked' ? lockScale : 1
+  const style = ATTACK_MARKER_STYLE[kind]
+  return { shape: layoutAttackMarker(bodyRadius, scale), stroke: { ...style, width: style.width * scale } }
 }

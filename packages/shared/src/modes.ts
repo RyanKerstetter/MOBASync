@@ -1,4 +1,5 @@
 import {
+  GAME_ARENA_ROUND_PAUSE_TICKS,
   GAME_FLAG_RADIUS,
   GAME_HILL_CAPTURE_TICKS,
   GAME_HILL_POINT_TICKS,
@@ -27,6 +28,10 @@ import type { GameMode, HillArea, ModeSetup, ObjectiveState, Vector2 } from './i
 //   team with its core broken and no player alive is eliminated. The last team that is not eliminated wins. There is no score limit: it
 //   ends when a team is out. A core, like a turret, is hurt by attacks only, and is protected until its team's turrets are down.
 //   It can also be played by one team alone, with nobody to beat: no team is ever the last standing, and the game ends only when its players have left.
+// - arena: two or more teams, played in rounds. Nobody comes back during a round: it is won by the last team with a player alive, and a team that wins enough
+//   rounds (the lobby's limit) wins the game. A round that has been won waits a few seconds, and then everyone is put back at their spawn at full health for the next.
+//   A round in which the last players fall together has no winner and is played again. A game of n rounds to win with m teams is over after at most
+//   `arenaMaxRounds` = m(n - 1) + 1 rounds: every team can win n - 1 of them without anyone winning, and the next decides it.
 //
 // Only core destruction has an economy (`GameModeDef.economy`): experience and levels, gold and the shop, and shards. In the others a kill is a kill on
 // the scoreboard and nothing else: nobody levels, earns or buys, whatever they kill, and every champion is at level 1 all game. The lobby can take the gold out of
@@ -42,7 +47,7 @@ import type { GameMode, HillArea, ModeSetup, ObjectiveState, Vector2 } from './i
 // the simulator runs on every frame, so every peer works out the same hill and flags and a late order
 // that changes who was where changes them with it.
 
-export const GAME_MODE_IDS = ['deathmatch', 'koth', 'ctf', 'core'] as const
+export const GAME_MODE_IDS = ['deathmatch', 'koth', 'ctf', 'core', 'arena'] as const
 
 // The mode a new lobby starts on, if the map it starts on can be played in it (see `startingMode`).
 export const DEFAULT_GAME_MODE: GameMode = 'core'
@@ -52,7 +57,7 @@ export const DEFAULT_GAME_MODE: GameMode = 'core'
 export const FALLBACK_GAME_MODE: GameMode = 'deathmatch'
 
 // What a mode's score counts, which the lobby and the screen name it by.
-export type ScoreName = 'kills' | 'points' | 'captures' | 'cores'
+export type ScoreName = 'kills' | 'points' | 'captures' | 'cores' | 'rounds'
 
 export interface GameModeDef {
   id: GameMode
@@ -68,6 +73,8 @@ export interface GameModeDef {
   limitLabel: string
   defaultLimit: number
   maxLimit: number
+  // The least the leader can set it to, 0 (no limit) if absent. A mode that cannot go on without one, such as arena, which is won by rounds, sets it above 0.
+  minLimit?: number
 }
 
 export const GAME_MODES: readonly GameModeDef[] = [
@@ -111,7 +118,24 @@ export const GAME_MODES: readonly GameModeDef[] = [
     defaultLimit: 0,
     maxLimit: 0,
   },
+  {
+    id: 'arena',
+    name: 'Arena',
+    summary: 'Win a round by being the last team with a player alive. Win enough rounds to win the game. Needs two or more teams.',
+    scoreName: 'rounds',
+    economy: false,
+    limitLabel: 'Rounds to win',
+    defaultLimit: 3,
+    maxLimit: 10,
+    minLimit: 1,
+  },
 ]
+
+// The least and most a mode's limit can be set to: from 0 (no limit) unless the mode says otherwise, up to its most.
+export function limitRange(mode: GameMode): { min: number; max: number } {
+  const def = getGameMode(mode)
+  return { min: def.minLimit ?? 0, max: def.maxLimit }
+}
 
 // The mode a new lobby starts on, given the map it starts on: the default mode if the map can be played in it, and the fallback if not (or if
 // there is no map).
@@ -145,7 +169,7 @@ export type LobbyRules = {
   // Only core destruction has a use for it, the one mode with items: a champion that dies loses what it carries, but for what is in the slots it keeps
   // (`KEPT_ON_DEATH`, the pet). Its gold is kept, so it can buy again. Off by default.
   loseItemsOnDeath: boolean
-  // Only core destruction has a use for it too: whether a kill pays gold and there is a shop to spend it in. Off, the levels are all there is. On by default.
+  // Only core destruction has a use for it too: whether a kill pays gold and there is a shop to spend it in. Off, the levels are all there is. Off by default.
   gold: boolean
   scoreLimits: Record<GameMode, number>
 }
@@ -159,7 +183,7 @@ export function defaultRules(): LobbyRules {
     respawnSeconds: RESPAWN_SECONDS.default,
     captureSeconds: CAPTURE_SECONDS.default,
     loseItemsOnDeath: false,
-    gold: true,
+    gold: false,
     scoreLimits: Object.fromEntries(GAME_MODES.map((mode) => [mode.id, mode.defaultLimit])) as Record<GameMode, number>,
   }
 }
@@ -208,8 +232,9 @@ export function readRulesChange(raw: unknown): { change: RulesChange } | { probl
     for (const [id, value] of Object.entries(limits)) {
       if (!isGameMode(id)) return { problem: `"${id}" is not a game mode.` }
       const mode = getGameMode(id)
-      if (!isWhole(value, 0, mode.maxLimit)) {
-        return { problem: `${mode.limitLabel} must be a whole number from 0 (no limit) to ${mode.maxLimit}.` }
+      const { min, max } = limitRange(id)
+      if (!isWhole(value, min, max)) {
+        return { problem: `${mode.limitLabel} must be a whole number from ${min === 0 ? '0 (no limit)' : min} to ${max}.` }
       }
       change.scoreLimits[id] = value
     }
@@ -265,6 +290,9 @@ export function teamCountProblem(mode: GameMode, teamCount: number): string | un
   }
   if (mode === 'core' && (teamCount < 1 || teamCount > 2)) {
     return `Core Destruction needs 1 or 2 teams, and there ${teamCount === 1 ? 'is 1' : `are ${teamCount}`}.`
+  }
+  if (mode === 'arena' && teamCount < 2) {
+    return `Arena needs at least 2 teams, and there ${teamCount === 1 ? 'is 1' : `are ${teamCount}`}.`
   }
   return undefined
 }
@@ -338,6 +366,10 @@ export function createModeSetup(
       ...withRules,
     }
   }
+  if (mode === 'arena') {
+    // It is won by rounds, so it always has a number of them to win: the default when the rules give none.
+    return { kind: 'arena', teams: rankTeams(teams), ...withRules, scoreLimit: rules.scoreLimit ?? getGameMode('arena').defaultLimit }
+  }
   return { kind: 'deathmatch', ...withRules }
 }
 
@@ -353,7 +385,34 @@ export function initialObjective(setup: ModeSetup): ObjectiveState | undefined {
     }
   }
   if (setup.kind === 'core') return { kind: 'core', broken: [], eliminated: [], scores: {} }
+  if (setup.kind === 'arena') return { kind: 'arena', rounds: [], scores: {} }
   return undefined
+}
+
+// ---------------------------------------------------------------------------- arena
+
+type ArenaSetup = Extract<ModeSetup, { kind: 'arena' }>
+
+// How many rounds a team has to win to win a game of arena: what the leader set, or the default.
+export function arenaRoundsToWin(setup: ArenaSetup): number {
+  return setup.scoreLimit ?? getGameMode('arena').defaultLimit
+}
+
+// The most rounds a game of arena can take, with `teamCount` teams and `roundsToWin` to win: every team can win one fewer than it needs without anyone
+// having won, and the round after that decides it, so m(n - 1) + 1. With two teams that is 2n - 1, a best of 2n - 1. (A round with no winner is played
+// again, so it is not one of them.)
+export function arenaMaxRounds(teamCount: number, roundsToWin: number): number {
+  return teamCount * (roundsToWin - 1) + 1
+}
+
+// The teams with a player alive: in arena, the teams still in the round.
+export function teamsStanding(teams: readonly number[], units: readonly ObjectiveUnit[]): number[] {
+  return teams.filter((team) => units.some((unit) => unit.team === team && unit.alive))
+}
+
+// The tick the next round of arena begins on, while a round that has been decided is waiting for it: everyone is put back at their spawn on it (see the simulator).
+export function arenaResetTick(state: ObjectiveState | undefined): number | undefined {
+  return state?.kind === 'arena' && state.over ? state.over.tick + GAME_ARENA_ROUND_PAUSE_TICKS : undefined
 }
 
 // ---------------------------------------------------------------------------- the tick
@@ -473,6 +532,9 @@ export function advanceObjective(
   if (setup.kind === 'ctf') {
     return stepFlags(state?.kind === 'ctf' ? state : initialObjective(setup) as Extract<ObjectiveState, { kind: 'ctf' }>, setup.flags, units)
   }
+  if (setup.kind === 'arena') {
+    return stepArena(state?.kind === 'arena' ? state : initialObjective(setup) as ArenaState, setup.teams, units, tick)
+  }
   const kept = state?.kind === 'deathmatch' ? state : undefined
   if (killerTeams.length === 0) return kept
   const scores = { ...kept?.scores }
@@ -505,7 +567,8 @@ export function winningTeam(setup: ModeSetup, objective: ObjectiveState | undefi
     const standing = setup.teams.filter((team) => !objective.eliminated.includes(team))
     return standing.length === 1 ? standing[0] : undefined
   }
-  const limit = setup.scoreLimit
+  // Arena is won by rounds, so it always has a limit. Rounds are won one at a time, so the first team to reach it is ahead of every other.
+  const limit = setup.kind === 'arena' ? arenaRoundsToWin(setup) : setup.scoreLimit
   if (limit === undefined) return undefined
   const scores = objectiveScores(objective)
   const ahead = leadingTeam(scores)
@@ -515,6 +578,26 @@ export function winningTeam(setup: ModeSetup, objective: ObjectiveState | undefi
 type HillState = Extract<ObjectiveState, { kind: 'koth' }>
 type FlagsState = Extract<ObjectiveState, { kind: 'ctf' }>
 type CoreState = Extract<ObjectiveState, { kind: 'core' }>
+type ArenaState = Extract<ObjectiveState, { kind: 'arena' }>
+
+// A round of arena is over on the tick that leaves at most one team with a player alive: that team wins it (it goes on the list, and scores a round), and none does if
+// the last players fell together. Either way it waits `GAME_ARENA_ROUND_PAUSE_TICKS`, and nothing that happens in the wait changes who won it; the tick it ends,
+// everyone has been put back at their spawn (see the simulator), and the next round is fought.
+function stepArena(state: ArenaState, teams: readonly number[], units: readonly ObjectiveUnit[], tick: number): ArenaState {
+  const resetTick = arenaResetTick(state)
+  if (resetTick !== undefined) {
+    if (tick < resetTick) return state
+    const { over: _over, ...next } = state
+    return { ...next, rounds: [...state.rounds], scores: { ...state.scores } }
+  }
+  const standing = teamsStanding(teams, units)
+  if (standing.length > 1) return state
+  const winner = standing[0]
+  if (winner === undefined) return { ...state, rounds: [...state.rounds], scores: { ...state.scores }, over: { tick } }
+  const scores = { ...state.scores }
+  addPoint(scores, winner)
+  return { kind: 'arena', rounds: [...state.rounds, winner], scores, over: { tick, winner } }
+}
 
 // A team's core is broken when it is not standing, and stays broken: a core that is down never comes back. A team is eliminated when its core
 // is broken and none of its players is alive, since with its core down they cannot respawn. A team's score is how many cores of the others

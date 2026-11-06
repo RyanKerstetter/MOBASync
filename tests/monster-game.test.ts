@@ -298,7 +298,7 @@ test('monsters are named, and have their ranges and what they are doing, which p
   assert.equal(characters.find((character) => character.id === 1)?.monster, undefined)
 })
 
-test('monsters are not on the leaderboard or the team scores, and are in the killfeed when one dies', () => {
+test('monsters are not on the leaderboard or the team scores, and are not in the killfeed when one dies', () => {
   const state = clientWithMonster()
   assert.deepEqual(state.getLeaderboard().map((row) => row.name), ['Ann', 'Bob'])
   const view = state.getModeView(0)
@@ -314,8 +314,8 @@ test('monsters are not on the leaderboard or the team scores, and are in the kil
     fight.simulator.advanceTo(tick)
     if (tick > 12) fight.simulator.setCommitTick(tick - 12)
   }
-  const [line] = fight.getKillFeed(performance.now())
-  assert.deepEqual([line?.killer?.name, line?.victim.name, line?.victim.team], ['Ann', 'Camp Grunt', GAME_MONSTER_TEAM])
+  assert.equal(fight.simulator.at(30).get(10)?.isDead(), true, 'the monster did die')
+  assert.deepEqual(fight.getKillFeed(performance.now()), [], 'but a monster falling is not a line of the feed')
 })
 
 test('the debug view marks a monster\'s aggro range round it and its deaggro range round its home, and nothing for a player', () => {

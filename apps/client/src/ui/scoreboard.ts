@@ -28,12 +28,13 @@ export function leaderboardRows(
 export type KillFeedPerson = { name: string; team: number }
 
 // One line of the killfeed. A death with no killer (a champion that took its own last health) has
-// only its victim.
+// only its victim. The assist is the teammate of the killer who did the most damage after them, if there is one.
 export type KillFeedEntry = {
   // Tells one death from another, so it is only added once however often it is told of.
   id: string
   victim: KillFeedPerson
   killer?: KillFeedPerson
+  assist?: KillFeedPerson
   // The clock reading, in milliseconds, when it was added.
   at: number
 }

@@ -33,6 +33,8 @@ const MARKS: Array<[key: string, color: string]> = [
   ['feared', '#8e6bd9'],
   // Sage's mend on an enemy, which her autos feed on: a leaf green.
   ['mended', '#6fdc7e'],
+  // Fire Mage's burn stacks, three at the most: an ember orange.
+  ['ember', '#ff6a1f'],
   // (Monk's link is on the teammate it joins, but it is drawn as a beam between the two and not as a pip: see link-layer.ts.)
   // The turrets' ramp: one for each shot a turret or a core has landed on it without a pause, in a colour no other mark has.
   [TURRET_RAMP_KEY, '#ffe14d'],

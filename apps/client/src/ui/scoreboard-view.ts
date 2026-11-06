@@ -40,7 +40,9 @@ export function createScoreboardView(container: HTMLElement) {
         shownKillFeed = killFeedKey
         killFeed.replaceChildren(...feed.map((entry) => {
           const verb = element('span', 'kill-feed-verb', entry.killer ? 'defeated' : 'was defeated')
-          return element('li', '', ...(entry.killer ? [nameTag(entry.killer), verb, nameTag(entry.victim)] : [nameTag(entry.victim), verb]))
+          // Who killed whom, and with whose help: "Ann + Cat defeated Bob".
+          const killers = entry.killer ? [nameTag(entry.killer), ...(entry.assist ? [element('span', 'kill-feed-verb', '+'), nameTag(entry.assist)] : [])] : []
+          return element('li', '', ...(entry.killer ? [...killers, verb, nameTag(entry.victim)] : [nameTag(entry.victim), verb]))
         }))
       }
     },

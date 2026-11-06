@@ -12,6 +12,7 @@ import {
   getTeam,
   isGameMode,
   CAPTURE_SECONDS,
+  limitRange,
   mapRoomText,
   modeSupportProblem,
   RESPAWN_SECONDS,
@@ -55,6 +56,7 @@ const mapSummary = requiredElement<HTMLParagraphElement>('#map-summary')
 const modeSelect = requiredElement<HTMLSelectElement>('#mode-select')
 const modeSummary = requiredElement<HTMLParagraphElement>('#mode-summary')
 const modeWarning = requiredElement<HTMLParagraphElement>('#mode-warning')
+const respawnRow = requiredElement<HTMLElement>('#rule-respawn-row')
 const respawnInput = requiredElement<HTMLInputElement>('#rule-respawn')
 const captureRow = requiredElement<HTMLElement>('#rule-capture-row')
 const captureInput = requiredElement<HTMLInputElement>('#rule-capture')
@@ -277,16 +279,17 @@ captureInput.max = String(CAPTURE_SECONDS.max)
 captureInput.step = '1'
 
 // One score limit for each mode, and only the selected mode's is shown: a kill limit means nothing to a game of
-// capture the flag. A limit of 0 is no limit.
+// capture the flag. A limit of 0 is no limit, for a mode that can have none (arena, won by rounds, cannot).
 const limitRows = new Map<GameMode, { row: HTMLElement; input: HTMLInputElement }>()
 for (const mode of GAME_MODES) {
+  const { min, max } = limitRange(mode.id)
   const input = element('input')
   input.type = 'number'
-  input.min = '0'
-  input.max = String(mode.maxLimit)
+  input.min = String(min)
+  input.max = String(max)
   input.step = '1'
   input.addEventListener('change', () => void changeRules({ scoreLimits: { [mode.id]: input.valueAsNumber } }))
-  const row = element('label', 'rule-row', element('span', '', `${mode.limitLabel} (0 for no limit)`), input)
+  const row = element('label', 'rule-row', element('span', '', min === 0 ? `${mode.limitLabel} (0 for no limit)` : mode.limitLabel), input)
   row.hidden = true
   limitList.append(row)
   limitRows.set(mode.id, { row, input })
@@ -308,6 +311,8 @@ function showNumber(input: HTMLInputElement, value: number, force: boolean): voi
 // limit of the mode that is selected. Everyone sees them; only the leader can change them, and only until the game starts.
 function renderRules(lobby: Lobby, isLeader: boolean, force = false): void {
   const editable = isLeader && lobby.game.status === 'idle'
+  // In arena nobody respawns during a round: everyone comes back when it is over.
+  respawnRow.hidden = lobby.mode === 'arena'
   respawnInput.disabled = !editable
   showNumber(respawnInput, lobby.rules.respawnSeconds, force)
   captureRow.hidden = lobby.mode !== 'koth'

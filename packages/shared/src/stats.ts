@@ -1,3 +1,5 @@
+import { GAME_MOVE_SPEED_MULTIPLIER } from './constants.js'
+
 // What a champion is made of, and how it grows. A champion has two blocks of the stats that grow (`StatBlock`): its `base`, which is what it
 // is at level 1, and its `growth`, which is what each level after that adds. The stats a character has at a moment are
 // `Champion.statsAt(level)`, and the level is from the experience in its frame (see progression.ts), which is why a stat can change the
@@ -87,6 +89,13 @@ export class StatBlock implements StatValues {
       arcane: this.arcane + growth.arcane * levels,
     }
   }
+}
+
+// How fast a body walks before any status, in world units a second: what it is written with and what its items add to it, times the game's move speed multiplier
+// (`GAME_MOVE_SPEED_MULTIPLIER`). The one place a walking speed is worked out, so the simulator that moves a body, the page that draws it, and the numbers a player is shown
+// cannot disagree. Called with an item's move speed alone (no base) it is what that item really adds.
+export function walkingSpeed(baseSpeed: number, itemSpeed = 0): number {
+  return (baseSpeed + itemSpeed) * GAME_MOVE_SPEED_MULTIPLIER
 }
 
 // The stats a 'stat' status can add to (see `statBuff` in effects.ts).

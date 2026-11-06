@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { ClientGameState, type RenderedCharacter } from '../apps/client/src/game-state.ts'
-import { GAME_TPS, getMonster, type Monster, type Vector2 } from '../packages/shared/src/index.ts'
+import { GAME_TPS, getMonster, walkingSpeed, type Monster, type Vector2 } from '../packages/shared/src/index.ts'
 import { defineChampion, defineMonster, killAt } from './fixtures.ts'
 
 // What is drawn when something comes back to life: it is where it respawns from the first frame it is alive, and does not slide there from where it died. (A character that
@@ -141,6 +141,6 @@ test('a monster that walks home after giving up is drawn walking smoothly, a fra
   })
   assert.ok(walkedHome > 0, 'it went home')
   // The most it can be seen to move in a frame is the fastest the page's catching up goes, which is three times the pace it walks at.
-  assert.ok(biggestStep <= 3 * home.champion.moveSpeed / GAME_TPS / FRAMES_PER_TICK + 1e-6, `no step in a frame bigger than that: ${biggestStep.toFixed(2)}`)
+  assert.ok(biggestStep <= 3 * walkingSpeed(home.champion.moveSpeed) / GAME_TPS / FRAMES_PER_TICK + 1e-6, `no step in a frame bigger than that: ${biggestStep.toFixed(2)}`)
   assert.ok(previous && distance(previous, HOME) < home.ai.homeRadius, 'and it ended at its post')
 })

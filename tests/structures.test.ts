@@ -203,14 +203,14 @@ test('nothing that is not an attack hurts a protected turret, and what an attack
 // ---------------------------------------------------------------------------- only attacks
 
 const REACH = 600
-const blast = defineAbility({ id: 'ts-blast', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [damage(300, enemiesInRadius(REACH))] })
-const drain = defineAbility({ id: 'ts-drain', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [loseHealth(200, enemiesInRadius(REACH))] })
-const chill = defineAbility({ id: 'ts-chill', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [slow(0.5, 300, enemiesInRadius(REACH))] })
-const freeze = defineAbility({ id: 'ts-freeze', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [stun(60, enemiesInRadius(REACH))] })
-const pin = defineAbility({ id: 'ts-pin', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [root(300, enemiesInRadius(REACH))] })
-const scorch = defineAbility({ id: 'ts-scorch', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [burn(40, 300, enemiesInRadius(REACH))] })
-const brand = defineAbility({ id: 'ts-brand', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [mark('ts-brand', 300, enemiesInRadius(REACH))] })
-const shove = defineAbility({ id: 'ts-shove', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [knockback(200, 900, enemiesInRadius(REACH))] })
+const blast = defineAbility({ id: 'ts-blast', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [damage(300, enemiesInRadius(REACH))] })
+const drain = defineAbility({ id: 'ts-drain', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [loseHealth(200, enemiesInRadius(REACH))] })
+const chill = defineAbility({ id: 'ts-chill', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [slow(0.5, 300, enemiesInRadius(REACH))] })
+const freeze = defineAbility({ id: 'ts-freeze', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [stun(60, enemiesInRadius(REACH))] })
+const pin = defineAbility({ id: 'ts-pin', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [root(300, enemiesInRadius(REACH))] })
+const scorch = defineAbility({ id: 'ts-scorch', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [burn(40, 300, enemiesInRadius(REACH))] })
+const brand = defineAbility({ id: 'ts-brand', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [mark('ts-brand', 300, enemiesInRadius(REACH))] })
+const shove = defineAbility({ id: 'ts-shove', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [knockback(200, 900, enemiesInRadius(REACH))] })
 const ABILITIES = [blast, drain, chill, freeze, pin, scorch, brand, shove].map((ability) => ability.id)
 const caster = defineChampion({ ...brawler, id: 't-ss-caster', abilities: ABILITIES })
 const dummy = defineChampion({ ...brawler, id: 't-ss-dummy', base: { ...brawler.base, maxHp: 3000 }, abilities: [] })
@@ -262,7 +262,6 @@ test('a turret that an attack has hurt is not healed by an ability, though a cha
     targeting: 'none',
     range: 0,
     windUpTicks: 0,
-    backswingTicks: 0,
     cooldownTicks: 600,
     apply: [loseHealth(300), heal(200, alliesInRadius(REACH))],
   })

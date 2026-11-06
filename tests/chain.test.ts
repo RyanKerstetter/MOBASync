@@ -413,15 +413,53 @@ test('a stun breaks the charge of whirl, and it does not go off', () => {
 // ---------------------------------------------------------------------------- Lunge
 
 const lunge = abilityDefs.get('lunge')
+// A point `away` from where he stands, to the east unless it says otherwise.
+const lungeTo = (away: number, dir: Vector2 = { x: 1, y: 0 }): CastTarget => ({ mode: 'point', point: { x: HOME.x + dir.x * away, y: HOME.y + dir.y * away } })
 
-test('lunge dashes the way it is aimed, as far as it says, with no target', () => {
-  assert.ok(lunge && lunge.targeting === 'direction')
+// Where he is when his dash is over, and whether it began on the tick it was cast, if it was cast at the target on tick 1.
+function lunged(target: CastTarget): { dashed: boolean; end: Vector2 } {
   const simulator = scene([])
-  simulator.addOrder(1, cast(1, 'lunge', east))
-  assert.equal(simulator.at(1).get(1)?.isDashing(), true)
+  simulator.addOrder(1, cast(1, 'lunge', target))
+  const dashed = simulator.at(1).get(1)?.isDashing() === true
   let tick = 1
   while (simulator.at(tick).get(1)?.isDashing()) tick += 1
-  assert.ok(close(distance(simulator.at(tick).get(1)?.getPosition() ?? HOME, { x: HOME.x + lunge.range, y: HOME.y }), 0))
+  return { dashed, end: simulator.at(tick).get(1)?.getPosition() ?? HOME }
+}
+
+test('lunge dashes to the point it is aimed at, as far off as its range, and has no minimum', () => {
+  assert.ok(lunge && lunge.targeting === 'point')
+  assert.equal(lunge.minRange ?? 0, 0, 'it can be aimed at any point from where he stands out to its range')
+
+  const far = lunged(lungeTo(lunge.range))
+  assert.equal(far.dashed, true)
+  assert.ok(close(distance(far.end, { x: HOME.x + lunge.range, y: HOME.y }), 0), 'at the edge of its range it goes the whole way')
+
+  // A point nearer than that is where he stops, short of the range, in whatever way it is.
+  const short = lunge.range / 4
+  const near = lunged(lungeTo(short))
+  assert.equal(near.dashed, true)
+  assert.ok(close(distance(near.end, { x: HOME.x + short, y: HOME.y }), 0), 'he stops there and does not go on to the range')
+  const up = lunged(lungeTo(short, { x: 0, y: -1 }))
+  assert.ok(close(distance(up.end, { x: HOME.x, y: HOME.y - short }), 0), 'and it can be any way')
+})
+
+test('lunge aimed at his own feet goes nowhere, and is still cast', () => {
+  assert.ok(lunge)
+  const simulator = scene([])
+  simulator.addOrder(1, cast(1, 'lunge', lungeTo(0)))
+  const frame = simulator.at(1)
+  assert.equal(frame.get(1)?.getAbilityCooldown('lunge').ready, false, 'it was cast')
+  assert.equal(frame.get(1)?.isDashing(), false, 'with nowhere to dash')
+  assert.deepEqual(frame.get(1)?.getPosition(), HOME)
+  assert.ok((frame.get(1)?.getStatuses() ?? []).some((status) => status.kind === 'stat' && status.stat === 'attackSpeed'), 'and he is quickened')
+})
+
+test('a lunge aimed past its range is refused', () => {
+  assert.ok(lunge)
+  const simulator = scene([])
+  simulator.addOrder(1, cast(1, 'lunge', lungeTo(lunge.range * 2)))
+  assert.equal(simulator.at(1).get(1)?.getAbilityCooldown('lunge').ready, true, 'it was not cast')
+  assert.equal(simulator.at(1).get(1)?.isDashing(), false)
 })
 
 test('lunge quickens the attacks for a while and readies the next auto at once', () => {
@@ -431,7 +469,7 @@ test('lunge quickens the attacks for a while and readies the next auto at once',
   const swung = 1 + chain.attackWindupTicks
   const at = swung + 5
   assert.ok(at < 1 + chain.attackCooldownTicks, 'it is cast between two autos')
-  simulator.addOrder(1, cast(at, 'lunge', { mode: 'direction', dir: { x: 0, y: -1 } }))
+  simulator.addOrder(1, cast(at, 'lunge', lungeTo(lunge.range, { x: 0, y: -1 })))
 
   assert.ok(simulator.at(at - 1).get(1)?.getNextAttackTick() ?? 0 > at, 'the next auto was still some way off')
   const frame = simulator.at(at)
@@ -448,7 +486,7 @@ test('lunge can be cast while whirl charges, and the charge goes on', () => {
   const simulator = scene([])
   simulator.addOrder(1, cast(1, 'whirl', none))
   const at = 5
-  simulator.addOrder(1, cast(at, 'lunge', east))
+  simulator.addOrder(1, cast(at, 'lunge', lungeTo(lunge.range)))
 
   const frame = simulator.at(at)
   assert.equal(frame.get(1)?.getAbilityCooldown('lunge').ready, false, 'the lunge was cast')

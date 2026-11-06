@@ -6,6 +6,7 @@ import {
   itemsForSlot,
   NOT_IN_SHOP,
   sellValue,
+  walkingSpeed,
   type Inventory,
   type Item,
   type ItemSlot,
@@ -68,10 +69,12 @@ export function signedAmount(amount: number): string {
 // `detail` is a smaller line under it, such as what an ability's damage is made of.
 export type StatLine = { label: string; value: string; detail?: string }
 
-// What an item adds, a line for each stat, in the order the stats are listed in everywhere else.
+// What an item adds, a line for each stat, in the order the stats are listed in everywhere else. The move speed is what it really adds, in whole points: the game's move speed
+// multiplier is in it (`walkingSpeed`), as it is in what the champion walks at.
 export function itemStatLines(item: Pick<Item, 'stats'>): StatLine[] {
   return ITEM_STAT_KEYS.flatMap((stat) => {
-    const amount = item.stats[stat]
+    const written = item.stats[stat]
+    const amount = stat === 'moveSpeed' && written !== undefined ? Math.round(walkingSpeed(0, written)) : written
     return amount === undefined || amount === 0 ? [] : [{ label: STAT_LABELS[stat], value: signedAmount(amount) }]
   })
 }

@@ -44,7 +44,7 @@ const dummy = new Champion({
   abilities: [],
 })
 // Adds a full attack speed to whoever casts it, for as long as the tests last.
-const quicken = defineAbility({ id: 't-aw-quicken', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 1200, apply: [statBuff('attackSpeed', 1, 1200)] })
+const quicken = defineAbility({ id: 't-aw-quicken', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 1200, apply: [statBuff('attackSpeed', 1, 1200)] })
 
 // The swinger (1) attacks the dummy (2) from tick 1, and keeps on.
 function duel(champion: Champion): Simulator {
@@ -155,4 +155,37 @@ test('everything in the game that attacks has a windup that is a share, and a fa
     const faster = [{ kind: 'stat', stat: 'attackSpeed', amount: 1 }]
     assert.ok(body.attackWindupTicksWith(faster) <= body.attackWindupTicks, `${body.id} winds up no slower for being quicker`)
   }
+})
+
+// A walk given in the middle of a swing: by default it cancels the swing, and with `keepAuto` it lets the swing land and walks after it.
+test('a walk cancels an auto attack that is winding up, unless the order keeps it, and then the walk begins after the hit', () => {
+  const champion = swinger(1)
+  const hitAt = 1 + champion.attackWindupTicks
+  const walkAt = hitAt - 2
+  assert.ok(walkAt > 1, 'there is a windup to walk in the middle of')
+  // The ticks the dummy lost health on, and how far down the swinger had walked on each tick, in one pass forward.
+  const walked = (extra: { keepAuto?: boolean }): { hits: number[]; walkedBy: (tick: number) => number } => {
+    const simulator = duel(champion)
+    simulator.addOrder(1, { id: 'w', seq: 2, tick: walkAt, type: 'move', target: { x: A.x, y: 400 }, ...extra })
+    const last = 3 * champion.attackCooldownTicks
+    const hits: number[] = []
+    const down: number[] = []
+    let before = simulator.at(0).get(2)?.getHealth() ?? 0
+    for (let tick = 1; tick <= last; tick += 1) {
+      const frame = simulator.at(tick)
+      const now = frame.get(2)?.getHealth() ?? 0
+      if (now < before) hits.push(tick)
+      before = now
+      down[tick] = (frame.get(1)?.getPosition().y ?? A.y) - A.y
+    }
+    return { hits, walkedBy: (tick) => down[tick] }
+  }
+  const cancelled = walked({})
+  assert.deepEqual(cancelled.hits, [], 'the swing was cancelled')
+  assert.ok(cancelled.walkedBy(walkAt + 1) > 0, 'and the walk began at once')
+
+  const kept = walked({ keepAuto: true })
+  assert.deepEqual(kept.hits, [hitAt], 'the swing landed, and it went on walking rather than attacking again')
+  assert.equal(kept.walkedBy(hitAt), 0, 'the walk waited for it')
+  assert.ok(kept.walkedBy(hitAt + 2) > 0, 'and began after it')
 })

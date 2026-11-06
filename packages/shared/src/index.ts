@@ -9,12 +9,31 @@ export const Vector2Schema = z.object({
   y: z.number().finite(),
 })
 
+// What a walk does to a windup that is under way, as the player's controls settings have it. A windup that is kept is finished first, and the walk begins after it.
+// Left out, an auto attack's windup is cancelled and an ability's is kept.
+const WindupFields = {
+  keepAuto: z.boolean().optional(),
+  keepCast: z.boolean().optional(),
+}
+
 export const MoveOrderSchema = z.object({
   id: z.string().min(1).max(160),
   seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   tick: TickSchema,
   type: z.literal('move'),
   target: Vector2Schema,
+  ...WindupFields,
+})
+
+// Walks along a direction, and goes on walking it until told something else: how the movement keys walk (see the controls menu). The direction is a unit vector, or
+// none ({0, 0}) to stop steering, and the server and the simulator both refuse any other (see `isValidSteerDirection`).
+export const SteerOrderSchema = z.object({
+  id: z.string().min(1).max(160),
+  seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  tick: TickSchema,
+  type: z.literal('steer'),
+  direction: Vector2Schema,
+  ...WindupFields,
 })
 
 export const GameAttackOrderSchema = z.object({
@@ -47,6 +66,9 @@ export const CastOrderSchema = z.object({
   target: CastTargetSchema,
   // Caster position at click time, written explicitly.
   origin: Vector2Schema,
+  // Whether a cast with a windup leaves the caster going after the enemy it was attacking, so it attacks again once the cast is done, as the player's controls settings
+  // have it. Left out, the windup ends the attack. Back always ends it.
+  keepAttacking: z.boolean().optional(),
 })
 
 // Buys an item (see items.ts) with the gold the champion has on the order's tick, if it has the slot for it. It can be given while dead.
@@ -69,6 +91,7 @@ export const SellOrderSchema = z.object({
 
 export const GameOrderSchema = z.discriminatedUnion('type', [
   MoveOrderSchema,
+  SteerOrderSchema,
   GameAttackOrderSchema,
   CastOrderSchema,
   BuyOrderSchema,
@@ -83,6 +106,7 @@ const BroadcastFields = {
 }
 
 export const GameMoveSchema = MoveOrderSchema.extend(BroadcastFields)
+export const GameSteerSchema = SteerOrderSchema.extend(BroadcastFields)
 export const GameAttackSchema = GameAttackOrderSchema.extend(BroadcastFields)
 export const GameCastSchema = CastOrderSchema.extend(BroadcastFields)
 export const GameBuySchema = BuyOrderSchema.extend(BroadcastFields)
@@ -90,6 +114,7 @@ export const GameSellSchema = SellOrderSchema.extend(BroadcastFields)
 
 export const GameBroadcastOrderSchema = z.discriminatedUnion('type', [
   GameMoveSchema,
+  GameSteerSchema,
   GameAttackSchema,
   GameCastSchema,
   GameBuySchema,
@@ -159,9 +184,12 @@ export const GameCharacterSchema = z.object({
   removedAtTick: TickSchema.optional(),
 })
 
-export const GameFrameMovementSchema = z.object({
-  target: Vector2Schema,
-})
+// Where a character is walking: to a place, the way round the walls, which it stops at; or, steered, along a direction (a unit vector), which it keeps to until it is told
+// something else.
+export const GameFrameMovementSchema = z.union([
+  z.object({ target: Vector2Schema }),
+  z.object({ direction: Vector2Schema }),
+])
 
 // Forced movement toward a target at its own fixed speed, such as a dash. While it lasts it
 // replaces walking, and slows and haste do not change it.
@@ -184,12 +212,14 @@ export const GameFrameDashSchema = z.object({
 // Statuses are active for frames in [startTick, endTick).
 export const StatusSchema = z.object({
   id: z.string().min(1),
-  kind: z.enum(['slow', 'haste', 'attackrange', 'resist', 'root', 'stun', 'shield', 'burn', 'poison', 'blind', 'silence', 'disarm', 'fear', 'invisible', 'dodge', 'stat']),
+  // A bleed and a spore are burns of other names (damage every pulse), so that what reads them (Aurel's kit, the Ent's) can tell them apart. Airborne is a knock-up: it holds the unit
+  // as a stun does.
+  kind: z.enum(['slow', 'haste', 'attackrange', 'resist', 'root', 'stun', 'shield', 'burn', 'poison', 'bleed', 'spore', 'blind', 'silence', 'disarm', 'fear', 'airborne', 'invisible', 'dodge', 'stat', 'lifesteal']),
   rootId: z.string(),
   ownerId: z.number().int().positive(),
   startTick: TickSchema,
   endTick: TickSchema,
-  // A burn's or a poison's damage for each pulse; a blind has no amount of its own.
+  // A burn's, a bleed's, a spore's or a poison's damage for each pulse; a lifesteal's share of the damage dealt that is given back as health; a blind has no amount of its own.
   amount: z.number().finite().nonnegative(),
   // Which stat a 'stat' status adds its amount to (see `statBuff`).
   stat: z.enum(['attackDamage', 'attackSpeed', 'resistance', 'haste', 'arcane']).optional(),
@@ -213,10 +243,8 @@ export const MarkerSchema = z.object({
 const ActionTimingFields = {
   orderId: z.string().min(1),
   startTick: TickSchema,
-  // Effects fire at launchTick; the action blocks new attacks and casts before it.
+  // Effects fire at launchTick, and the action is over with it: before it the action blocks new attacks and casts, and after it there is nothing (no backswing) to wait out.
   launchTick: TickSchema,
-  // Backswing ends at endTick; a move or new action may cancel it early.
-  endTick: TickSchema,
 }
 
 export const GameFrameActionSchema = z.discriminatedUnion('kind', [
@@ -295,6 +323,17 @@ export const GameFrameCharacterSchema = z.object({
   // A monster's level, which it gains each time it is killed (see `monsterLevelAfterKill`): it is in the frame because the level changes its stats and what it
   // pays, so every peer has to have it on the same tick. Absent is level 1, and a player has none (its level is its experience's).
   level: z.number().int().min(2).optional(),
+  // The damage players have done to it lately, which decides who is credited when it dies (see `creditKill` in progression.ts): each player's, in the order they first did any,
+  // and the tick of the last of it, after which the tally runs out. It is in the frame because who is credited changes what is paid (a level, an item), so every peer has to have
+  // it on the same tick, and a death that a late order undoes has to take it back. Absent until a player hurts it, and gone when it dies.
+  credit: z.object({
+    tick: TickSchema,
+    by: z.array(z.object({ id: z.number().int().positive(), damage: z.number().int().positive() })),
+  }).optional(),
+  // The health it has lost lately, a tick at a time, oldest first: for a champion that remembers it (`ChampionDef.healthMemoryTicks`), such as Aurel, whose Transfusion heals a share of
+  // it. It is in the frame because what a hit took cannot be worked out afterwards from the health alone (a heal in between hides it). Entries older than the champion's memory are
+  // dropped, and it is absent when there are none, and for every champion that does not remember.
+  wounds: z.array(z.object({ tick: TickSchema, amount: z.number().int().positive() })).optional(),
 })
 
 export const GameFrameEntitySchema = z.object({
@@ -363,6 +402,12 @@ export const ModeSetupSchema = z.discriminatedUnion('kind', [
     noGold: z.literal(true).optional(),
     ...RulesFields,
   }),
+  z.object({
+    kind: z.literal('arena'),
+    // The teams in the game, the biggest first: a round is won by the last of them with a player alive. `scoreLimit` is the rounds a team needs to win the game.
+    teams: z.array(z.number().int().positive()),
+    ...RulesFields,
+  }),
 ])
 
 // Points by team, keyed by the team's number.
@@ -397,6 +442,15 @@ export const ObjectiveStateSchema = z.discriminatedUnion('kind', [
     // The teams that are out of the game: a core broken and every player dead. The last team that is not wins.
     eliminated: z.array(z.number().int().positive()),
     // For each team, how many cores of other teams are broken.
+    scores: ScoresSchema,
+  }),
+  z.object({
+    kind: z.literal('arena'),
+    // The team that won each round so far, in the order they were played. A round with no winner is not on it.
+    rounds: z.array(z.number().int().positive()),
+    // Set from the tick the round being fought is decided until the next one begins (`arenaResetTick`): the tick it was decided on, and who won it, if anyone did.
+    over: z.object({ tick: TickSchema, winner: z.number().int().positive().optional() }).optional(),
+    // For each team, how many rounds it has won.
     scores: ScoresSchema,
   }),
 ])
@@ -470,6 +524,7 @@ export const GameResultSchema = z.object({
 
 export type Vector2 = z.infer<typeof Vector2Schema>
 export type MoveOrder = z.infer<typeof MoveOrderSchema>
+export type SteerOrder = z.infer<typeof SteerOrderSchema>
 export type GameOrder = z.infer<typeof GameOrderSchema>
 export type BuyOrder = z.infer<typeof BuyOrderSchema>
 export type SellOrder = z.infer<typeof SellOrderSchema>
@@ -502,7 +557,7 @@ export * from './items.js'
 export * from './item-effects.js'
 export * from './shops.js'
 export * from './stats.js'
-export { boxTouchesCircle, clamp, directionTo, distanceBetween, normalize } from './geometry.js'
+export { boxTouchesCircle, clamp, DIRECTION_LENGTH_TOLERANCE, directionTo, distanceBetween, isValidSteerDirection, normalize } from './geometry.js'
 export type { BoxShape } from './geometry.js'
 export {
   aimPoint,
@@ -513,10 +568,14 @@ export {
   attackDamage,
   attackRangeBonus,
   besideOwner,
+  besideTarget,
+  bleed,
   blind,
   blink,
   burn,
   capCooldown,
+  cleanse,
+  CROWD_CONTROL_KINDS,
   damage,
   dash,
   disarm,
@@ -531,10 +590,13 @@ export {
   haste,
   heal,
   health,
+  healthLost,
   interrupt,
   invisible,
   knockback,
+  knockUp,
   level,
+  lifesteal,
   linear,
   loseHealth,
   mark,
@@ -542,6 +604,7 @@ export {
   maxHealth,
   missingHealth,
   namedStatusTicksLeft,
+  onEach,
   ownEntity,
   popMarkers,
   prolong,
@@ -559,6 +622,7 @@ export {
   silence,
   slow,
   spawnEntity,
+  spore,
   scaled,
   stacks,
   startCooldown,
@@ -581,16 +645,19 @@ export type {
 } from './effects.js'
 export {
   abilityDefs,
+  BACK_ABILITY_ID,
+  BACK_TICKS,
   abilityIconName,
   abilityName,
   abilityOnKey,
+  castRangeAgainst,
   getAbilityDef,
   meetsRequirement,
   quantizeDirection,
   withinCastRange,
 } from './abilities.js'
 export type { AbilityDef, AbilityIndicator } from './abilities.js'
-export { abilityNumbers, amountValue } from './ability-info.js'
+export { abilityNumbers, amountValue, healPreview } from './ability-info.js'
 export type { AbilityNumber, ScalingStats } from './ability-info.js'
 export type { AmountInfo } from './effects.js'
 export {
@@ -621,6 +688,9 @@ export { assignSpawns, rankTeams, spawnPointsNeeded } from './spawns.js'
 export {
   advanceObjective,
   applyRulesChange,
+  arenaMaxRounds,
+  arenaResetTick,
+  arenaRoundsToWin,
   CAPTURE_SECONDS,
   createModeSetup,
   defaultRules,
@@ -639,6 +709,7 @@ export {
   initialObjective,
   isGameMode,
   leadingTeam,
+  limitRange,
   modeRules,
   modeStartProblem,
   modeSupportProblem,
@@ -648,6 +719,7 @@ export {
   RESPAWN_SECONDS,
   teamCountProblem,
   startingMode,
+  teamsStanding,
   winningTeam,
 } from './modes.js'
 export type { GameModeDef, HillMovement, LobbyRules, MapObjectives, ModeRules, ObjectiveCore, ObjectiveUnit, RulesChange, ScoreName } from './modes.js'

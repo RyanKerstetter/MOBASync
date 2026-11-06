@@ -553,7 +553,9 @@ test('a champion in the windup of an ability is shown casting, and one using an 
   gameState.simulator.addPlayer(2, 'player-2', 'Player 2', { x: 400, y: 300 }, getChampion('t-archer'))
   gameState.setLocalCharacterId(1)
   gameState.resetServerTickAnchor(0, 0)
-  // The brawler's shockwave has a windup of 6 ticks and a backswing of 6; the archer's focus has neither.
+  // The brawler's shockwave has a windup; the archer's focus has none. The cast is over when it goes off: there is no backswing to show.
+  const windUp = getAbilityDef('t-shockwave')?.windUpTicks ?? 0
+  assert.ok(windUp > 0, 'the shockwave winds up')
   gameState.simulator.addOrder(1, {
     id: 'player-1:1', seq: 1, tick: 1, type: 'cast', abilityId: 't-shockwave', target: { mode: 'none' }, origin: { x: 100, y: 100 },
   })
@@ -563,8 +565,8 @@ test('a champion in the windup of an ability is shown casting, and one using an 
   const view = (tick: number, id: number) => gameState.getCharacters(atTick(tick)).find((character) => character.id === id)?.action
 
   assert.equal(view(1, 1)?.kind, 'cast')
-  assert.ok(Math.abs((view(7, 1)?.progress ?? 0) - 0.5) < 1e-9, 'half way through its windup and backswing')
-  assert.equal(view(13, 1), undefined, 'and done')
+  assert.ok(Math.abs((view(1 + windUp / 2, 1)?.progress ?? 0) - 0.5) < 1e-9, 'half way through its windup')
+  assert.equal(view(1 + windUp, 1), undefined, 'and done as it goes off')
   assert.equal(view(1, 2), undefined, 'a focus is not a cast to show')
   assert.equal(view(2, 2), undefined)
 })
@@ -626,7 +628,7 @@ test('Space skips the dead and has no one to attack when there is no enemy, and 
 // 40 % of its attack, so a bar that started at the windup's share would start at 0.4.
 const SWING_SHARE = 0.4
 const BAR_AT = { x: 100, y: 100 }
-const quickening = defineAbility({ id: 't-cgs-quicken', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 1200, apply: [statBuff('attackSpeed', 1, 1200)] })
+const quickening = defineAbility({ id: 't-cgs-quicken', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 1200, apply: [statBuff('attackSpeed', 1, 1200)] })
 const swinger = defineChampion({
   id: 't-cgs-swinger',
   name: 'Swinger',

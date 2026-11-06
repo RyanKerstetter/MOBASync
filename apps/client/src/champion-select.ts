@@ -5,8 +5,11 @@ import {
   champions,
   GAME_TPS,
   getTeam,
+  walkingSpeed,
   type Champion,
 } from '../../../packages/shared/src/index.ts'
+import { loadSettings } from './game-settings.ts'
+import { abilityKeyCodes, keyLabel } from './movement-keys.ts'
 import { createAbilityIcon, type AbilityIconUrl } from './ui/ability-icon.ts'
 import { element, requireElement } from './ui/dom.ts'
 
@@ -43,8 +46,6 @@ type ChampionSelectOptions = {
   onBack: () => void
 }
 
-const abilityKeys = ['Q', 'W', 'E', 'R']
-
 function requiredElement<T extends HTMLElement>(root: HTMLElement, selector: string): T {
   return requireElement<T>(root, selector, 'champion select')
 }
@@ -52,7 +53,7 @@ function requiredElement<T extends HTMLElement>(root: HTMLElement, selector: str
 function statRows(champion: Champion): Array<[string, string]> {
   return [
     ['Health', String(champion.maxHp)],
-    ['Move speed', String(champion.moveSpeed)],
+    ['Move speed', String(Math.round(walkingSpeed(champion.moveSpeed)))],
     ['Attack damage', String(champion.attackDamage)],
     ['Attack range', String(champion.attackRange)],
     ['Attacks per second', String(champion.attackSpeed)],
@@ -106,6 +107,8 @@ export function createChampionSelect({ root, abilityIconUrl, onPick, onLock, onB
   function renderDetails(champion: Champion): void {
     const stats = element('dl', '', ...statRows(champion).flatMap(([label, value]) => [element('dt', '', label), element('dd', '', value)]))
     const abilities = element('ul')
+    // The keys the player casts with, which are not the usual ones when W, A, S and D steer.
+    const abilityKeys = abilityKeyCodes(loadSettings().movementKeys).map(keyLabel)
     if (champion.passive) {
       abilities.append(element('li', '', element('strong', '', 'P · Passive'), element('span', '', champion.passive)))
     }

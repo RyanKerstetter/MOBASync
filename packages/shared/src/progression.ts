@@ -1,3 +1,5 @@
+import { GAME_RESPAWN_TICKS_PER_LEVEL, GAME_TPS } from './constants.js'
+
 // What a character collects, and the level that experience makes. Gold and shards are only kept for now (nothing is spent), and the
 // experience makes the level, which makes the champion stronger (see stats.ts).
 //
@@ -38,8 +40,98 @@ export function xpToReachLevel(level: number): number {
   return total
 }
 
-// What killing a player is worth to whoever did it, the same whoever is killed.
+// How long a champion of this level stays dead, when the game's respawn time is `baseTicks` (what a level 1 champion waits): that, and `GAME_RESPAWN_TICKS_PER_LEVEL`
+// more for each level above the first. The one place that says how the wait scales with levels.
+export function respawnTicksAt(baseTicks: number, level: number): number {
+  return baseTicks + GAME_RESPAWN_TICKS_PER_LEVEL * (Math.max(1, Math.floor(level)) - 1)
+}
+
+// ---------------------------------------------------------------------------- credit for a kill
+
+// Who is credited with a kill is worked out from the damage that players did to the victim (see `creditKill`): the player who landed the last blow gets the kill, and the
+// players who hurt it are listed after them by how much damage they did; the one second in that list gets the assist, if they are on the killer's team. Nobody else is paid.
+// Damage counts as it was done to the victim in its current fight, and the tally is wiped when nobody has hurt the victim for this many ticks (and when it dies), so a scrape
+// from long ago is not an assist.
+export const GAME_CREDIT_WINDOW_TICKS = 10 * GAME_TPS
+// The share of a kill's experience an assist pays the assister. The killer is paid all of it as always; this is on top, and is not taken from them. Gold is not shared.
+export const ASSIST_XP_SHARE = 0.4
+
+// The experience an assist on a kill that paid this much is worth, in whole points.
+export function assistXp(killXp: number): number {
+  return Math.round(Math.max(0, killXp) * ASSIST_XP_SHARE)
+}
+
+// How much damage one player has done to a victim.
+export type DamageShare = { id: number; damage: number }
+// The damage players have done to a victim lately, in the order they first did any, and the tick of the last of it. It is in the victim's frame (`GameFrameCharacter.credit`).
+export type DamageCredit = { tick: number; by: DamageShare[] }
+
+// What is still counting of a victim's tally at `tick`: all of it, or none once nobody has hurt the victim for `GAME_CREDIT_WINDOW_TICKS`.
+export function liveDamage(credit: DamageCredit | undefined, tick: number): readonly DamageShare[] {
+  return credit && tick - credit.tick <= GAME_CREDIT_WINDOW_TICKS ? credit.by : []
+}
+
+// The tally with this much more damage from this player at `tick`: a new tally if the old one has run out, and in any case a new object (a frame's is never changed in place).
+export function addDamage(credit: DamageCredit | undefined, id: number, damage: number, tick: number): DamageCredit {
+  const by = liveDamage(credit, tick).map((share) => ({ ...share }))
+  const mine = by.find((share) => share.id === id)
+  if (mine) mine.damage += damage
+  else by.push({ id, damage })
+  return { tick, by }
+}
+
+// The players who have hurt a victim, the one who did the most damage first. Equal damage goes to whoever started hurting it first.
+export function rankDamage(shares: readonly DamageShare[]): DamageShare[] {
+  return shares
+    .map((share, index) => ({ share, index }))
+    .sort((left, right) => right.share.damage - left.share.damage || left.index - right.index)
+    .map(({ share }) => share)
+}
+
+// Who a death is credited to: the player who landed the last blow (`lastHitId`) is the killer, then come the rest of the players who hurt the victim, the one who did the
+// most damage first (`rankDamage`). The one second in that list is the assist if they are on the killer's team (`teamOf`), and nobody else is, whoever they are. When the last
+// blow was not a player's (a turret, a monster, the victim itself), the one who did the most damage is the killer, as if they had landed it. Nobody if no player hurt it.
+export function creditKill(
+  shares: readonly DamageShare[],
+  teamOf: (id: number) => number | undefined,
+  lastHitId?: number,
+): { killerId?: number; assistId?: number } {
+  const ranked = rankDamage(shares)
+  const killer = ranked.find((share) => share.id === lastHitId) ?? ranked[0]
+  if (!killer) return {}
+  const assist = ranked.find((share) => share !== killer)
+  const assisted = assist !== undefined && teamOf(assist.id) === teamOf(killer.id)
+  return { killerId: killer.id, ...(assisted ? { assistId: assist.id } : {}) }
+}
+
+// What killing a player is worth to whoever did it, at level 1: the gold, and the experience, which is more for each level the player killed is (`playerKillXpAt`).
 export const PLAYER_KILL_REWARD: Readonly<Resources> = { gold: 50, xp: 80, shards: 0 }
+// How much more experience killing a player pays for each level it has gained, as a share of `PLAYER_KILL_REWARD`'s: 0.2 is a fifth more for each level above the first (the level
+// counts from 1, as it does for a monster's `xpGrowth`, so a level 1 player pays the reward as it is, and a level 6 one twice it). The gold is the same whatever the level.
+export const PLAYER_KILL_XP_PER_LEVEL = 0.2
+
+// The experience killing a player of this level pays, when a level 1 player pays `baseXp`: that, and `PLAYER_KILL_XP_PER_LEVEL` of it more for each level above the first, in whole
+// points. The one place that says how a kill's experience grows with the level of the player killed.
+export function playerKillXpAt(baseXp: number, level: number): number {
+  const gained = Math.max(0, Math.floor(Number.isFinite(level) ? level : 1) - 1)
+  return Math.round(Math.max(0, baseXp) * (1 + PLAYER_KILL_XP_PER_LEVEL * gained))
+}
+
+// Catch-up: a player who is behind is paid more experience, so one who has fallen behind can come back. Whenever experience is paid to a player (for a kill, an assist, a monster or a
+// turret), it is multiplied by 1 plus this much for each level the player is below the highest level of any player in the game (on any team, dead or alive; a monster has levels but
+// is no player). 0.2 is a fifth more for each level behind. The best player is behind no one, and is paid as it is: it is never paid less.
+export const GAME_CATCHUP_XP_PER_LEVEL = 0.2
+
+// What a player of this level is paid for experience, as a multiplier, when the best player in the game is at `topLevel`.
+export function catchupMultiplier(level: number, topLevel: number): number {
+  const behind = Math.floor(topLevel) - Math.floor(level)
+  return Number.isFinite(behind) && behind > 0 ? 1 + GAME_CATCHUP_XP_PER_LEVEL * behind : 1
+}
+
+// The experience a player of this level is paid for an award worth `xp`, in whole points. The one place that says how catch-up pays.
+export function catchupXp(xp: number, level: number, topLevel: number): number {
+  return Math.round(Math.max(0, xp) * catchupMultiplier(level, topLevel))
+}
 // What killing a monster is worth when its entry in monsters.ts does not say (`MonsterDef.reward`).
 export const DEFAULT_MONSTER_REWARD: Readonly<Resources> = { gold: 25, xp: 25, shards: 0 }
 // What destroying a turret is worth when its tier in turrets.ts does not say (`TurretTierDef.reward`).

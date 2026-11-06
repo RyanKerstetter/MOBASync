@@ -49,6 +49,15 @@ export type HillView = {
   direction: 'up' | 'down' | 'none'
 }
 
+// How a game of arena stands. `rounds` has a box for every round the game can take (`arenaMaxRounds`), in order, with the team that won it once it has been won.
+// `current` is the box of the round being fought, or of the one just won while the next waits to begin. `over` is set while it waits: who won the round (no one, if
+// the last players fell together, and it is played again), and how long until the next.
+export type ArenaView = {
+  rounds: Array<{ winner?: number }>
+  current: number
+  over?: { winner?: number; secondsLeft: number }
+}
+
 // What every mode has: each team's score, and the score a team wins at, if the game has a limit.
 type ScoreView = { scores: TeamScore[]; limit?: number }
 
@@ -57,11 +66,22 @@ export type ModeView =
   | ({ kind: 'koth' } & ScoreView & HillView)
   | ({ kind: 'ctf'; flags: FlagView[] } & ScoreView)
   | ({ kind: 'core'; cores: CoreView[] } & ScoreView)
+  | ({ kind: 'arena' } & ScoreView & ArenaView)
 
 // The heading of the mode's panel: its name, and what a team has to reach to win when the game has a limit.
 export function modeTitle(view: { kind: GameMode; limit?: number }): string {
   const mode = getGameMode(view.kind)
   return view.limit === undefined ? mode.name : `${mode.name} · first to ${view.limit} ${mode.scoreName}`
+}
+
+// How far into the game it is, as a clock that counts up: minutes and seconds (`3:07`), and hours once there are some (`1:03:07`). It reads whole seconds, rounded down, so it turns
+// over when a second is reached and never runs ahead of the game. Before the start, or from a number that is not one, it is `0:00`.
+export function formatGameClock(seconds: number): string {
+  const whole = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0
+  const two = (value: number): string => String(value).padStart(2, '0')
+  const hours = Math.floor(whole / 3600)
+  const minutes = Math.floor((whole % 3600) / 60)
+  return hours > 0 ? `${hours}:${two(minutes)}:${two(whole % 60)}` : `${minutes}:${two(whole % 60)}`
 }
 
 // The teams with their scores, the highest first. A tie keeps the lower team number first, so the order
@@ -135,6 +155,26 @@ export function coreHint(cores: readonly CoreView[], local: { id: number; team: 
   const enemy = cores.find((core) => core.team !== local.team)
   if (enemy?.status === 'broken') return `${teamName(enemy.team)}'s core is down. Take down every one of their players to win.`
   return undefined
+}
+
+// What a round's box says to a screen reader, and on hover: who won it, that it is being fought, or that it has not been.
+export function roundLabel(round: { winner?: number }, index: number, current: number): string {
+  const name = `Round ${index + 1}`
+  if (round.winner !== undefined) return `${name}: ${teamName(round.winner)}`
+  return index === current ? `${name}: in play` : name
+}
+
+// One line about the round in arena, while one is over: who won it and when the next begins, or that no one did and it is played again. (While a round is
+// fought, the boxes and the health bar of a player who is out say all there is.)
+export function arenaHint(view: ArenaView & { limit?: number; scores: readonly TeamScore[] }): string | undefined {
+  const over = view.over
+  if (!over) return undefined
+  const wait = `${Math.max(1, Math.ceil(over.secondsLeft))}s`
+  if (over.winner === undefined) return `No one is left. The round is played again in ${wait}.`
+  const won = view.scores.find((row) => row.team === over.winner)?.score ?? 0
+  // The round that wins the game has no next.
+  if (view.limit !== undefined && won >= view.limit) return `${teamName(over.winner)} wins the round.`
+  return `${teamName(over.winner)} wins the round. Next round in ${wait}.`
 }
 
 export function flagReadout(flag: FlagView): string {

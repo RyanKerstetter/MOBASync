@@ -1,5 +1,5 @@
 import { Container, Graphics } from 'pixi.js'
-import { SHOP_HEAL_AMOUNT, type ShopZone } from '../../../../packages/shared/src/index.ts'
+import { SHOP_HEAL_SECONDS, type ShopZone } from '../../../../packages/shared/src/index.ts'
 
 // A shop is a healing area (see shops.ts), so the page draws it on the ground: the rectangle the map has for it, with a faint green tint
 // over the ground and a fainter line round the edge. Every team's shop is drawn, the one that heals you and the one that heals the enemy,
@@ -12,9 +12,9 @@ export const SHOP_AREA_EDGE_WIDTH = 2
 
 export type ShopArea = { x: number; y: number; width: number; height: number }
 
-// The areas to tint: where each shop is. None when the shop heals nothing (`SHOP_HEAL_AMOUNT` is 0): it is not a healing area then, and
+// The areas to tint: where each shop is. None when the shop heals nothing (`SHOP_HEAL_SECONDS` is 0): it is not a healing area then, and
 // tinting it as one would say it is.
-export function layoutShopAreas(zones: readonly ShopZone[], heals = SHOP_HEAL_AMOUNT > 0): ShopArea[] {
+export function layoutShopAreas(zones: readonly ShopZone[], heals = SHOP_HEAL_SECONDS > 0): ShopArea[] {
   return heals ? zones.map(({ x, y, width, height }) => ({ x, y, width, height })) : []
 }
 

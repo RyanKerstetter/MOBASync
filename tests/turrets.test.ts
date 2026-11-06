@@ -73,9 +73,9 @@ const bolter = defineTurret(92, {
   attackProjectile: { speed: 300, radius: 8, color: '#ffd166' },
 })
 
-defineAbility({ id: 't-tu-shove', targeting: 'unit', range: 500, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 60, apply: [knockback(300, 900, targetUnit())] })
-defineAbility({ id: 't-tu-stun', targeting: 'unit', range: 500, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [stun(120, targetUnit())] })
-defineAbility({ id: 't-tu-blast', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [damage(200, enemiesInRadius(400))] })
+defineAbility({ id: 't-tu-shove', targeting: 'unit', range: 500, windUpTicks: 0, cooldownTicks: 60, apply: [knockback(300, 900, targetUnit())] })
+defineAbility({ id: 't-tu-stun', targeting: 'unit', range: 500, windUpTicks: 0, cooldownTicks: 600, apply: [stun(120, targetUnit())] })
+defineAbility({ id: 't-tu-blast', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [damage(200, enemiesInRadius(400))] })
 const shover = defineChampion({ ...brawler, id: 't-tu-shover', abilities: ['t-tu-shove'] })
 const stunner = defineChampion({ ...brawler, id: 't-tu-stunner', abilities: ['t-tu-stun'] })
 const blaster = defineChampion({ ...brawler, id: 't-tu-blaster', abilities: ['t-tu-blast'] })

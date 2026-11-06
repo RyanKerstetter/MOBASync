@@ -64,10 +64,11 @@ test('a map is summed up for the lobby: its size, what it holds, and what it has
 })
 
 test('a mode is on a map only if the map has what it needs, and a map that cannot be played on has none', () => {
-  assert.deepEqual(supportedModes(arenaMap([4, 4])), ['deathmatch', 'koth', 'ctf'])
-  assert.deepEqual(supportedModes(arenaMap([4, 4], { hill: false })), ['deathmatch', 'ctf'])
-  assert.deepEqual(supportedModes(arenaMap([4, 4], { flags: false })), ['deathmatch', 'koth'])
-  assert.deepEqual(supportedModes(arenaMap([4, 4], { hill: false, flags: false })), ['deathmatch'])
+  // Team deathmatch and arena need nothing on the map.
+  assert.deepEqual(supportedModes(arenaMap([4, 4])), ['deathmatch', 'koth', 'ctf', 'arena'])
+  assert.deepEqual(supportedModes(arenaMap([4, 4], { hill: false })), ['deathmatch', 'ctf', 'arena'])
+  assert.deepEqual(supportedModes(arenaMap([4, 4], { flags: false })), ['deathmatch', 'koth', 'arena'])
+  assert.deepEqual(supportedModes(arenaMap([4, 4], { hill: false, flags: false })), ['deathmatch', 'arena'])
   assert.deepEqual(supportedModes(arenaMap([4, 4], { problem: 'broken' })), [])
   assert.equal(modeSupportProblem('koth', arenaMap([4], { hill: false })), 'The Pit has no hill, so King of the Hill cannot be played on it.')
   assert.equal(

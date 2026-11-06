@@ -276,6 +276,54 @@ const grenadier: SpriteSet = {
 // for each (toward the player, away, left, right). At the champions' 3 world units a pixel it is about as big as
 // one. It sways while it waits, and squashes and stretches as it hops along. Its bump rises up on the windup and
 // splashes as it lands, and it dies by fading to a puddle, which stays until it comes back.
+// The Fire Mage and Aurel: placeholders too, the Archer's sheets (for the ranged Fire Mage) and the Swordsman's (for the melee Aurel) copied into their own folders, with the same
+// frame size, place in the frame and timings as the champions they were copied from, until they have art of their own.
+const firemage: SpriteSet = {
+  frameWidth: 32,
+  frameHeight: 32,
+  anchor: { x: 16, y: 24 },
+  scale: 3,
+  facing: 1,
+  clips: {
+    idle: { url: new URL('../../../res/champion/firemage/Idle.png', import.meta.url).href, frames: 4, fps: 6, loop: true },
+    walk: { url: new URL('../../../res/champion/firemage/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
+    attack: { url: new URL('../../../res/champion/firemage/Attack.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 2 },
+    cast: { url: new URL('../../../res/champion/firemage/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
+    dead: { url: new URL('../../../res/champion/firemage/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
+  },
+}
+
+const aurel: SpriteSet = {
+  frameWidth: 32,
+  frameHeight: 32,
+  anchor: { x: 14, y: 24 },
+  scale: 3,
+  facing: 1,
+  clips: {
+    idle: { url: new URL('../../../res/champion/aurel/Idle.png', import.meta.url).href, frames: 4, fps: 6, loop: true },
+    walk: { url: new URL('../../../res/champion/aurel/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
+    attack: { url: new URL('../../../res/champion/aurel/Attack_1.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 3 },
+    cast: { url: new URL('../../../res/champion/aurel/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
+    dead: { url: new URL('../../../res/champion/aurel/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
+  },
+}
+
+// The Ent: a placeholder too, the Swordsman's sheets copied into its own folder (as Aurel's are), until it has art of its own.
+const ent: SpriteSet = {
+  frameWidth: 32,
+  frameHeight: 32,
+  anchor: { x: 14, y: 24 },
+  scale: 3,
+  facing: 1,
+  clips: {
+    idle: { url: new URL('../../../res/champion/ent/Idle.png', import.meta.url).href, frames: 4, fps: 6, loop: true },
+    walk: { url: new URL('../../../res/champion/ent/Walk.png', import.meta.url).href, frames: 4, fps: 8, loop: true },
+    attack: { url: new URL('../../../res/champion/ent/Attack_1.png', import.meta.url).href, frames: 4, fps: 12, loop: false, syncToAction: true, syncFrames: 3 },
+    cast: { url: new URL('../../../res/champion/ent/Cast.png', import.meta.url).href, frames: 3, fps: 10, loop: false, syncToAction: true },
+    dead: { url: new URL('../../../res/champion/ent/Dead.png', import.meta.url).href, frames: 2, fps: 5, loop: false, frameMs: [200, 1000] },
+  },
+}
+
 const slime: SpriteSet = {
   frameWidth: 64,
   frameHeight: 64,
@@ -378,6 +426,9 @@ export const championSprites: Readonly<Record<string, SpriteSet>> = {
   capricorn,
   soldier,
   grenadier,
+  firemage,
+  aurel,
+  ent,
   slime,
   golem,
 }

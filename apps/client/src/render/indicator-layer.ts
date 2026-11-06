@@ -1,6 +1,6 @@
 import { Container, Graphics } from 'pixi.js'
 import type { Vector2 } from '../../../../packages/shared/src/index.ts'
-import { ATTACK_MARKER_STYLE, layoutAttackMarker, type AttackMarker } from './attack-marker.ts'
+import { attackMarkerLook, type AttackMarker } from './attack-marker.ts'
 import type { CastPreview, RenderedCharacter } from '../game-state.ts'
 
 // A ground target whose ability gives no indicator size is marked with a small ring this big.
@@ -23,6 +23,8 @@ export type IndicatorInput = {
   // What the ability being aimed would do if its key were let go now.
   castPreview?: CastPreview
   attackMarkers: readonly AttackMarker[]
+  // How many times its own size the marker on the enemy being attacked is drawn (the graphics menu). Left out, its own size.
+  lockMarkerScale?: number
   // The character a left click picked, which has a ring round its feet while its panel is up.
   selectedId?: number
 }
@@ -56,7 +58,7 @@ export class IndicatorLayer {
       this.attackRange.position.set(input.local.position.x, input.local.position.y)
     }
     this.drawCastIndicator(input.castPreview, input.local?.position, input.characters)
-    this.drawAttackMarkers(input.attackMarkers, input.characters)
+    this.drawAttackMarkers(input.attackMarkers, input.characters, input.lockMarkerScale)
     this.drawSelection(input.selectedId, input.characters)
     this.drawRevealRing(input.local)
   }
@@ -154,17 +156,17 @@ export class IndicatorLayer {
     }
   }
 
-  private drawAttackMarkers(markers: readonly AttackMarker[], characters: readonly RenderedCharacter[]): void {
+  private drawAttackMarkers(markers: readonly AttackMarker[], characters: readonly RenderedCharacter[], lockScale: number | undefined): void {
     this.attackMarkers.clear()
     for (const marker of markers) {
       const target = characters.find((character) => character.id === marker.targetId)
       if (!target || target.dead) continue
-      const shape = layoutAttackMarker(target.champion.radius)
+      const { shape, stroke } = attackMarkerLook(marker.kind, target.champion.radius, lockScale)
       const { x, y } = target.position
       for (const tick of shape.ticks) {
         this.attackMarkers.moveTo(x + tick.from.x, y + tick.from.y).lineTo(x + tick.to.x, y + tick.to.y)
       }
-      this.attackMarkers.stroke(ATTACK_MARKER_STYLE[marker.kind])
+      this.attackMarkers.stroke(stroke)
     }
   }
 }

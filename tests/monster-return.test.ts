@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { GAME_TPS, GameSnapshotSchema, Monster, monsters, Simulator, type MonsterDef, type Vector2 } from '../packages/shared/src/index.ts'
+import { GAME_TPS, GameSnapshotSchema, Monster, monsters, Simulator, walkingSpeed, type MonsterDef, type Vector2 } from '../packages/shared/src/index.ts'
 import { defineChampion, defineMonster } from './fixtures.ts'
 
 // A monster going home (it has given up on whoever it was after, or has been pushed off its post) walks faster than it does otherwise, by its
@@ -112,13 +112,13 @@ test('every monster in the game goes home faster than it walks', () => {
 test('a monster going home walks at its return speed times its own, and walks as before the rest of the time', () => {
   for (const [monster, multiplier] of [[plain, 1], [fast, FAST]] as const) {
     const found = trace(world(monster))
-    const homeStep = monster.champion.moveSpeed * multiplier / GAME_TPS
+    const homeStep = walkingSpeed(monster.champion.moveSpeed) * multiplier / GAME_TPS
     const steps = stepsHome(found)
     assert.ok(steps.length >= 5, `it took a while to get there (${steps.length} ticks)`)
     for (const step of steps) assert.ok(Math.abs(step - homeStep) < 1e-6, `${monster.name} x${multiplier}: ${step} is not ${homeStep}`)
     // Chasing, it is as slow as ever: it goes no faster than its own speed.
     const chasing = found.monster.slice(30, found.returnStart - 1).map((at, index) => between(at, found.monster[30 + index - 1] ?? at))
-    assert.ok(chasing.length > 0 && chasing.every((step) => step <= monster.champion.moveSpeed / GAME_TPS + 1e-6), 'and no faster on the way out')
+    assert.ok(chasing.length > 0 && chasing.every((step) => step <= walkingSpeed(monster.champion.moveSpeed) / GAME_TPS + 1e-6), 'and no faster on the way out')
   }
 })
 

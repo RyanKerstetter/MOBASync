@@ -10,17 +10,23 @@ import type { Vector2 } from './index.js'
 // that cannot be bought. A map that has some has one for every team that starts on it (the map is refused if not), so a team is never left with
 // nowhere. A champion that is dead can shop: it comes back in its base, which is where its shop is, though its body lies where it fell.
 //
-// A shop is also a **healing area**: a living champion standing in a shop of its own team gets health back, `SHOP_HEAL_AMOUNT` every
-// `SHOP_HEAL_INTERVAL_TICKS` ticks (the simulator's rule, so every peer heals the same on the same tick), and the page draws the area with a
-// green tint. A game with no shops has no area to heal in (unlike buying, healing is not allowed from anywhere).
+// A shop is also a **healing area**: a living champion standing in a shop of its own team gets a share of its maximum health back every
+// `SHOP_HEAL_INTERVAL_TICKS` ticks, enough to fill it from nothing in `SHOP_HEAL_SECONDS` (the simulator's rule, so every peer heals the same on the same
+// tick), and the page draws the area with a green tint. A game with no shops has no area to heal in (unlike buying, healing is not allowed from anywhere).
 
-// How much health a champion in its own shop gets back each time the shop heals, up to its maximum. Whole numbers of health only. 0 turns
-// the healing off. It is the number to tune: the health a second it comes to is `SHOP_HEAL_PER_SECOND`.
-export const SHOP_HEAL_AMOUNT = 25
+// How long a champion in its own shop takes to be healed from nothing to its maximum, whatever that maximum is: the bigger the champion, the more each heal gives. 0 turns
+// the healing off. It is the number to tune.
+export const SHOP_HEAL_SECONDS = 5
 // How many ticks pass between one heal and the next: the shop heals on every tick that is a multiple of this, so four times a second.
 export const SHOP_HEAL_INTERVAL_TICKS = GAME_TPS / 4
-// What those two make, in health a second, for whoever wants to say it (the readme, a tooltip).
-export const SHOP_HEAL_PER_SECOND = SHOP_HEAL_AMOUNT * GAME_TPS / SHOP_HEAL_INTERVAL_TICKS
+// How many heals it takes to fill a champion from nothing: the heals in `SHOP_HEAL_SECONDS`.
+export const SHOP_HEALS_TO_FILL = Math.round(SHOP_HEAL_SECONDS * GAME_TPS / SHOP_HEAL_INTERVAL_TICKS)
+
+// How much health one heal of the shop gives a champion with this much at most: a `SHOP_HEALS_TO_FILL`th of it, in whole points and rounded up, so a champion is
+// never kept more than `SHOP_HEAL_SECONDS` from full by a share that rounds down. It stops at the maximum like any heal. 0 when the shop heals nothing.
+export function shopHealAmount(maxHp: number): number {
+  return SHOP_HEAL_SECONDS > 0 ? Math.ceil(Math.max(0, maxHp) / SHOP_HEALS_TO_FILL) : 0
+}
 
 export type ShopZone = {
   // The team whose shop it is, as the game has it: the map says the slot of spawn points, which the server turns into the team that starts there.
@@ -49,5 +55,5 @@ export function mayShop(zones: readonly ShopZone[], team: number, position: Vect
 
 // Whether the shop heals on this tick (see `SHOP_HEAL_INTERVAL_TICKS`). Never when it heals nothing.
 export function shopHealsOn(tick: number): boolean {
-  return SHOP_HEAL_AMOUNT > 0 && tick % SHOP_HEAL_INTERVAL_TICKS === 0
+  return SHOP_HEAL_SECONDS > 0 && tick % SHOP_HEAL_INTERVAL_TICKS === 0
 }

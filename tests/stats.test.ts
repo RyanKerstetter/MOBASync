@@ -7,6 +7,7 @@ import {
   champions,
   damage,
   GAME_RESPAWN_TICKS,
+  respawnTicksAt,
   GAME_TPS,
   enemiesInRadius,
   xpToReachLevel,
@@ -38,21 +39,21 @@ import { defineAbility, defineChampion, defineMonster, economyClient, economySim
 let made = 0
 const unique = (prefix: string): string => `${prefix}-${(made += 1)}`
 
-defineAbility({ id: 't-st-blast', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [damage(100, enemiesInRadius(200))] })
-defineAbility({ id: 't-st-flame', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [burn(20, 600, enemiesInRadius(200))] })
+defineAbility({ id: 't-st-blast', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [damage(100, enemiesInRadius(200))] })
+defineAbility({ id: 't-st-flame', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [burn(20, 600, enemiesInRadius(200))] })
 // Each of these deals 10 and a tenth of one thing the caster has (a tenth, so the sum is plain); the last one deals all of them at once.
-defineAbility({ id: 't-st-from-arcane', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [damage(scaled(10, { arcane: 0.1 }), enemiesInRadius(200))] })
-defineAbility({ id: 't-st-from-damage', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [damage(scaled(10, { attackDamage: 0.1 }), enemiesInRadius(200))] })
-defineAbility({ id: 't-st-from-max-health', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [damage(scaled(10, { maxHealth: 0.1 }), enemiesInRadius(200))] })
-defineAbility({ id: 't-st-from-health', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [damage(scaled(10, { health: 0.1 }), enemiesInRadius(200))] })
-defineAbility({ id: 't-st-from-level', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [damage(scaled(10, { level: 10 }), enemiesInRadius(200))] })
-defineAbility({ id: 't-st-from-all', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [damage(scaled(10, { arcane: 0.1, attackDamage: 0.1, maxHealth: 0.01, health: 0.01, level: 1 }), enemiesInRadius(200))] })
-defineAbility({ id: 't-st-burn-from-arcane', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [burn(scaled(20, { arcane: 0.5 }), 600, enemiesInRadius(200))] })
-defineAbility({ id: 't-st-sting', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 60, apply: [loseHealth(300)] })
-defineAbility({ id: 't-st-drain', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 60, apply: [loseHealth(100, enemiesInRadius(200))] })
-defineAbility({ id: 't-st-guard', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [resist(0.5, 600)] })
-defineAbility({ id: 't-st-mend', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 60, apply: [refundCooldown('t-st-blast', 0.5)] })
-defineAbility({ id: 't-st-reset', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 60, apply: [startCooldown('t-st-blast')] })
+defineAbility({ id: 't-st-from-arcane', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [damage(scaled(10, { arcane: 0.1 }), enemiesInRadius(200))] })
+defineAbility({ id: 't-st-from-damage', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [damage(scaled(10, { attackDamage: 0.1 }), enemiesInRadius(200))] })
+defineAbility({ id: 't-st-from-max-health', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [damage(scaled(10, { maxHealth: 0.1 }), enemiesInRadius(200))] })
+defineAbility({ id: 't-st-from-health', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [damage(scaled(10, { health: 0.1 }), enemiesInRadius(200))] })
+defineAbility({ id: 't-st-from-level', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [damage(scaled(10, { level: 10 }), enemiesInRadius(200))] })
+defineAbility({ id: 't-st-from-all', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [damage(scaled(10, { arcane: 0.1, attackDamage: 0.1, maxHealth: 0.01, health: 0.01, level: 1 }), enemiesInRadius(200))] })
+defineAbility({ id: 't-st-burn-from-arcane', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [burn(scaled(20, { arcane: 0.5 }), 600, enemiesInRadius(200))] })
+defineAbility({ id: 't-st-sting', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 60, apply: [loseHealth(300)] })
+defineAbility({ id: 't-st-drain', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 60, apply: [loseHealth(100, enemiesInRadius(200))] })
+defineAbility({ id: 't-st-guard', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [resist(0.5, 600)] })
+defineAbility({ id: 't-st-mend', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 60, apply: [refundCooldown('t-st-blast', 0.5)] })
+defineAbility({ id: 't-st-reset', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 60, apply: [startCooldown('t-st-blast')] })
 const ABILITIES = [
   't-st-blast', 't-st-flame', 't-st-sting', 't-st-drain', 't-st-guard', 't-st-mend', 't-st-reset',
   't-st-from-arcane', 't-st-from-damage', 't-st-from-max-health', 't-st-from-health', 't-st-from-level', 't-st-from-all', 't-st-burn-from-arcane',
@@ -376,10 +377,10 @@ test('resistance and a resist status both apply, one after the other, and a heal
 // ---------------------------------------------------------------------------- stat buffs
 
 const BUFF = 100
-defineAbility({ id: 't-st-buff-resistance', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [statBuff('resistance', BUFF, 60)] })
-defineAbility({ id: 't-st-buff-attack-damage', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [statBuff('attackDamage', BUFF, 60)] })
-defineAbility({ id: 't-st-buff-arcane', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [statBuff('arcane', BUFF, 60)] })
-defineAbility({ id: 't-st-buff-haste', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 600, apply: [statBuff('haste', BUFF, 60)] })
+defineAbility({ id: 't-st-buff-resistance', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [statBuff('resistance', BUFF, 60)] })
+defineAbility({ id: 't-st-buff-attack-damage', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [statBuff('attackDamage', BUFF, 60)] })
+defineAbility({ id: 't-st-buff-arcane', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [statBuff('arcane', BUFF, 60)] })
+defineAbility({ id: 't-st-buff-haste', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 600, apply: [statBuff('haste', BUFF, 60)] })
 
 test('attack damage and arcane buffs raise what the caster deals while they last, and wear off', () => {
   const damageOf = (buff: string | undefined, ability: string | undefined, tick: number): number => {
@@ -547,7 +548,10 @@ test('the level is kept through a death and a respawn, and a respawn is at the h
   slain.addOrder(3, { id: 'k', seq: 1, tick: 20, type: 'attack', targetId: 1 })
   assert.equal(slain.at(30).get(1)?.isDead(), true, 'it was killed')
   assert.equal(slain.at(30).get(1)?.getLevel(), 2, 'and keeps its level')
-  const back = slain.at(20 + GAME_RESPAWN_TICKS + 1).get(1)
+  // A level 2 champion waits longer than the game's respawn time (see `respawnTicksAt`), and is back after that.
+  assert.ok(respawnTicksAt(GAME_RESPAWN_TICKS, 2) > GAME_RESPAWN_TICKS)
+  assert.equal(slain.at(20 + GAME_RESPAWN_TICKS + 1).get(1)?.isDead(), true, 'it is not back after the time of a level 1 champion')
+  const back = slain.at(20 + respawnTicksAt(GAME_RESPAWN_TICKS, 2) + 1).get(1)
   assert.deepEqual([back?.isDead(), back?.getLevel(), back?.getHealthState()?.maxHp, back?.getHealth()], [false, 2, 1100, 1100])
 })
 

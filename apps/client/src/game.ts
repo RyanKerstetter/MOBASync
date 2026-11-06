@@ -4,7 +4,6 @@ import {
   GAME_ARENA_WIDTH,
   GAME_VIEW_HEIGHT,
   GAME_VIEW_WIDTH,
-  GAME_FPS,
   GAME_ORDER_TIMEOUT_MS,
   GAME_PING_INTERVAL_MS,
   GameBroadcastOrderSchema,
@@ -20,6 +19,7 @@ import {
   type GameOrderAck,
   type GameSnapshot,
   type LagConfig,
+  type Vector2,
 } from '../../../packages/shared/src/index.ts'
 import { chooseAttackMarkers } from './render/attack-marker.ts'
 import { computeCamera, screenToWorld, type Camera } from './camera.ts'
@@ -29,10 +29,11 @@ import { championSprites } from './champion-sprites.ts'
 import { createDebugOverlay } from './ui/debug-overlay.ts'
 import { createGameMenu, menuFooter, menuTabs } from './game-menu.ts'
 import { HoldCommand, type HeldCommand } from './hold-command.ts'
-import { loadSettings, readClickRadius, saveSettings } from './game-settings.ts'
+import { loadSettings, readAttackMarkerSize, readClickRadius, readMaxFps, saveSettings } from './game-settings.ts'
 import { ClientGameState } from './game-state.ts'
+import { abilityKeyCodes, isMovementKey, keyLabel, MovementKeys } from './movement-keys.ts'
 import { createTeamVision, type TeamVision } from './team-vision.ts'
-import { abilitySlotViews } from './ui/hud.ts'
+import { abilitySlotViews, ROUND_OUT_TEXT } from './ui/hud.ts'
 import { createHudView } from './ui/hud-view.ts'
 import { inspectView } from './ui/inspect.ts'
 import { createInspectView } from './ui/inspect-view.ts'
@@ -69,7 +70,8 @@ type GameOptions = {
   castMode?: CastMode
 }
 
-const abilityKeys = ['KeyQ', 'KeyW', 'KeyE', 'KeyR']
+// The key for Back, which every champion has, and which takes it to its spawn after a channel.
+const BACK_KEY = 'KeyB'
 const START_PING_RETRY_MS = 250
 
 // What the server says when it turns an order down, for the reasons it gives one. Any other reason is
@@ -79,6 +81,7 @@ const ORDER_REJECTION_MESSAGES: Readonly<Record<string, string>> = {
   stale: 'Order was too old or out of sequence.',
   unknown_ability: 'Your champion does not have that ability.',
   unknown_item: 'That item is not in the game.',
+  bad_direction: 'That is not a direction to walk in.',
 }
 
 // Whether a key was pressed in a field the player is typing in (or on a button, if that counts too),
@@ -108,7 +111,12 @@ export async function startGame({
   if (!Number.isFinite(orderTimeoutMs) || orderTimeoutMs <= 0) {
     throw new RangeError('Order timeout must be a finite, positive number.')
   }
-  const app = await createPixiApp(container, { maxFPS: GAME_FPS })
+  // What the player chose last time, which the renderer starts with: the most frames a second it draws is one of them.
+  const settings = loadSettings()
+  // The keys that cast each ability slot, which move off W when W, A, S and D steer (see movement-keys.ts).
+  let abilityKeys = abilityKeyCodes(settings.movementKeys)
+  const movementKeys = new MovementKeys()
+  const app = await createPixiApp(container, { maxFPS: settings.maxFps })
   // The sprite sheets, before anything is drawn. If they cannot be loaded, champions are circles.
   const spriteSets: Map<string, LoadedSpriteSet> = await loadSpriteSets(championSprites).catch((error: unknown) => {
     console.warn('Could not load the champion sprites, so champions are drawn as circles.', error)
@@ -187,7 +195,6 @@ export async function startGame({
   // camera moves under a still mouse as the champion walks.
   let pointerOnScreen = { x: app.screen.width / 2, y: app.screen.height / 2 }
   const pointerInWorld = () => screenToWorld(camera, pointerOnScreen)
-  const settings = loadSettings()
   const castControl = new CastControl(castMode ?? settings.castMode)
   // What the player turned off in the menu last time stays off.
   world.effects = { ...settings.effects }
@@ -249,10 +256,46 @@ export async function startGame({
         gameState.setExtraPickRadius(settings.clickRadius)
         saveSettings(settings)
       },
+      getWalkKeepsAuto: () => settings.walkKeepsAuto,
+      setWalkKeepsAuto: (on) => {
+        settings.walkKeepsAuto = on
+        saveSettings(settings)
+      },
+      getWalkKeepsCast: () => settings.walkKeepsCast,
+      setWalkKeepsCast: (on) => {
+        settings.walkKeepsCast = on
+        saveSettings(settings)
+      },
+      getMovementKeys: () => settings.movementKeys,
+      setMovementKeys: (on) => {
+        // The keys change what they do, so whatever they were doing is dropped: an aim on W, and steering.
+        castControl.cancel()
+        giveSteer(movementKeys.releaseAll(performance.now()))
+        settings.movementKeys = on
+        abilityKeys = abilityKeyCodes(on)
+        saveSettings(settings)
+      },
+      getCastKeepsAttack: () => settings.castKeepsAttack,
+      setCastKeepsAttack: (on) => {
+        settings.castKeepsAttack = on
+        saveSettings(settings)
+      },
+      getAttackMarkerSize: () => settings.attackMarkerSize,
+      setAttackMarkerSize: (size) => {
+        settings.attackMarkerSize = readAttackMarkerSize(size)
+        saveSettings(settings)
+      },
       getEffect: (effect) => settings.effects[effect],
       setEffect: (effect, on) => {
         settings.effects[effect] = on
         world.effects = { ...settings.effects }
+        saveSettings(settings)
+      },
+      getMaxFps: () => settings.maxFps,
+      setMaxFps: (fps) => {
+        settings.maxFps = readMaxFps(fps)
+        // The ticker takes it from the next frame, so the change is seen as the button is pressed.
+        app.ticker.maxFPS = settings.maxFps
         saveSettings(settings)
       },
       getDebugView: () => world.debug,
@@ -275,6 +318,8 @@ export async function startGame({
   let connected = false
   // The server has said the game is over: it takes no more orders, and the results are showing.
   let ended = false
+  // How long the game had been going when it ended, which the clock then stays at: the server has stopped, but the page's own estimate would go on.
+  let endedAtSeconds: number | undefined
   const inPlay = (): boolean => started && !disconnected && !ended
   // Open the page with ?lag=100&jitter=20&loss=0.05, or tweak window.lag live in the console.
   const { channel, config: lagConfig } = withLag(
@@ -327,12 +372,28 @@ export async function startGame({
   app.stage.on('pointermove', (event) => {
     pointerOnScreen = { x: event.global.x, y: event.global.y }
   })
-  // Gives an attack or a walk as the champion's next order.
+  // What a walk, or steering, does to a windup under way, as the controls menu has it.
+  const windups = () => ({ keepAuto: settings.walkKeepsAuto, keepCast: settings.walkKeepsCast })
+  // Gives an attack or a walk as the champion's next order. The movement keys no longer steer it until they change.
   const sendCommand = (command: HeldCommand, now = performance.now()): void => {
+    movementKeys.interrupt()
     const order = command.type === 'attack'
       ? gameState.createAttackOrder(command.targetId, now)
-      : gameState.createMoveOrder(command.target, now)
+      : gameState.createMoveOrder(command.target, now, windups())
     if (order) reliableMessenger.send(order)
+  }
+  // Gives the direction the movement keys make, or a stop, if there is one to give (see `MovementKeys`). Nothing is given to a champion that is dead: the keys are still
+  // followed, and what they make is given when it is back (see `resumeSteering`).
+  const giveSteer = (direction: Vector2 | undefined, now = performance.now()): void => {
+    if (!direction || !inPlay() || gameState.isLocalDead()) return
+    const order = gameState.createSteerOrder(direction, now, windups())
+    if (order) reliableMessenger.send(order)
+  }
+  // A champion the keys steer that the game has left standing (a fear that ran out, coming back to life) is given its direction again. This looks every frame, but
+  // gives an order only when that has happened.
+  const resumeSteering = (now: number): void => {
+    if (!settings.movementKeys || !movementKeys.isSteering || !inPlay() || menu.isOpen || gameState.isLocalDead()) return
+    giveSteer(movementKeys.resume(now, gameState.isLocalIdle(now)), now)
   }
   // Holding the right button goes on giving the command, a few times a second (see `HoldCommand`).
   const holdCommand = new HoldCommand()
@@ -377,7 +438,7 @@ export async function startGame({
   const onContextMenu = (event: MouseEvent): void => event.preventDefault()
   app.canvas.addEventListener('contextmenu', onContextMenu)
   const castAtCursor = (slot: number, selfCast = false): void =>
-    sendAttempt(gameState.createCastOrder(slot, pointerInWorld(), performance.now(), selfCast))
+    sendAttempt(gameState.createCastOrder(slot, pointerInWorld(), performance.now(), selfCast, { keepAttacking: settings.castKeepsAttack }))
   // Alt on its own would open the browser's menu bar when it is let go, so it is kept from doing that while the game is being played.
   const isAlt = (event: KeyboardEvent): boolean => event.code === 'AltLeft' || event.code === 'AltRight'
   const onKeyDown = (event: KeyboardEvent): void => {
@@ -393,6 +454,8 @@ export async function startGame({
         return
       }
       if (inPlay()) menu.toggle()
+      // The menu has the keyboard, so the movement keys are let go: the champion is not left walking off while it is open.
+      if (menu.isOpen) giveSteer(movementKeys.releaseAll(performance.now()))
       return
     }
     // The menu has the keyboard while it is open: nothing reaches the game.
@@ -403,11 +466,25 @@ export async function startGame({
       return
     }
     if (isAlt(event) && inPlay() && !isTypingIn(event.target, true)) event.preventDefault()
+    // W, A, S and D steer, when the controls menu says so. They are followed while the champion is dead too, so what they make is given when it is back. An aim
+    // being drawn is left as it is: steering while aiming is what they are for.
+    if (settings.movementKeys && isMovementKey(event.code)) {
+      if (!inPlay() || isTypingIn(event.target, true)) return
+      event.preventDefault()
+      giveSteer(movementKeys.press(event.code, performance.now()))
+      return
+    }
     const abilitySlot = abilityKeys.indexOf(event.code)
-    if (event.code !== 'Space' && abilitySlot < 0) return
+    if (event.code !== 'Space' && event.code !== BACK_KEY && abilitySlot < 0) return
     if (event.repeat || !inPlay() || gameState.isLocalDead()) return
     if (isTypingIn(event.target, true)) return
     event.preventDefault()
+    // B channels Back: an aim being drawn is dropped, as for any other key that does something.
+    if (event.code === BACK_KEY) {
+      castControl.cancel()
+      sendAttempt(gameState.createBackOrder())
+      return
+    }
     if (abilitySlot >= 0) {
       // Alt and an ability key casts an ability for allies on the champion itself, at once, with no aim: whatever else was being aimed is left as it is.
       if (event.altKey && gameState.abilitySelfCasts(abilitySlot)) {
@@ -431,11 +508,17 @@ export async function startGame({
     const target = gameState.getClosestEnemy(pointerInWorld())
     if (!target) return
     castControl.cancel()
+    movementKeys.interrupt()
     const order = gameState.createAttackOrder(target.id)
     if (order) reliableMessenger.send(order)
   }
   const onKeyUp = (event: KeyboardEvent): void => {
     if (isAlt(event) && inPlay()) event.preventDefault()
+    // A movement key is let go wherever the keyboard is, so the champion never walks on after it.
+    if (settings.movementKeys && isMovementKey(event.code)) {
+      giveSteer(movementKeys.release(event.code, performance.now()))
+      return
+    }
     const abilitySlot = abilityKeys.indexOf(event.code)
     if (abilitySlot < 0) return
     if (castControl.release(abilitySlot).type !== 'cast') return
@@ -446,6 +529,7 @@ export async function startGame({
   const onBlur = (): void => {
     castControl.cancel()
     holdCommand.release()
+    giveSteer(movementKeys.releaseAll(performance.now()))
   }
   // The button can be let go anywhere, so this listens on the window and not the map.
   const onPointerUp = (event: PointerEvent): void => {
@@ -574,9 +658,11 @@ export async function startGame({
       window.clearInterval(startPingTimer)
       started = true
       onStarted(snapshot)
+      const casting = abilityKeys.map(keyLabel).join('/')
+      const moving = settings.movementKeys ? 'W/A/S/D or right-click to move' : 'Right-click to move'
       onStatus(castControl.mode === 'quick'
-        ? 'Game started. Right-click to move, or right-click an enemy to attack; Space attacks the enemy nearest the cursor; Q/W/E/R cast at the cursor.'
-        : 'Game started. Right-click to move, or right-click an enemy to attack; Space attacks the enemy nearest the cursor; hold Q/W/E/R to aim and let go to cast.')
+        ? `Game started. ${moving}, or right-click an enemy to attack; Space attacks the enemy nearest the cursor; ${casting} cast at the cursor.`
+        : `Game started. ${moving}, or right-click an enemy to attack; Space attacks the enemy nearest the cursor; hold ${casting} to aim and let go to cast.`)
     }
   })
 
@@ -597,6 +683,7 @@ export async function startGame({
     }
     if (!started || ended) return
     ended = true
+    endedAtSeconds = gameState.getGameSeconds()
     castControl.cancel()
     menu.close()
     shop.close()
@@ -671,6 +758,8 @@ export async function startGame({
         hoveredId: hovered?.id,
         lockedId: gameState.getLocalAttackTarget(now),
       }),
+      // The setting is in percent of the marker's own size.
+      lockMarkerScale: settings.attackMarkerSize / 100,
       ...(inspected ? { selectedId: inspected.id } : {}),
     })
     const inspection = inspected ? gameState.getInspection(inspected, now) : undefined
@@ -696,13 +785,20 @@ export async function startGame({
       ...(progress ? { progress } : {}),
       // The champion's stats at its level; what items add to them will go here.
       ...(stats ? { stats } : {}),
-      ...(dead ? { respawnSeconds: gameState.getRespawnSecondsLeft(now), out: gameState.isLocalOutOfTheGame(now) } : {}),
+      ...(dead
+        ? {
+          respawnSeconds: gameState.getRespawnSecondsLeft(now),
+          out: gameState.isLocalOutOfTheGame(now),
+          // In arena the champion is out only until the round is over.
+          ...(mode.kind === 'arena' ? { outText: ROUND_OUT_TEXT } : {}),
+        }
+        : {}),
       abilities: abilitySlotViews(
         gameState.getAbilityCooldowns(now),
-        (slot) => abilityKeys[slot]?.slice(3) ?? String(slot + 1),
+        (slot) => (abilityKeys[slot] === undefined ? String(slot + 1) : keyLabel(abilityKeys[slot])),
       ),
     })
-    modeHud.update(mode, local ? { id: local.id, team: local.team } : undefined)
+    modeHud.update(mode, local ? { id: local.id, team: local.team } : undefined, endedAtSeconds ?? gameState.getGameSeconds(now))
     scoreboard.update(gameState.getLeaderboard(), gameState.getKillFeed(now))
   }
 
@@ -711,6 +807,7 @@ export async function startGame({
     const now = performance.now()
     debugOverlay.frame(now, () => gameState.getDebugInfo())
     giveHeldCommand(now)
+    resumeSteering(now)
     drawFrame(now)
   })
 

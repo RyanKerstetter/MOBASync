@@ -17,8 +17,9 @@ import {
   heal,
   loseHealth,
   self,
-  SHOP_HEAL_AMOUNT,
   SHOP_HEAL_INTERVAL_TICKS,
+  SHOP_HEAL_SECONDS,
+  shopHealAmount,
   Simulator,
   Terrain,
   type CharacterOrder,
@@ -152,7 +153,7 @@ test('each champion has its own wait, one heal after a long quiet is shown at on
 // ---------------------------------------------------------------------------- the shop healing the page
 
 const WOUND = 500
-defineAbility({ id: 't-fn-wound', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 6000, apply: [loseHealth(WOUND)] })
+defineAbility({ id: 't-fn-wound', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 6000, apply: [loseHealth(WOUND)] })
 const hero = defineChampion({
   id: 't-fn-hero',
   name: 'Number Hero',
@@ -164,7 +165,7 @@ const hero = defineChampion({
   abilities: ['t-fn-wound'],
 })
 const WEST: ShopZone = { team: 1, x: 0, y: 0, width: 700, height: 1440 }
-const heals = !(SHOP_HEAL_AMOUNT > 0) ? { skip: 'the shop is set to heal nothing' } : {}
+const heals = !(SHOP_HEAL_SECONDS > 0) ? { skip: 'the shop is set to heal nothing' } : {}
 
 // The numbers a page would show over a champion that wounds itself on tick 1 and stands in its shop, tick by tick as the page looks at it.
 function shopNumbers(last: number): { changes: Array<{ tick: number; change: NumberChange }>; hp: number[] } {
@@ -198,7 +199,7 @@ test('the healing area makes a heal number for each heal, as much as the champio
   assert.ok(heal.length >= 3, `it was healed more than once: ${JSON.stringify(heal)}`)
   for (const { tick, change } of heal) {
     assert.equal(tick % SHOP_HEAL_INTERVAL_TICKS, 0, 'on a tick the shop heals on')
-    assert.equal(change.amount, SHOP_HEAL_AMOUNT, 'by the amount the shop heals')
+    assert.equal(change.amount, shopHealAmount(hero.maxHp), 'by the amount the shop heals a champion with this much health')
   }
   assert.equal(heal.reduce((total, { change }) => total + change.amount, 0), hp[last] - hp[1], 'and they add up to all the champion got back')
   assert.equal(changes.length, heal.length + 1, 'and nothing else made a number')
@@ -229,7 +230,7 @@ test('a champion standing in the healing area is shown a few numbers, not one fo
 
 // A champion that can wound itself by `WOUND` and then heal itself by far more than that, to see what the game counts of it.
 const MEND = 3 * 500
-defineAbility({ id: 't-fn-mend', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 60, apply: [heal(MEND, self())] })
+defineAbility({ id: 't-fn-mend', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 60, apply: [heal(MEND, self())] })
 const mender = defineChampion({
   id: 't-fn-mender',
   name: 'Number Mender',

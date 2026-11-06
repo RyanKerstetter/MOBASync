@@ -70,10 +70,10 @@ const held = (simulator: Simulator, id: number) => {
 
 test('only core destruction has an economy', () => {
   assert.deepEqual(GAME_MODES.map((mode) => [mode.id, mode.economy]), [
-    ['deathmatch', false], ['koth', false], ['ctf', false], ['core', true],
+    ['deathmatch', false], ['koth', false], ['ctf', false], ['core', true], ['arena', false],
   ])
   assert.equal(modeHasEconomy('core'), true)
-  for (const id of ['deathmatch', 'koth', 'ctf'] as const) assert.equal(modeHasEconomy(id), false, id)
+  for (const id of ['deathmatch', 'koth', 'ctf', 'arena'] as const) assert.equal(modeHasEconomy(id), false, id)
   assert.equal(new Simulator().hasEconomy, false, 'and the game that has no mode said is one of them')
   assert.equal(new Simulator(undefined, ECONOMY_MODE).hasEconomy, true)
 })

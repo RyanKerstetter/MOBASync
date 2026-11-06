@@ -10,14 +10,15 @@ import {
   GAME_RESPAWN_TICKS,
   GAME_TPS,
   Simulator,
+  walkingSpeed,
   type ChampionDef,
   type CharacterOrder,
   type DeathRecord,
 } from '../packages/shared/src/index.js'
-import { brawler, killAt } from './fixtures.js'
+import { brawler, killAt, walksAt } from './fixtures.js'
 
-// Tests derive travel distances from the champion so rebalancing move speed does not break them.
-const SPEED = brawler.moveSpeed
+// Tests derive travel distances from the champion so rebalancing move speed does not break them, and from `walkingSpeed`, so changing the game's move speed multiplier does not.
+const SPEED = walkingSpeed(brawler.moveSpeed)
 
 function championDef(champion: Champion): ChampionDef {
   return { ...champion, abilities: [...champion.abilities] }
@@ -315,8 +316,8 @@ test('an attack goes on swinging, each time its cooldown is up, until the charac
 test('an attacker follows a target that walks away from it, and keeps swinging at the speed of its attack', () => {
   // The target runs off along the line at 3 px a tick; the attacker is quicker, at 5.
   const simulator = new Simulator()
-  simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 300 }, new Champion({ ...championDef(brawler), moveSpeed: 300 }))
-  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 300, y: 300 }, new Champion({ ...championDef(brawler), moveSpeed: 180 }))
+  simulator.addPlayer(1, 'player-1', 'Player 1', { x: 100, y: 300 }, new Champion({ ...championDef(brawler), moveSpeed: walksAt(300) }))
+  simulator.addPlayer(2, 'player-2', 'Player 2', { x: 300, y: 300 }, new Champion({ ...championDef(brawler), moveSpeed: walksAt(180) }))
   simulator.addOrder(1, { id: 'attack-1', seq: 1, tick: 1, type: 'attack', targetId: 2 })
   simulator.addOrder(2, { id: 'run-1', seq: 1, tick: 1, type: 'move', target: { x: 2000, y: 300 } })
 
@@ -665,11 +666,11 @@ test('the map is far bigger than one screen, and its edge stops a champion at it
   const travel = Math.hypot(corner.x - 100, corner.y - 100)
 
   // Long after the old 800-wide arena would have ended it is still walking.
-  const midway = simulator.at(Math.floor(travel / brawler.moveSpeed * GAME_TPS * 0.85)).get(1)?.getPosition()
+  const midway = simulator.at(Math.floor(travel / SPEED * GAME_TPS * 0.85)).get(1)?.getPosition()
   assert.ok(midway && midway.x > 800 && midway.y > 450, 'past what used to be the whole arena')
   assert.ok(midway.x < corner.x && midway.y < corner.y, 'and not there yet')
 
-  const arrival = Math.ceil(travel / brawler.moveSpeed * GAME_TPS) + 3
+  const arrival = Math.ceil(travel / SPEED * GAME_TPS) + 3
   assert.deepEqual(simulator.at(arrival).get(1)?.getPosition(), corner)
   assert.deepEqual(simulator.at(arrival + 120).get(1)?.getPosition(), corner, 'it stays at the edge')
 })

@@ -2,7 +2,10 @@ import { Container, Graphics, Text, type RenderLayer } from 'pixi.js'
 import { clamp, getTeam } from '../../../../packages/shared/src/index.ts'
 import { CharacterSprite, teamVariant, type LoadedSpriteSet, type SheetPainter } from '../character-sprite.ts'
 import type { RenderedCharacter } from '../game-state.ts'
+import { BACK_BRIGHT, BACK_COLOR, layoutBack, type BackLook } from './back-look.ts'
 import { ATTACK_BAR_HEIGHT, attackBarTop, meterBarTop, METER_BAR_HEIGHT } from './bar-layout.ts'
+import { bleedTint, layoutBleedDrops, type BleedDrop } from './bleed-look.ts'
+import { layoutSpores, SPORE_COLOR, SPORE_EDGE, type SporeMote } from './spore-look.ts'
 import { layoutCorpse } from './corpse.ts'
 import { characterDepth } from './depth.ts'
 import { layoutDeaggroBar } from './deaggro-bar.ts'
@@ -20,6 +23,10 @@ type Actor = {
   sprite?: CharacterSprite
   // The body of a champion, a turret or a core that has no sprite set, drawn as shapes. Empty for one that has: a sprite stands on the ground by itself.
   shape: Graphics
+  // What is drawn on the ground under the body (the ring of going back), and over it (drops of blood, and the motes of going back). They are part of the body, so they are seen
+  // when it is and not otherwise.
+  groundFx: Graphics
+  bodyFx: Graphics
   statusText: Text
   stackPips: Graphics
   // A structure's barrier, drawn round it while it is protected and nothing can hurt it yet.
@@ -38,6 +45,12 @@ type Actor = {
 
 // How faint a champion is drawn while it is invisible, to those who can see it.
 export const INVISIBLE_ALPHA = 0.4
+
+// How high a knock-up throws a body at the top of its arc, in world units.
+export const AIRBORNE_LIFT = 26
+
+// The colour of the drops a bleeding body sheds: a dark blood red.
+const BLEED_COLOR = '#b3121f'
 
 // The health bar over each champion, in world units. A tick marks every HEALTH_TICK_EVERY health,
 // and a bigger one every HEALTH_MAJOR_TICK_EVERY.
@@ -116,7 +129,8 @@ export class CharacterLayer {
       const radius = character.champion.radius
       // The name and bars go over the body, or over the figure where it stands higher than that.
       const above = Math.max(radius, actor.sprite?.reach ?? 0)
-      actor.node.position.set(character.position.x, character.position.y)
+      // A knocked-up body is drawn up off the ground, as high as its arc has it, and is still drawn in front of and behind what it stands in front of and behind.
+      actor.node.position.set(character.position.x, character.position.y - (character.lift ?? 0) * AIRBORNE_LIFT)
       actor.node.zIndex = characterDepth(character.position)
       actor.overlay.position.set(character.position.x, character.position.y)
       // A death leaves no bars until the respawn: a faint ghost for a circle, and for a sprite its
@@ -129,6 +143,7 @@ export class CharacterLayer {
         hp: character.health?.hp ?? 0,
         maxHp: character.health?.maxHp ?? 0,
         shield: character.totalShield,
+        ...(character.healPreview !== undefined ? { heal: character.healPreview } : {}),
       })
       // A player's level sits at the left end of its health bar, and goes with the bar.
       const badge = character.dead ? undefined : layoutLevelBadge(character.level, { width: HEALTH_BAR_WIDTH, top: -above - 20, height: HEALTH_BAR_HEIGHT })
@@ -147,6 +162,14 @@ export class CharacterLayer {
       actor.statusText.text = statusLabels(character).join(' · ')
       actor.statusText.position.set(0, -above - 43)
       drawStackPips(actor.stackPips, radius, character.dead ? {} : character.stacks)
+      // Bleeding: drops of blood fall from the body, and the figure flushes red and pales again. Going back: a ring round its feet that closes as the channel runs, and motes rising.
+      const bleeding = character.bleeding && !character.dead
+      const back = character.backing !== undefined && !character.dead ? layoutBack(character.backing, now, radius) : undefined
+      drawBackGround(actor.groundFx, back)
+      // Spored: spores puff off the body and drift away.
+      const spores = character.spored && !character.dead ? layoutSpores(character.id, now, radius) : []
+      drawBodyFx(actor.bodyFx, bleeding ? layoutBleedDrops(character.id, now, radius) : [], back, spores)
+      ;(actor.sprite?.view ?? actor.shape).tint = bleeding ? bleedTint(now) : 0xffffff
       actor.sprite?.update({
         position: character.position,
         dead: character.dead,
@@ -223,15 +246,17 @@ export class CharacterLayer {
     })
     statusText.anchor.set(0.5, 1)
     const stackPips = new Graphics()
+    const groundFx = new Graphics()
+    const bodyFx = new Graphics()
     // A structure that cannot be hurt yet has a barrier round it, shown only while that is so.
     const barrier = character.turret ? drawBarrier(character.champion.radius) : undefined
-    node.addChild(shape, ...(barrier ? [barrier] : []), ...(sprite ? [sprite.view] : []), stackPips)
+    node.addChild(groundFx, shape, ...(barrier ? [barrier] : []), ...(sprite ? [sprite.view] : []), bodyFx, stackPips)
     overlay.addChild(label, statusText, healthBar, levelBadge, deaggroBar, meterBar, cooldownBar)
     this.view.addChild(node)
     this.overlay.addChild(overlay)
     // After it is in the scene, which the layer needs for where it is.
     this.depth?.attach(node)
-    const actor = { node, overlay, ...(sprite ? { sprite } : {}), shape, ...(barrier ? { barrier } : {}), statusText, stackPips, label, healthBar, levelBadge, levelText, deaggroBar, meterBar, cooldownBar }
+    const actor = { node, overlay, ...(sprite ? { sprite } : {}), shape, groundFx, bodyFx, ...(barrier ? { barrier } : {}), statusText, stackPips, label, healthBar, levelBadge, levelText, deaggroBar, meterBar, cooldownBar }
     this.actors.set(character.id, actor)
     return actor
   }
@@ -294,6 +319,44 @@ function drawStackPips(graphics: Graphics, radius: number, stacks: Record<string
   }
 }
 
+// The ground under a champion going back (see `layoutBack`): a glow, a faint ring round it, and the bright arc of the ring that goes round from the top as the channel runs.
+function drawBackGround(graphics: Graphics, look: BackLook | undefined): void {
+  graphics.clear()
+  if (!look) return
+  const { ringRadius, sweep } = look
+  graphics
+    .circle(0, 0, ringRadius)
+    .fill({ color: BACK_COLOR, alpha: look.glowAlpha })
+    .circle(0, 0, ringRadius)
+    .stroke({ color: BACK_COLOR, width: 2, alpha: 0.45 })
+  if (sweep > 0) {
+    const top = -Math.PI / 2
+    graphics
+      .moveTo(Math.cos(top) * ringRadius, Math.sin(top) * ringRadius)
+      .arc(0, 0, ringRadius, top, top + sweep)
+      .stroke({ color: BACK_BRIGHT, width: 3, alpha: 0.95 })
+  }
+}
+
+// What is drawn over a champion's body: drops of blood while it bleeds (each a round end with a point above it, as a drop is), spores while it carries one, and the motes of going back.
+function drawBodyFx(graphics: Graphics, drops: readonly BleedDrop[], back: BackLook | undefined, spores: readonly SporeMote[] = []): void {
+  graphics.clear()
+  for (const { x, y, size, alpha } of spores) {
+    if (alpha > 0) graphics.circle(x, y, size).fill({ color: SPORE_COLOR, alpha }).stroke({ color: SPORE_EDGE, width: 1, alpha })
+  }
+  for (const { x, y, size, alpha } of drops) {
+    if (alpha <= 0) continue
+    graphics
+      .circle(x, y, size)
+      .fill({ color: BLEED_COLOR, alpha })
+      .poly([x - size * 0.85, y - size * 0.4, x + size * 0.85, y - size * 0.4, x, y - size * 2.4])
+      .fill({ color: BLEED_COLOR, alpha })
+  }
+  for (const { x, y, size, alpha } of back?.motes ?? []) {
+    if (alpha > 0) graphics.circle(x, y, size).fill({ color: BACK_BRIGHT, alpha })
+  }
+}
+
 function drawBar(graphics: Graphics, y: number, fraction: number, fillColor: string, height = 4): void {
   const width = HEALTH_BAR_WIDTH
   graphics.clear()
@@ -303,8 +366,8 @@ function drawBar(graphics: Graphics, y: number, fraction: number, fillColor: str
     .fill({ color: fillColor })
 }
 
-// Health from the left, the shield on the end of it, and ticks across the bar to read it by.
-function drawHealthBar(graphics: Graphics, y: number, health: { hp: number; maxHp: number; shield: number }): void {
+// Health from the left, a heal that is ready after it (paler, as health that is not there yet), the shield on the end of that, and ticks across the bar to read it by.
+function drawHealthBar(graphics: Graphics, y: number, health: { hp: number; maxHp: number; shield: number; heal?: number }): void {
   const layout = layoutHealthBar(health, HEALTH_BAR_WIDTH, {
     every: HEALTH_TICK_EVERY,
     major: HEALTH_MAJOR_TICK_EVERY,
@@ -315,7 +378,9 @@ function drawHealthBar(graphics: Graphics, y: number, health: { hp: number; maxH
     .fill({ color: '#0b1220' })
     .rect(left, y, layout.healthWidth, HEALTH_BAR_HEIGHT)
     .fill({ color: '#67d391' })
-    .rect(left + layout.healthWidth, y, layout.shieldWidth, HEALTH_BAR_HEIGHT)
+    .rect(left + layout.healthWidth, y, layout.healWidth, HEALTH_BAR_HEIGHT)
+    .fill({ color: '#67d391', alpha: 0.4 })
+    .rect(left + layout.healthWidth + layout.healWidth, y, layout.shieldWidth, HEALTH_BAR_HEIGHT)
     .fill({ color: '#e8f4ff' })
   // A small tick reaches half way up from the bottom; a major one runs the full height.
   for (const tick of layout.ticks) {

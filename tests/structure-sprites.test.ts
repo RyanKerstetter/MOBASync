@@ -47,7 +47,8 @@ function look(layer: CharacterLayer, structure: RenderedCharacter, ann: Rendered
   return {
     body: node.visible,
     bars: layer.overlay.children[0].visible,
-    underneath: (node.children[0] as Graphics).context.instructions.length,
+    // The body's shapes, which are second: only what is drawn on the ground under a body (the ring of going back) comes before them.
+    underneath: (node.children[1] as Graphics).context.instructions.length,
     texture: (node.children.find((child) => child instanceof Sprite) as Sprite | undefined)?.texture as Texture,
   }
 }

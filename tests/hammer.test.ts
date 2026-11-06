@@ -32,6 +32,7 @@ import {
   RAGE_AUTO_TICKS,
   RAGE_HASTE,
   RAGE_KEY,
+  RAGE_LIFESTEAL,
   RAGE_MAX_TICKS,
   RAGE_TICKS,
 } from '../packages/shared/src/abilities.ts'
@@ -187,7 +188,7 @@ test('plating ends all at once, the time it lasts after the last auto, and an au
 
 // ---------------------------------------------------------------------------- Rage
 
-test('rage gives move speed and attack speed for as long as it lasts, and then all of it ends together', () => {
+test('rage gives move speed, attack speed and lifesteal for as long as it lasts, and then all of it ends together', () => {
   const simulator = scene([])
   simulator.addOrder(1, cast(1, 'rage', { mode: 'none' }))
   const frame = simulator.at(1)
@@ -195,12 +196,120 @@ test('rage gives move speed and attack speed for as long as it lasts, and then a
 
   assert.equal(statuses.find((status) => status.kind === 'haste')?.amount, RAGE_HASTE)
   assert.equal(statuses.find((status) => status.kind === 'stat' && status.stat === 'attackSpeed')?.amount, RAGE_ATTACK_SPEED)
+  assert.equal(statuses.find((status) => status.kind === 'lifesteal')?.amount, RAGE_LIFESTEAL)
   assert.equal(namedStatusTicksLeft(statuses, 1, RAGE_KEY, 1), RAGE_TICKS)
   assert.ok(hammer.attackCooldownTicksWith(statuses) < hammer.attackCooldownTicks, 'it attacks faster')
 
   const end = 1 + RAGE_TICKS
   assert.equal(simulator.at(end - 1).get(1)?.getStatuses().length, statuses.length, 'all of it is there the tick before')
   assert.deepEqual(simulator.at(end).get(1)?.getStatuses(), [], 'and ends on the same tick')
+})
+
+// Hurt once, early, by a body that hits hard and then hardly ever again, so that Hammer has health to be given back.
+const puncher = new Champion({
+  id: 't-hm-puncher',
+  name: 'Test Puncher',
+  base: { maxHp: 1_000_000, attackDamage: 300, attackSpeed: 0.01 },
+  moveSpeed: 140,
+  radius: GAME_MAX_CHAMPION_RADIUS,
+  attackRange: 600,
+  attackWindup: 0,
+  abilities: [],
+})
+// Hammer (1) hurt on tick 1, the bag (2) beside him, and the puncher (3) a way off.
+function woundedScene(): Simulator {
+  const simulator = scene([within])
+  simulator.addPlayer(3, 'p3', 'Puncher', { x: HOME.x, y: HOME.y - 400 }, puncher, 3)
+  simulator.addOrder(3, attack(1, 1))
+  return simulator
+}
+// Every tick on which the bag lost health, with what it lost and what Hammer gained on the same tick.
+function exchanges(simulator: Simulator, from: number, to: number): Array<{ tick: number; dealt: number; healed: number }> {
+  const found: Array<{ tick: number; dealt: number; healed: number }> = []
+  for (let tick = from; tick <= to; tick += 1) {
+    const dealt = hp(simulator.at(tick - 1), 2) - hp(simulator.at(tick), 2)
+    if (dealt > 0) found.push({ tick, dealt, healed: hp(simulator.at(tick), 1) - hp(simulator.at(tick - 1), 1) })
+  }
+  return found
+}
+
+test('a raging Hammer is healed by a share of the damage his autos deal, and one who is not raging is healed by nothing', () => {
+  const raging = woundedScene()
+  raging.addOrder(1, cast(3, 'rage', { mode: 'none' }))
+  raging.addOrder(1, attack(5, 2))
+  assert.ok(hp(raging.at(4), 1) < hammer.maxHp, 'he was hurt, so there is health to give back')
+  const autos = exchanges(raging, 5, 5 + 4 * hammer.attackCooldownTicks)
+  assert.ok(autos.length >= 3, `he landed a few autos (${autos.length})`)
+  for (const { tick, dealt, healed } of autos) {
+    assert.equal(healed, Math.round(dealt * RAGE_LIFESTEAL), `tick ${tick}: he is healed by ${RAGE_LIFESTEAL * 100}% of the ${dealt} the auto dealt`)
+    assert.ok(healed > 0, 'which is something')
+  }
+
+  const calm = woundedScene()
+  calm.addOrder(1, attack(5, 2))
+  const plain = exchanges(calm, 5, 5 + 4 * hammer.attackCooldownTicks)
+  assert.ok(plain.length >= 3)
+  for (const { tick, healed } of plain) assert.equal(healed, 0, `tick ${tick}: with no rage he is healed by nothing`)
+})
+
+test('rage\'s lifesteal is of what the auto really dealt, after what the target resists', () => {
+  const armoured = new Champion({
+    id: 't-hm-armoured',
+    name: 'Test Armoured',
+    base: { maxHp: 1_000_000, attackDamage: 1, attackSpeed: 1, resistance: 100 },
+    moveSpeed: 140,
+    radius: GAME_MAX_CHAMPION_RADIUS,
+    attackRange: 50,
+    attackWindup: 0,
+    abilities: [],
+  })
+  const simulator = new Simulator()
+  simulator.addPlayer(1, 'p1', 'One', HOME, hammer)
+  simulator.addPlayer(2, 'p2', 'Two', within, armoured)
+  simulator.addPlayer(3, 'p3', 'Three', { x: HOME.x, y: HOME.y - 400 }, puncher, 3)
+  simulator.addOrder(3, attack(1, 1))
+  simulator.addOrder(1, cast(3, 'rage', { mode: 'none' }))
+  simulator.addOrder(1, attack(5, 2))
+  const [first] = exchanges(simulator, 5, 5 + 2 * hammer.attackCooldownTicks)
+  assert.ok(first, 'an auto landed')
+  assert.ok(first.dealt < hammer.attackDamage, `it was cut by the resistance (${first.dealt} of ${hammer.attackDamage})`)
+  assert.equal(first.healed, Math.round(first.dealt * RAGE_LIFESTEAL), 'and the heal is of what it dealt')
+})
+
+test('an ability of a raging Hammer heals him too', () => {
+  const simulator = woundedScene()
+  simulator.addOrder(1, cast(3, 'rage', { mode: 'none' }))
+  simulator.addOrder(1, cast(5, 'slam', { mode: 'direction', dir: { x: 1, y: 0 } }))
+  const slam = abilityDefs.get('slam')
+  assert.ok(slam)
+  const [hit] = exchanges(simulator, 5, 5 + slam.windUpTicks + 5)
+  assert.ok(hit, 'the slam hit the bag')
+  assert.equal(hit.healed, Math.round(hit.dealt * RAGE_LIFESTEAL), 'and he is healed by a share of it')
+})
+
+test('a raging Hammer\'s lifesteal is renewed with the rest of the rage by his autos, so it lasts as long', () => {
+  const play = (): Simulator => {
+    const simulator = woundedScene()
+    simulator.addOrder(1, cast(3, 'rage', { mode: 'none' }))
+    simulator.addOrder(1, attack(5, 2))
+    return simulator
+  }
+  // The tick the first auto lands on, found in a game of its own, since the game forgets frames it has gone past.
+  const land = (exchanges(play(), 5, 5 + 2 * hammer.attackCooldownTicks)[0] ?? { tick: 5 }).tick
+  const simulator = play()
+  const read = (tick: number) => {
+    const statuses = simulator.at(tick).get(1)?.getStatuses() ?? []
+    return {
+      lifesteals: statuses.filter((status) => status.kind === 'lifesteal'),
+      hastes: statuses.filter((status) => status.kind === 'haste'),
+    }
+  }
+  const before = read(land - 1)
+  const after = read(land)
+  assert.equal(before.lifesteals.length, 1)
+  assert.equal(after.lifesteals.length, 1, 'still one: the auto renews it and does not add another')
+  assert.ok(after.lifesteals[0].endTick > before.lifesteals[0].endTick, 'and it lasts longer')
+  assert.equal(after.lifesteals[0].endTick, after.hastes[0].endTick, 'to the same tick as the rest of the rage')
 })
 
 test('a raging Hammer walks faster, by the move speed rage gives', () => {

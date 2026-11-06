@@ -41,9 +41,9 @@ type Ctf = Extract<ObjectiveState, { kind: 'ctf' }>
 
 // ---------------------------------------------------------------------------- choosing a mode
 
-test('the modes a lobby can pick are team deathmatch, king of the hill, capture the flag and core destruction', () => {
-  assert.deepEqual(GAME_MODES.map((mode) => mode.id), ['deathmatch', 'koth', 'ctf', 'core'])
-  assert.deepEqual(GAME_MODES.map((mode) => mode.name), ['Team Deathmatch', 'King of the Hill', 'Capture the Flag', 'Core Destruction'])
+test('the modes a lobby can pick are team deathmatch, king of the hill, capture the flag, core destruction and arena', () => {
+  assert.deepEqual(GAME_MODES.map((mode) => mode.id), ['deathmatch', 'koth', 'ctf', 'core', 'arena'])
+  assert.deepEqual(GAME_MODES.map((mode) => mode.name), ['Team Deathmatch', 'King of the Hill', 'Capture the Flag', 'Core Destruction', 'Arena'])
   assert.equal(isGameMode('koth'), true)
   assert.equal(isGameMode('battle-royale'), false)
   assert.equal(isGameMode(undefined), false)

@@ -16,6 +16,7 @@ import {
   damage,
   dash,
   dodge,
+  GAME_MOVE_SPEED_MULTIPLIER,
   enemiesInBox,
   enemiesInLine,
   enemiesInRadius,
@@ -76,6 +77,23 @@ import {
 
 const seconds = (value: number): number => Math.round(value * 60)
 
+// How fast a body the tests define walks is its own too: it walks as fast as it says, whatever the game's move speed multiplier (`GAME_MOVE_SPEED_MULTIPLIER`) is set to, so
+// that a scene the tests place by how far a second takes a body comes out the same. `defineChampion`, `defineMonster` and `defineItem` write the speed they are given as the
+// one the multiplier turns into it. (A test that is about the multiplier makes its bodies itself, with `new Champion`, and registers them with `registerChampion`.) The speed a
+// body walks at is `walkingSpeed(body.moveSpeed)`, never `body.moveSpeed`, which is the number as it was written into the game.
+const asWritten = (speed: number): number => speed / GAME_MOVE_SPEED_MULTIPLIER
+// The move speed to give a body made with `new Champion` (not through `defineChampion`) so that it walks at exactly this.
+export const walksAt = asWritten
+// A body made here is marked, and the mark is copied with the rest of it when a test builds another body from it (`defineChampion({ ...brawler, id: 'mine' })`), so that its speed,
+// which is already the one that comes out as written, is not turned into it a second time.
+const COMES_OUT_AS_WRITTEN = Symbol('comes out as written')
+function marked<T extends object>(body: T): T {
+  return Object.defineProperty(body, COMES_OUT_AS_WRITTEN, { value: true, enumerable: true })
+}
+function speedAsWritten<T extends { moveSpeed: number }>(def: T): T {
+  return COMES_OUT_AS_WRITTEN in def ? def : { ...def, moveSpeed: asWritten(def.moveSpeed) }
+}
+
 // The registries are readonly to the game, but a test has to be able to add its own content.
 // Snapshots restore characters and casts look abilities up by id, so both must be registered.
 export function defineAbility(def: AbilityDef): AbilityDef {
@@ -85,7 +103,8 @@ export function defineAbility(def: AbilityDef): AbilityDef {
 
 // A monster for a test, which the simulator finds by the id of its champion. Like the rest it stays registered.
 export function defineMonster(def: MonsterDef): Monster {
-  const monster = new Monster(def)
+  const monster = new Monster(speedAsWritten(def))
+  marked(monster.champion)
   ;(monsters as unknown as Map<string, Monster>).set(monster.id, monster)
   return monster
 }
@@ -101,13 +120,18 @@ export function defineTurret(tier: number, def: TurretTierDef): Turret {
 
 // An item for a test, which the simulator finds by its id. Like the rest it stays registered, so a test uses ids of its own ("t-...").
 export function defineItem(def: ItemDef): Item {
-  const item = new Item(def)
+  const speed = def.stats?.moveSpeed
+  const item = new Item(speed === undefined ? def : { ...def, stats: { ...def.stats, moveSpeed: asWritten(speed) } })
   ;(items as unknown as Map<string, Item>).set(item.id, item)
   return item
 }
 
 export function defineChampion(def: ChampionDef): Champion {
-  const champion = new Champion(def)
+  return registerChampion(marked(new Champion(speedAsWritten(def))))
+}
+
+// A champion a test made itself, in the champions the simulator finds by id. Its speed is whatever it was made with, multiplier and all.
+export function registerChampion(champion: Champion): Champion {
   ;(champions as unknown as Map<string, Champion>).set(champion.id, champion)
   return champion
 }
@@ -142,7 +166,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 6,
-  backswingTicks: 6,
   cooldownTicks: seconds(8),
   apply: [
     damage(200, enemiesInRadius(120)),
@@ -156,7 +179,6 @@ defineAbility({
   targeting: 'unit',
   range: 200,
   windUpTicks: 9,
-  backswingTicks: 6,
   cooldownTicks: seconds(5),
   apply: [damage(300, targetUnit()), slow(0.5, seconds(0.75), targetUnit())],
 })
@@ -166,7 +188,6 @@ defineAbility({
   range: 450,
   indicator: { width: 16 },
   windUpTicks: 9,
-  backswingTicks: 3,
   cooldownTicks: seconds(4),
   apply: [
     spawnEntity({ id: 't-bolt', speed: 600, radius: 8, lifetimeTicks: seconds(0.75), onHit: [damage(300)] }),
@@ -178,7 +199,6 @@ defineAbility({
   range: 300,
   indicator: { radius: 90 },
   windUpTicks: 30,
-  backswingTicks: 6,
   cooldownTicks: seconds(12),
   apply: [damage(400, enemiesInRadius(90, aimPoint()))],
 })
@@ -205,7 +225,6 @@ defineAbility({
   targeting: 'unit',
   range: 320,
   windUpTicks: 6,
-  backswingTicks: 6,
   cooldownTicks: seconds(10),
   apply: [
     damage(linear(150, 100, curseStacksOnTarget), targetUnit()),
@@ -219,7 +238,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 4,
-  backswingTicks: 4,
   cooldownTicks: seconds(14),
   apply: [
     spawnEntity({
@@ -237,7 +255,6 @@ defineAbility({
   targeting: 'direction',
   range: 520,
   windUpTicks: 8,
-  backswingTicks: 4,
   cooldownTicks: seconds(8),
   apply: [
     spawnEntity({
@@ -277,7 +294,6 @@ defineAbility({
   targeting: 'point',
   range: 280,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(8),
   movement: true,
   indicator: { line: true },
@@ -288,7 +304,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(12),
   apply: [statBuff('attackSpeed', 0.4, seconds(4)), attackRangeBonus(120, seconds(4))],
 })
@@ -308,7 +323,6 @@ defineAbility({
   targeting: 'point',
   range: 450,
   windUpTicks: 4,
-  backswingTicks: 4,
   cooldownTicks: seconds(14),
   apply: [
     spawnEntity({
@@ -362,7 +376,6 @@ defineAbility({
   targeting: 'direction',
   range: 300,
   windUpTicks: 4,
-  backswingTicks: 4,
   cooldownTicks: seconds(7),
   apply: [
     damage(linear(120, 25, swordStacks), enemiesInLine(300, 30)),
@@ -374,7 +387,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 3,
-  backswingTicks: 4,
   cooldownTicks: seconds(12),
   apply: [
     damage(linear(150, 100, swordStacks), enemiesInRadius(170)),
@@ -391,7 +403,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(10),
   empowerAttack: {
     ticks: seconds(5),
@@ -431,7 +442,6 @@ defineAbility({
   targeting: 'direction',
   range: 380,
   windUpTicks: 5,
-  backswingTicks: 4,
   cooldownTicks: seconds(9),
   apply: [
     spawnEntity({
@@ -465,7 +475,6 @@ defineAbility({
   targeting: 'direction',
   range: 450,
   windUpTicks: 4,
-  backswingTicks: 3,
   cooldownTicks: seconds(8),
   apply: [spawnEntity(bubble, { volley: { count: 5, intervalTicks: 5 } })],
 })
@@ -487,7 +496,6 @@ defineAbility({
   targeting: 'point',
   range: 400,
   windUpTicks: 5,
-  backswingTicks: 4,
   cooldownTicks: seconds(12),
   apply: [spawnEntity(galeField, { at: aimPoint() })],
 })
@@ -524,7 +532,6 @@ defineAbility({
   targeting: 'direction',
   range: 300,
   windUpTicks: 4,
-  backswingTicks: 4,
   cooldownTicks: seconds(7),
   apply: [
     damage(120, enemiesInLine(300, 30)),
@@ -571,7 +578,6 @@ defineAbility({
   targeting: 'point',
   range: 450,
   windUpTicks: 4,
-  backswingTicks: 4,
   cooldownTicks: seconds(9),
   apply: [spawnEntity(spoutWarning, { at: aimPoint() })],
 })
@@ -596,7 +602,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(18),
   apply: [
     loseHealth(150),
@@ -610,7 +615,6 @@ defineAbility({
   targeting: 'direction',
   range: 650,
   windUpTicks: 5,
-  backswingTicks: 3,
   cooldownTicks: seconds(7),
   apply: [
     spawnEntity({
@@ -640,7 +644,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 3,
-  backswingTicks: 3,
   cooldownTicks: seconds(24),
   apply: [
     shield(250, Infinity, self(), { shared: 't-medic' }),
@@ -687,7 +690,6 @@ defineAbility({
   targeting: 'point',
   range: 400,
   windUpTicks: 4,
-  backswingTicks: 4,
   cooldownTicks: seconds(10),
   apply: [
     spawnEntity({
@@ -726,7 +728,6 @@ defineAbility({
   targeting: 'point',
   range: 400,
   windUpTicks: 4,
-  backswingTicks: 4,
   cooldownTicks: seconds(12),
   apply: [
     spawnEntity({
@@ -758,7 +759,6 @@ defineAbility({
   // Drawn as two circles: the whole flash and the core inside it.
   indicator: { radius: 120, innerRadius: 50 },
   windUpTicks: 4,
-  backswingTicks: 3,
   cooldownTicks: seconds(14),
   apply: [
     spawnEntity({
@@ -781,7 +781,6 @@ defineAbility({
   targeting: 'unit',
   range: 300,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(10),
   apply: [burn(60, 120, targetUnit())],
 })
@@ -852,7 +851,6 @@ defineAbility({
   minRange: 150,
   indicator: { line: true, width: 16 },
   windUpTicks: 4,
-  backswingTicks: 4,
   cooldownTicks: seconds(8),
   requires: { entity: 't-stick', out: false },
   recast: 't-recall',
@@ -874,7 +872,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 2,
-  backswingTicks: 2,
   cooldownTicks: 30,
   requires: { entity: 't-stick', out: true },
   apply: [spawnEntity(stickRecall, { at: ownEntity('t-stick') }), removeEntities('t-stick')],
@@ -886,7 +883,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(8),
   empowerAttack: { ticks: seconds(5), effects: [silence(90), ...trinketTrick] },
   apply: [resetAutoTimer()],
@@ -896,7 +892,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 3,
-  backswingTicks: 2,
   cooldownTicks: seconds(10),
   // A stick on the ground to blink to, or else no stick anywhere, out or flying, and the throw on
   // cooldown, which it gives back whole.
@@ -963,7 +958,6 @@ defineAbility({
   targeting: 'point',
   range: 300,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(8),
   movement: true,
   indicator: { line: true },
@@ -976,7 +970,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(1),
   movement: true,
   requires: { entity: 't-shadow', out: true },
@@ -988,7 +981,6 @@ defineAbility({
   range: 462,
   indicator: { width: 20 },
   windUpTicks: 4,
-  backswingTicks: 3,
   cooldownTicks: seconds(7),
   apply: [
     when<SimContext>(
@@ -1014,7 +1006,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(12),
   apply: [haste(0.4, seconds(1.5)), dodge(seconds(1.2))],
 })
@@ -1058,7 +1049,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(10),
   apply: [resist(0.8, seconds(5))],
 })
@@ -1067,7 +1057,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(10),
   apply: [heal(100)],
 })
@@ -1094,7 +1083,6 @@ defineAbility({
   targeting: 'unit',
   range: 10_000,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: 0,
   apply: [damage(1_000_000, targetUnit())],
 })

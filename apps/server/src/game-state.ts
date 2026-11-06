@@ -10,6 +10,7 @@ import {
   getCore,
   getItem,
   getMonster,
+  isValidSteerDirection,
   assignSpawns,
   leadingTeam,
   getTurret,
@@ -408,13 +409,16 @@ export class ServerGameState {
     let reason: string | undefined
 
     if (characterId === undefined || !attacker) {
-      reason = order.type === 'move' ? 'The player character is not available.' : 'dead'
+      reason = order.type === 'move' || order.type === 'steer' ? 'The player character is not available.' : 'dead'
     } else if (
       order.tick <= this.simulator.commitTick
       || order.tick < Math.max(0, serverTick - FINALIZE_LAG)
       || order.tick > serverTick + FINALIZE_LAG
     ) {
       reason = 'stale'
+    } else if (order.type === 'steer' && !isValidSteerDirection(order.direction)) {
+      // A steer whose direction is not a unit vector, or none to stop, could walk a champion faster than it walks: it is not taken, nor sent on to anyone.
+      reason = 'bad_direction'
     } else if (order.type === 'attack' && !this.simulator.characters.has(order.targetId)) {
       reason = 'target_unavailable'
     } else if (order.type === 'cast' && !attacker.champion.hasAbility(order.abilityId)) {

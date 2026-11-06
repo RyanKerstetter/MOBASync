@@ -1,5 +1,10 @@
 import {
   abilityDefs,
+  BURN_MAX_STACKS,
+  ENT_ROOT_COOLDOWN_TICKS,
+  entangle,
+  LOW_HEALTH_BONUS,
+  TRANSFUSION_WINDOW_TICKS,
   CURSE_DURATION_TICKS,
   CURSE_KEY,
   CURSE_MAX_STACKS,
@@ -51,6 +56,7 @@ import {
   SWORD_DURATION_TICKS,
   SWORD_KEY,
   SWORD_MAX_STACKS,
+  SWORD_SCALING_PER_LEVEL,
   SHADOW_AUTO_BONUS,
   firstStrike,
 } from './abilities.js'
@@ -86,7 +92,7 @@ import {
 } from './effects.js'
 import type { Status } from './index.js'
 import { STRUCTURE_ARCANE_DAMAGE } from './structures.js'
-import { BASE_STAT_DEFAULTS, NO_GROWTH, StatBlock, type BaseStatsDef, type ChampionStats, type StatValues } from './stats.js'
+import { BASE_STAT_DEFAULTS, NO_GROWTH, StatBlock, walkingSpeed, type BaseStatsDef, type ChampionStats, type StatValues } from './stats.js'
 
 // A shot an auto attack fires instead of landing at once. It flies straight at its target, turning
 // with it, until it touches, and `onAttackHit` runs then. It has no timer of its own: it ends on
@@ -160,6 +166,9 @@ export interface ChampionDef {
   // A share that would kill the champion is not taken: the link breaks instead, its markers come off the unit, and the whole of the hit is the unit's. `onBreak` is run for the
   // champion as that happens, before the markers are taken off so that it can still find who was linked (what the link gives back on ending, say).
   damageLink?: { key: string; share: number; onBreak?: readonly Effect[] }
+  // It remembers the health it has lost for this many ticks (see `GameFrameCharacter.wounds`), for an ability that gives back a share of what it lost lately (`healthLost`). A champion
+  // that leaves it out remembers nothing, and its frame carries nothing for it.
+  healthMemoryTicks?: number
 }
 
 type StatusBonus = { kind: string; stat?: string; amount: number }
@@ -282,6 +291,7 @@ export class Champion {
   // The share of every hit it takes less of, from 0 for none (see `ChampionDef`).
   readonly damageReduction: number
   readonly damageLink: { key: string; share: number; onBreak?: readonly Effect[] } | undefined
+  readonly healthMemoryTicks: number | undefined
 
   constructor(def: ChampionDef) {
     for (const abilityId of def.abilities) {
@@ -374,6 +384,10 @@ export class Champion {
       throw new Error(`Champion "${def.id}" has a damage link that needs the key of a marker and a share above 0 and at most 1.`)
     }
     this.damageLink = def.damageLink ? { ...def.damageLink } : undefined
+    if (def.healthMemoryTicks !== undefined && !(Number.isInteger(def.healthMemoryTicks) && def.healthMemoryTicks > 0)) {
+      throw new Error(`Champion "${def.id}" remembers the health it loses for a number of ticks that needs to be a whole number above 0.`)
+    }
+    this.healthMemoryTicks = def.healthMemoryTicks
   }
 
   // Every ability it can cast: the ones on its keys, and the recasts that take their place.
@@ -385,11 +399,12 @@ export class Champion {
   }
 
   // Its stats at this level: the ones it is made with at level 1, and each level after that adds its growth. The health is a whole
-  // number, as health is; the rest are as they come out. What does not grow (the range, the speed) is the same at every level.
+  // number, as health is; the rest are as they come out. What does not grow (the range, the speed) is the same at every level. The move speed is what it walks at, with the
+  // game's move speed multiplier in it (`walkingSpeed`), where the field `moveSpeed` is as it is written.
   statsAt(level: number): ChampionStats {
     const gained = Number.isFinite(level) ? Math.max(0, Math.floor(level) - 1) : 0
     const grown = this.base.grownBy(this.growth, gained)
-    return { ...grown, maxHp: Math.round(grown.maxHp), attackRange: this.attackRange, moveSpeed: this.moveSpeed }
+    return { ...grown, maxHp: Math.round(grown.maxHp), attackRange: this.attackRange, moveSpeed: walkingSpeed(this.moveSpeed) }
   }
 
   // Its base stats, read on their own: what it is at level 1.
@@ -448,7 +463,8 @@ export class Champion {
 
   // An ability on one of its keys, or the recast that takes the place of one while it can be cast.
   hasAbility(abilityId: string): boolean {
-    return this.abilities.includes(abilityId)
+    return abilityDefs.get(abilityId)?.universal === true
+      || this.abilities.includes(abilityId)
       || this.abilities.some((id) => abilityDefs.get(id)?.recast === abilityId)
   }
 
@@ -478,6 +494,21 @@ const platingStacksOnSelf = stacks(PLATING_KEY, self())
 const platingPerStack = scaled(PLATING_RESISTANCE_PER_STACK, { level: PLATING_SCALING_PER_LEVEL })
 const platingResistance = (sim: SimReader, src: EffectSource): number =>
   Math.min(PLATING_MAX_STACKS, platingStacksOnSelf(sim, src) + 1) * platingPerStack(sim, src)
+
+// Swordsman's passive, read when an auto lands: the stacks of sword he has before this auto adds its own, and what the auto comes to with them. A stack is worth its base plus a
+// number of points for each level he is (see `scaled`), the same as a stack of Hammer's plating, so the auto grows with his level through the stacks as well as through his attack damage.
+const swordStacksOnSelf = stacks(SWORD_KEY, self())
+const swordPerStack = scaled(SWORD_DAMAGE_PER_STACK, { level: SWORD_SCALING_PER_LEVEL })
+const swordAutoDamage = (sim: SimReader, src: EffectSource): number =>
+  ownAttackDamage(sim, src) + swordStacksOnSelf(sim, src) * swordPerStack(sim, src)
+
+// Aurel's passive, read when an auto lands: his attack damage, and up to `LOW_HEALTH_BONUS` more of it the less health he has (his health as it stood before this tick's hits): all of
+// the bonus at none, half of it at half his health, and none at full.
+const lowHealthAutoDamage = (sim: SimReader, src: EffectSource): number => {
+  const health = sim.healthOf(src.ownerId)
+  const missing = health && health.maxHp > 0 ? Math.min(1, Math.max(0, 1 - health.hp / health.maxHp)) : 0
+  return ownAttackDamage(sim, src) * (1 + LOW_HEALTH_BONUS * missing)
+}
 
 export const DEFAULT_CHAMPION_ID = 'cursebearer'
 
@@ -519,9 +550,9 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     id: 'swordsman',
     name: 'Swordsman',
     description: 'A melee duelist that builds sword stacks with every blow and spends them on bursts, roots and stuns.',
-    passive: `Auto attacks give you a sword stack, up to ${SWORD_MAX_STACKS}, lasting ${SWORD_DURATION_TICKS / GAME_TPS} seconds. Each stack adds ${SWORD_DAMAGE_PER_STACK} damage to your autos and to Slash.`,
-    base: { maxHp: 1000, attackDamage: 80, attackSpeed: .9, resistance: 0, haste: 0, arcane: 20 },
-    growth: { maxHp: 75, attackDamage: 16, attackSpeed: 0.01, resistance: 8, haste: 6, arcane: 7 },
+    passive: `Auto attacks give you a sword stack, up to ${SWORD_MAX_STACKS}, lasting ${SWORD_DURATION_TICKS / GAME_TPS} seconds. Each stack adds ${SWORD_DAMAGE_PER_STACK} damage to your autos, and more as you level, and to Slash.`,
+    base: { maxHp: 1000, attackDamage: 80, attackSpeed: .9, resistance: 0, haste: 0, arcane: 0 },
+    growth: { maxHp: 75, attackDamage: 16, attackSpeed: 0.01, resistance: 8, haste: 6, arcane: 2 },
     moveSpeed: 145,
     radius: 22,
     attackRange: 90,
@@ -529,7 +560,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     abilities: ['slash', 'radiance', 'shackle'],
     // The auto reads the stacks before this hit adds one.
     onAttackHit: [
-      damage(linear(attackDamage(), SWORD_DAMAGE_PER_STACK, stacks(SWORD_KEY, self()))),
+      damage(swordAutoDamage),
       mark(SWORD_KEY, SWORD_DURATION_TICKS, self(), { cap: SWORD_MAX_STACKS }),
     ],
   }),
@@ -631,7 +662,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A hulking bruiser that toughens with every blow, leaps onto its prey and flies into a rage.',
     passive: `Auto attacks give a stack of resistance, up to ${PLATING_MAX_STACKS}. Stacks last ${PLATING_TICKS / GAME_TPS} seconds and every auto renews them.`,
     base: { maxHp: 1100, attackDamage: 70, attackSpeed: .9, resistance: 0, haste: 0, arcane: 10 },
-    growth: { maxHp: 90, attackDamage: 10, attackSpeed: 0.02, resistance: 8, haste: 6, arcane: 3 },
+    growth: { maxHp: 90, attackDamage: 10, attackSpeed: 0.02, resistance: 8, haste: 4, arcane: 3 },
     moveSpeed: 145,
     radius: 24,
     attackRange: 100,
@@ -653,7 +684,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A melee skirmisher that hooks enemies in, whirls its chains around it and dashes through fights.',
     passive: `The first auto on an enemy, or first hit on it with the edge of Whirl, deals bonus damage and heals you. Each enemy has its own ${FIRST_STRIKE_COOLDOWN_TICKS / GAME_TPS} second cooldown.`,
     base: { maxHp: 900, attackDamage: 70, attackSpeed: 1, resistance: 0, haste: 0, arcane: 10 },
-    growth: { maxHp: 65, attackDamage: 16, attackSpeed: 0.02, resistance: 5, haste: 8, arcane: 3 },
+    growth: { maxHp: 65, attackDamage: 18, attackSpeed: 0.02, resistance: 5, haste: 8, arcane: 3 },
     moveSpeed: 150,
     radius: 21,
     attackRange: 110,
@@ -720,6 +751,53 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
       reduceCooldown('flurry', MONK_AUTO_REFUND_TICKS),
       reduceCooldown('guard', MONK_AUTO_REFUND_TICKS),
     ],
+  }),
+  new Champion({
+    id: 'firemage',
+    name: 'Fire Mage',
+    description: 'A ranged pyromancer that stacks burns on its foes, then stuns them with a fireball.',
+    passive: `Abilities add burn stacks, up to ${BURN_MAX_STACKS}. The more stacks, the more the burn hurts.`,
+    base: { maxHp: 750, attackDamage: 45, attackSpeed: .85, resistance: 0, haste: 0, arcane: 35 },
+    growth: { maxHp: 55, attackDamage: 4, attackSpeed: 0.015, resistance: 2, haste: 8, arcane: 20 },
+    moveSpeed: 140,
+    radius: 20,
+    attackRange: 230,
+    attackWindup: 0.21,
+    attackProjectile: { speed: 600, radius: 6, color: '#ff7a2f' },
+    // Q throws the fireball, and sets it off while it flies; W is the tornado; E is the wave of fire. The burn stacks are his abilities' (see abilities.ts): his autos are plain.
+    abilities: ['fireball', 'firetornado', 'scorch'],
+  }),
+  new Champion({
+    id: 'aurel',
+    name: 'Aurel',
+    description: 'A melee bloodletter that hits harder as it weakens, makes its prey bleed and runs it down.',
+    passive: 'Auto attacks hit harder the less health you have.',
+    base: { maxHp: 950, attackDamage: 65, attackSpeed: .9, resistance: 0, haste: 0, arcane: 5 },
+    growth: { maxHp: 80, attackDamage: 13, attackSpeed: 0.02, resistance: 6, haste: 6, arcane: 2 },
+    moveSpeed: 150,
+    radius: 22,
+    attackRange: 100,
+    attackWindup: 0.22,
+    // Q strikes a nearby enemy and resets his auto, W cleanses and heals back what he just lost, E dashes onto an enemy.
+    abilities: ['rend', 'transfusion', 'bloodrush'],
+    onAttackHit: [damage(lowHealthAutoDamage)],
+    // Transfusion heals a share of what he lost lately, so he remembers it for as long as it looks back.
+    healthMemoryTicks: TRANSFUSION_WINDOW_TICKS,
+  }),
+  new Champion({
+    id: 'ent',
+    name: 'Ent',
+    description: 'A melee treant that roots what it strikes, grows groves that heal its allies, and bursts the spores it plants.',
+    passive: `Your first auto attack on an enemy roots it. Each enemy can be rooted this way once every ${ENT_ROOT_COOLDOWN_TICKS / GAME_TPS} seconds.`,
+    base: { maxHp: 1050, attackDamage: 62, attackSpeed: .8, resistance: 0, haste: 0, arcane: 20 },
+    growth: { maxHp: 85, attackDamage: 7, attackSpeed: 0.015, resistance: 6, haste: 6, arcane: 14 },
+    moveSpeed: 140,
+    radius: 24,
+    attackRange: 110,
+    attackWindup: 0.25,
+    // Q bursts roots up out of a small circle, W grows a grove in a big one, E strikes and plants a spore.
+    abilities: ['rootburst', 'grove', 'spore'],
+    onAttackHit: [damage(attackDamage()), entangle],
   }),
 ].map((champion) => [champion.id, champion]))
 

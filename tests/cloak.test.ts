@@ -20,6 +20,7 @@ import {
   self,
   Simulator,
   type CastTarget,
+  walkingSpeed,
   type CharacterOrder,
   type GameTickSnapshot,
   type VisionMask,
@@ -182,7 +183,7 @@ test('when ghost ends, each enemy near is feared and marked, and the ones far ar
   assert.deepEqual(marks(atEnd, 4, FEAR_KEY), [])
 
   // They run from him, straight away, for as long as it lasts, at their own speed, whatever they are told; and then they stop where they are.
-  const ran = bag.moveSpeed * FEAR_TICKS / GAME_TPS
+  const ran = walkingSpeed(bag.moveSpeed) * FEAR_TICKS / GAME_TPS
   assert.ok(Math.abs(right[FEAR_TICKS] - right[0] - ran) < 1, `the one on the right ran ${right[FEAR_TICKS] - right[0]}, which is ${ran}`)
   assert.ok(Math.abs(left[0] - left[FEAR_TICKS] - ran) < 1, 'and the one on the left ran as far, the other way')
   for (let index = 1; index <= FEAR_TICKS; index += 1) assert.ok(right[index] > right[index - 1], `it kept running (${index})`)
@@ -234,7 +235,7 @@ test('an order to attack an invisible champion is dropped, and does not stop wha
   simulator.addOrder(2, attack(10, 1))
   const walked = where(simulator.at(20), 2).x
   const later = where(simulator.at(50), 2).x
-  assert.ok(later - walked > hammer.moveSpeed * 20 / GAME_TPS, `it is still walking: ${walked} then ${later}`)
+  assert.ok(later - walked > walkingSpeed(hammer.moveSpeed) * 20 / GAME_TPS, `it is still walking: ${walked} then ${later}`)
   assert.equal(simulator.at(50).get(2)?.getAttackTarget(), undefined)
 })
 
@@ -272,8 +273,8 @@ test('ghost is the one ability of cloak\'s that keeps him invisible: knives and 
 })
 
 test('an ability that keeps invisibility does, and one that does not shows him and does what being seen does', () => {
-  const quiet = defineAbility({ id: 't-cloak-quiet', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 60, keepsInvisibility: true, apply: [haste(0.1, 10, self())] })
-  const loud = defineAbility({ id: 't-cloak-loud', targeting: 'none', range: 0, windUpTicks: 0, backswingTicks: 0, cooldownTicks: 60, apply: [haste(0.1, 10, self())] })
+  const quiet = defineAbility({ id: 't-cloak-quiet', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 60, keepsInvisibility: true, apply: [haste(0.1, 10, self())] })
+  const loud = defineAbility({ id: 't-cloak-loud', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 60, apply: [haste(0.1, 10, self())] })
   const copy = new Champion({ ...cloak, abilities: ['ghost', quiet.id, loud.id] })
   const simulator = new Simulator()
   simulator.addPlayer(1, 'p1', 'One', HOME, copy, 1)
@@ -439,10 +440,13 @@ test('cut through gives a share of itself back against an enemy he has feared la
   assert.ok(cut)
   // A knives that is on cooldown is ready when it is cast, whomever it hits.
   const plain = scene([along(0.5)])
+  assert.ok(knives)
   plain.addOrder(1, cast(1, 'knives', west))
-  plain.addOrder(1, cast(10, 'cutthrough', at(2)))
-  assert.equal(plain.at(9).get(1)?.getAbilityCooldown('knives').ready, false, 'knives is on cooldown')
-  assert.equal(plain.at(11).get(1)?.getAbilityCooldown('knives').ready, true, 'and cut through gives it back')
+  // The cooldown starts when the knives go off, a windup after the cast, and cut through is cast a few ticks after that.
+  const thrown = 1 + knives.windUpTicks
+  plain.addOrder(1, cast(thrown + 4, 'cutthrough', at(2)))
+  assert.equal(plain.at(thrown + 3).get(1)?.getAbilityCooldown('knives').ready, false, 'knives is on cooldown')
+  assert.equal(plain.at(thrown + 5).get(1)?.getAbilityCooldown('knives').ready, true, 'and cut through gives it back')
 
   // Cast from invisibility, he shows himself and fears what is near, so the enemy he cuts through has been feared by him.
   const simulator = scene([along(0.5)])
@@ -561,13 +565,15 @@ const wolf = defineMonster({
 const tower = defineTurret(91, { base: { maxHp: 100_000, attackDamage: 50, attackSpeed: 1 }, radius: 40, attackRange: 400, attackWindup: 0 })
 
 test('a monster does not notice an invisible champion who walks up to it, and a turret does not shoot one', () => {
-  // He starts out of its reach and walks toward it, so that he comes into it while he is invisible (or, for the control, while he is not).
+  // He starts out of its reach and walks toward it, so that he comes into it while he is invisible (or, for the control, while he is not). Cloak is the game's own, so how far he
+  // walks in the time is what his speed makes it, whatever the game's move speed multiplier is: it is put that far off, and half its reach more.
+  const late = Math.floor(GHOST_TICKS * 0.8)
+  const far = walkingSpeed(cloak.moveSpeed) * (late - 2) / GAME_TPS + wolf.ai.aggroRange / 2
   const watched = (invisible: boolean): string | undefined => {
     const simulator = scene([])
-    simulator.addMonster(10, wolf, { x: HOME.x + 600, y: HOME.y })
+    simulator.addMonster(10, wolf, { x: HOME.x + far, y: HOME.y })
     if (invisible) simulator.addOrder(1, cast(1, 'ghost', none))
-    simulator.addOrder(1, move(2, { x: HOME.x + 600, y: HOME.y }))
-    const late = Math.floor(GHOST_TICKS * 0.8)
+    simulator.addOrder(1, move(2, { x: HOME.x + far, y: HOME.y }))
     const frame = simulator.at(late)
     assert.ok(distance(where(frame, 1), where(frame, 10)) < wolf.ai.aggroRange, 'he has come into its reach')
     return frame.get(10)?.getAi()?.mode

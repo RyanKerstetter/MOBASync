@@ -19,6 +19,18 @@ export function normalize(vector: Vector2): Vector2 | undefined {
   return directionTo({ x: 0, y: 0 }, vector)
 }
 
+// How far from 1 the squared length of a direction given in an order may be, a skillshot's or a steer's. It is worked out on the page and sent as numbers, so it is not held to exactly 1.
+export const DIRECTION_LENGTH_TOLERANCE = 0.01
+
+// Whether a steer order's direction is one the game takes (see `SteerOrderSchema`): none ({0, 0}), which stops steering, or a unit vector, its squared length within
+// `DIRECTION_LENGTH_TOLERANCE` of 1. Anything else (longer, shorter, not a number) is refused, by the server before it is sent on and by the simulator, so a steer
+// never walks a champion faster than it walks.
+export function isValidSteerDirection(direction: Vector2): boolean {
+  if (!Number.isFinite(direction.x) || !Number.isFinite(direction.y)) return false
+  if (direction.x === 0 && direction.y === 0) return true
+  return Math.abs(direction.x * direction.x + direction.y * direction.y - 1) <= DIRECTION_LENGTH_TOLERANCE
+}
+
 // A number held between `low` and `high`.
 export function clamp(value: number, low: number, high: number): number {
   return Math.max(low, Math.min(high, value))

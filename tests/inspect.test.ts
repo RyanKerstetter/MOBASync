@@ -8,6 +8,7 @@ import {
   getItem,
   ITEM_SLOT_NAMES,
   ITEM_SLOTS,
+  walkingSpeed,
   withItems,
   withStatBuffs,
   type Simulator,
@@ -138,7 +139,7 @@ test('its stats are those of its level with what its items add, and what carries
   assert.ok(sim)
   const expected = withItems(sim.champion.statsAt(1), { boots: boots.id, chest: robe.id, pet: charm.id })
   assert.deepEqual(bob.stats, expected)
-  assert.equal(bob.stats.moveSpeed, hero.moveSpeed + (boots.stats.moveSpeed ?? 0), 'what the boots add')
+  assert.equal(bob.stats.moveSpeed, walkingSpeed(hero.moveSpeed, boots.stats.moveSpeed ?? 0), 'what the boots add')
   assert.equal(bob.stats.arcane, 7 + (robe.stats.arcane ?? 0), 'on what it started with')
   assert.deepEqual(bob.items, { boots: boots.id, chest: robe.id, pet: charm.id })
   // One that has bought nothing is the champion as it was made.

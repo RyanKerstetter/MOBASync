@@ -1310,7 +1310,7 @@ button.hud-item:hover {
 }
 
 /* The escape menu, over the game and its HUD. It hangs from near the top, and is not centred, so the tabs stay where they are as pages of different
-   heights are opened under them. */
+   heights are opened beside them. */
 .game-menu {
   position: absolute;
   z-index: 4;
@@ -1330,7 +1330,7 @@ button.hud-item:hover {
   box-sizing: border-box;
   display: grid;
   gap: 0.9rem;
-  width: min(27rem, calc(100% - 2rem));
+  width: min(40rem, calc(100% - 2rem));
   padding: 1.1rem 1.2rem 1rem;
   color: var(--ui-text);
   background: var(--ui-bg);
@@ -1384,14 +1384,51 @@ button.hud-item:hover {
   font-size: 0.75rem;
 }
 
-/* The tabs along the top of the menu, and the page under them: sections of rows, each under a small heading. */
-.game-menu-tabs {
-  display: flex;
-  gap: 0.4rem;
+/* The tabs down the left of the menu, with Leave game under them, and the page beside them: sections of rows, each under a small heading. */
+.game-menu-layout {
+  display: grid;
+  grid-template-columns: 10rem minmax(0, 1fr);
+  gap: 1.2rem;
+  align-items: start;
+  min-height: 18rem;
+}
+
+.game-menu-side {
+  display: grid;
+  align-content: start;
+  align-self: stretch;
+  gap: 1.2rem;
+  padding-right: 1.2rem;
+  border-right: 1px solid var(--ui-line);
+}
+
+.game-menu-tabs,
+.game-menu-footer {
+  display: grid;
+  gap: 0.35rem;
 }
 
 .game-menu-tabs button {
-  flex: 1;
+  text-align: left;
+}
+
+/* On a narrow screen there is no room for a column of tabs beside the page: they go back to a row along the top, and the page is under them. */
+@media (max-width: 36rem) {
+  .game-menu-layout {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .game-menu-side {
+    padding: 0 0 0.9rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--ui-line);
+  }
+
+  .game-menu-tabs {
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+  }
 }
 
 .game-menu-page {
@@ -1488,7 +1525,24 @@ button.hud-item:hover {
   accent-color: var(--ui-accent);
 }
 
+/* A dropdown looks like the buttons: one row, as wide as its row. */
+.game-menu-row select {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.45rem 0.8rem;
+  color: var(--ui-text);
+  background: var(--ui-bg-raised);
+  border: 1px solid var(--ui-line);
+  font: inherit;
+  cursor: pointer;
+}
+
+.game-menu-row select:hover {
+  background: var(--ui-bg-hover);
+}
+
 .game-menu-panel button:focus-visible,
+.game-menu-row select:focus-visible,
 .game-menu-row input[type='range']:focus-visible {
   outline: 2px solid var(--ui-accent);
   outline-offset: 2px;
@@ -1625,12 +1679,29 @@ button.hud-item:hover {
   pointer-events: none;
 }
 
+/* The mode's name, with how far into the game it is beside it. */
+.mode-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.6rem;
+}
+
 .mode-title {
   color: var(--ui-muted);
   font-size: 0.68rem;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+/* Digits of the one width, so the clock does not shift sideways as they change. */
+.mode-clock {
+  color: var(--ui-text);
+  font-size: 0.95rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
 }
 
 .mode-scores,
@@ -1688,6 +1759,7 @@ button.hud-item:hover {
 .mode-flags[hidden],
 .mode-scores[hidden],
 .mode-cores[hidden],
+.mode-rounds[hidden],
 .mode-hint[hidden] {
   display: none;
 }
@@ -1809,6 +1881,35 @@ button.hud-item:hover {
 
 .mode-cores li.is-eliminated {
   opacity: 0.6;
+}
+
+/* Arena: a box for every round the game can take, in a row that wraps when there are many. A round that has been won is filled with the winner's colour,
+   the round being fought is outlined, and the rest are empty. */
+.mode-rounds {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.3rem;
+  max-width: min(24rem, 100%);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mode-round {
+  width: 1.1rem;
+  height: 1.1rem;
+  background: var(--ui-track);
+  border: 1px solid var(--ui-line);
+}
+
+.mode-round.is-won {
+  background: var(--team-color);
+  border-color: var(--ui-track);
+}
+
+.mode-round.is-current {
+  border: 2px solid var(--ui-text);
 }
 
 .mode-hint {

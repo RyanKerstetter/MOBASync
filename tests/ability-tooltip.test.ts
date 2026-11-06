@@ -56,7 +56,6 @@ const ability = (id: string, apply: AbilityDef['apply'], rest: Partial<AbilityDe
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: 8 * GAME_TPS,
   apply,
   ...rest,
@@ -266,7 +265,12 @@ test('every ability in the game has a name, says what it does and tells its cool
     assert.ok(tip.name.length > 0, `${def.id} has a name`)
     assert.ok((def.description ?? '').length > 0, `${def.id} says what it does`)
     assert.equal(tip.about, def.description)
-    assert.deepEqual(tip.stats.at(-1), { label: 'Cooldown', value: `${Number((def.cooldownTicks / GAME_TPS).toFixed(1))}s` }, `${def.id} tells its cooldown`)
+    // One with no cooldown (Back) has no line for it.
+    if (def.cooldownTicks > 0) {
+      assert.deepEqual(tip.stats.at(-1), { label: 'Cooldown', value: `${Number((def.cooldownTicks / GAME_TPS).toFixed(1))}s` }, `${def.id} tells its cooldown`)
+    } else {
+      assert.equal(tip.stats.some((line) => line.label === 'Cooldown'), false, `${def.id} has none to tell`)
+    }
   }
 })
 

@@ -4,6 +4,7 @@ import { ClientGameState } from '../apps/client/src/game-state.ts'
 import {
   flagHint,
   flagReadout,
+  formatGameClock,
   hillFraction,
   hillReadout,
   modeTitle,
@@ -26,6 +27,64 @@ const HILL: HillArea = { x: 500, y: 300, width: 400, height: 200, ellipse: true 
 
 const hillView = (extra: Partial<HillView> = {}): HillView =>
   ({ hill: HILL, fraction: 0, contested: false, direction: 'none', ...extra })
+
+// ---------------------------------------------------------------------------- the game clock
+
+test('the clock counts up in minutes and seconds, and in hours once there are some', () => {
+  const clock = (seconds: number): string => formatGameClock(seconds)
+  assert.deepEqual(
+    [0, 1, 9, 59, 60, 61, 125, 599, 600, 3599].map(clock),
+    ['0:00', '0:01', '0:09', '0:59', '1:00', '1:01', '2:05', '9:59', '10:00', '59:59'],
+  )
+  assert.deepEqual([3600, 3601, 3661, 36_000, 45_296].map(clock), ['1:00:00', '1:00:01', '1:01:01', '10:00:00', '12:34:56'])
+})
+
+test('the clock reads whole seconds, rounded down, so it never runs ahead of the game', () => {
+  assert.equal(formatGameClock(0.999), '0:00')
+  assert.equal(formatGameClock(59.999), '0:59')
+  assert.equal(formatGameClock(60), '1:00')
+  assert.equal(formatGameClock(125.9), '2:05')
+})
+
+test('a time before the start, or that is not a time, reads as the start', () => {
+  for (const seconds of [-1, -0.5, -3600, Number.NaN, Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY]) {
+    assert.equal(formatGameClock(seconds), '0:00', String(seconds))
+  }
+})
+
+test('the clock only ever goes forward as the game does, a second at a time', () => {
+  const read: string[] = []
+  for (let second = 0; second <= 130; second += 1) read.push(formatGameClock(second))
+  assert.equal(new Set(read).size, read.length, 'each second reads differently')
+  const total = (text: string): number => text.split(':').reduce((sum, part) => sum * 60 + Number(part), 0)
+  read.forEach((text, second) => assert.equal(total(text), second))
+})
+
+test('the game\'s own clock is the server\'s tick, estimated forward to now, in seconds', () => {
+  const state = new ClientGameState()
+  // The game begins on tick 0, and the page is told the tick it is on when it joins.
+  state.resetServerTickAnchor(0, 1000)
+  assert.equal(state.getGameSeconds(1000), 0, 'at the start it is nothing')
+  assert.equal(state.getGameSeconds(1000 + 2500), 2.5, 'and a second of real time is a second of game')
+
+  state.resetServerTickAnchor(125 * GAME_TPS, 5000)
+  assert.equal(state.getGameSeconds(5000), 125)
+  assert.equal(formatGameClock(state.getGameSeconds(5000)), '2:05', 'two minutes five in')
+  assert.equal(formatGameClock(state.getGameSeconds(5000 + 999)), '2:05', 'until a whole second more has gone by')
+  assert.equal(formatGameClock(state.getGameSeconds(5000 + 1000)), '2:06')
+
+  // A newer tick from the server moves it on to what the server says; an older one does not take it back.
+  state.setServerTick(130 * GAME_TPS, 6000, 0)
+  assert.equal(state.getGameSeconds(6000), 130)
+  state.setServerTick(100 * GAME_TPS, 7000, 0)
+  assert.equal(state.getGameSeconds(6000), 130, 'a tick that is older than what it knows changes nothing')
+})
+
+test('the game\'s clock is never negative, whatever moment it is asked for', () => {
+  const state = new ClientGameState()
+  state.resetServerTickAnchor(0, 5000)
+  assert.equal(state.getGameSeconds(1000), 0, 'a moment before the page was told')
+})
 
 test('teams are listed with the highest score first, and a tie by team number', () => {
   const scores: Record<number, number> = { 1: 2, 2: 5, 3: 2, 4: 0 }

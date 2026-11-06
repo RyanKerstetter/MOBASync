@@ -11,6 +11,7 @@ import {
   damage,
   enemiesInRadius,
   entityPosAt,
+  GAME_ARENA_HEIGHT,
   GAME_ARENA_WIDTH,
   GAME_RESPAWN_TICKS,
   GAME_TPS,
@@ -29,6 +30,7 @@ import {
   spawnEntity,
   subject,
   targetUnit,
+  walkingSpeed,
   type CastOrder,
   type CastTarget,
   type CharacterOrder,
@@ -100,18 +102,34 @@ test('a nova cast winds up, then applies damage, slow, shield, and attack reset 
     launch.events.map(({ type }) => type),
     ['damage', 'reset-attack-timer'],
   )
-  assert.equal(simulator.at(launchTick + shockwave.backswingTicks).get(1)?.getAction(), undefined)
+  assert.equal(simulator.at(launchTick).get(1)?.getAction(), undefined, 'and there is nothing after it: no backswing')
 })
 
-test('moving during windup cancels a cast without spending its cooldown', () => {
+test('moving during the windup of an ability does not cancel it: it goes off on time, and the walk begins after it', () => {
+  const shockwave = getAbilityDef('t-shockwave')
+  assert.ok(shockwave && shockwave.windUpTicks > 3, 'it winds up for long enough to be walked during')
   const simulator = createSimulator()
+  const target = { x: 100, y: 400 }
   simulator.addOrder(1, cast(1, 1, 't-shockwave', { mode: 'none' }))
-  simulator.addOrder(1, { id: 'player-1:2', seq: 2, tick: 4, type: 'move', target: { x: 300, y: 100 } })
+  simulator.addOrder(1, { id: 'player-1:2', seq: 2, tick: 4, type: 'move', target })
+  const launch = 1 + shockwave.windUpTicks
 
-  const later = simulator.at(20)
-  assert.equal(later.get(2)?.getHealth(), 1000)
-  assert.equal(later.get(1)?.getAbilityCooldown('t-shockwave').ready, true)
-  assert.equal(later.get(1)?.getAction(), undefined)
+  const winding = simulator.at(launch - 1).get(1)
+  assert.equal(winding?.getAction()?.kind, 'cast', 'the cast is still winding up')
+  assert.deepEqual(winding?.getPosition(), ORIGIN, 'and he has not moved: the walk waits for it')
+  assert.equal(simulator.at(launch - 1).get(2)?.getHealth(), 1000, 'nothing has landed yet')
+
+  const gone = simulator.at(launch)
+  assert.equal(gone.get(2)?.getHealth(), 800, 'it went off on its tick')
+  assert.equal(gone.get(1)?.getAbilityCooldown('t-shockwave').ready, false, 'and its cooldown is spent')
+  assert.equal(gone.get(1)?.getAction(), undefined, 'and he is free the moment it has: there is no backswing')
+  assert.deepEqual(gone.get(1)?.getPosition(), ORIGIN, 'he stood for all of the windup')
+
+  // The walk that was kept begins on the tick after the cast, and goes to where it was sent.
+  const first = simulator.at(launch + 1).get(1)?.getPosition()
+  assert.ok(first && first.x === ORIGIN.x && Math.abs(first.y - (ORIGIN.y + walkingSpeed(brawler.moveSpeed) / GAME_TPS)) < 1e-9, 'it walks from the next tick')
+  const there = simulator.at(launch + 400).get(1)?.getPosition()
+  assert.deepEqual(there, target, 'and gets there')
 })
 
 test('a slow status rebases movement at the reduced speed until it expires', () => {
@@ -121,7 +139,7 @@ test('a slow status rebases movement at the reduced speed until it expires', () 
   const lash = getAbilityDef('t-lash')
   assert.ok(lash)
   const launchTick = 1 + lash.windUpTicks
-  const speed = brawler.moveSpeed
+  const speed = walkingSpeed(brawler.moveSpeed)
 
   const hit = simulator.at(launchTick)
   assert.equal(hit.get(2)?.getHealth(), 700)
@@ -480,8 +498,8 @@ test('haste and slow combine as base * (1 + haste) * (1 - slow)', () => {
     const after = simulator.at(tick + 1).get(id)?.getPosition()
     return Math.hypot((after?.x ?? 0) - (before?.x ?? 0), (after?.y ?? 0) - (before?.y ?? 0))
   }
-  const owner = getChampion('t-cursebearer').moveSpeed
-  const enemy = brawler.moveSpeed
+  const owner = walkingSpeed(getChampion('t-cursebearer').moveSpeed)
+  const enemy = walkingSpeed(brawler.moveSpeed)
   assertClose(step(1, 12), owner * 1.25 / 60)
   assertClose(step(2, 12), enemy * 0.75 / 60)
 })
@@ -860,7 +878,7 @@ test('attacks and casts are rejected during a dash, and a move order waits for i
   assert.deepEqual(simulator.at(landing).get(1)?.getPosition(), LEAP_TARGET)
   const walking = simulator.at(landing + 10).get(1)?.getPosition()
   assertClose(walking?.x ?? 0, LEAP_TARGET.x)
-  assertClose(walking?.y ?? 0, 100 + getChampion('t-archer').moveSpeed * 10 / GAME_TPS)
+  assertClose(walking?.y ?? 0, 100 + walkingSpeed(getChampion('t-archer').moveSpeed) * 10 / GAME_TPS)
 })
 
 test('a dash is clamped to the arena and a late order recomputes it', () => {
@@ -1007,7 +1025,7 @@ test('snare stays on the ground for a second and roots whoever walks into it, wh
   assert.ok(stopped)
   // It is stopped at the trap's edge, not carried in to the middle.
   assert.ok(Math.hypot(stopped.x - SNARE_POINT.x, stopped.y - SNARE_POINT.y) <= SNARE_TOUCH)
-  assert.ok(Math.hypot(stopped.x - SNARE_POINT.x, stopped.y - SNARE_POINT.y) > SNARE_TOUCH - 5)
+  assert.ok(Math.hypot(stopped.x - SNARE_POINT.x, stopped.y - SNARE_POINT.y) > SNARE_TOUCH - 2 * walkingSpeed(brawler.moveSpeed) / GAME_TPS, 'at the edge, give or take a step or two')
   assert.equal(rootOn(simulator, caught)?.endTick, caught + SNARE_ROOT)
   // The root holds it for its full length, even though the trap itself is long gone by then.
   assert.equal(simulator.at(SNARE_UP + 61).getEntities().length, 0, 'the trap lasted only a second')
@@ -2367,7 +2385,7 @@ test('the medic bot lags behind a walking soldier by the spring\'s pull, and swi
     (bot.x - rest(soldier).x) * direction.x + (bot.y - rest(soldier).y) * direction.y
 
   // At a steady walk the spring settles into a constant lag of damping * speed / stiffness.
-  const speed = soldier.moveSpeed
+  const speed = walkingSpeed(soldier.moveSpeed)
   const expectedLag = BOT_DAMPING * speed / BOT_STIFFNESS
   const cruising = track.filter(({ tick }) => tick >= 450 && tick <= 650)
   for (const entry of cruising) {
@@ -2637,8 +2655,9 @@ test('the fading speed starts at its full bonus, falls in a straight line and en
   for (const [seq, tick] of [[1, 1], [2, 61], [3, 121]]) {
     simulator.addOrder(1, { id: `player-1:${seq}`, seq, tick, type: 'attack', targetId: 2 })
   }
-  // Heads away along y once the third auto has landed, on tick 124; the haste runs to tick 244.
-  simulator.addOrder(1, { id: 'player-1:4', seq: 4, tick: 125, type: 'move', target: { x: 300, y: 1000 } })
+  // Heads away along y once the third auto has landed, on tick 124; the haste runs to tick 244. It goes to the far edge of the arena, so that it is walking still on the last tick
+  // looked at, however fast the game has everyone walk.
+  simulator.addOrder(1, { id: 'player-1:4', seq: 4, tick: 125, type: 'move', target: { x: 300, y: GAME_ARENA_HEIGHT } })
 
   const step = (tick: number): number => {
     const before = simulator.at(tick - 1).get(1)?.getPosition()
@@ -2646,7 +2665,7 @@ test('the fading speed starts at its full bonus, falls in a straight line and en
     assert.ok(before && after)
     return Math.hypot(after.x - before.x, after.y - before.y)
   }
-  const base = grenadier.moveSpeed / GAME_TPS
+  const base = walkingSpeed(grenadier.moveSpeed) / GAME_TPS
   // The step over (t - 1, t] uses the share of the haste still ahead at t - 1.
   const expected = (tick: number): number => base * (1 + 0.5 * Math.max(0, Math.min(1, (244 - (tick - 1)) / 120)))
 
@@ -2730,7 +2749,6 @@ defineAbility({
   targeting: 'unit',
   range: 300,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: 600,
   apply: [root(300, targetUnit())],
 })
@@ -2765,7 +2783,7 @@ test('walking over the stick picks it up, and the throw then has no more than a 
 
   assert.ok(pickedUp, 'it was picked up')
   // The moment the two bodies touch, not when the walker reaches the middle of it.
-  assert.ok(pickedUp.distance <= STICK_PICKUP_REACH && pickedUp.distance > STICK_PICKUP_REACH - 3, `${pickedUp.distance}`)
+  assert.ok(pickedUp.distance <= STICK_PICKUP_REACH && pickedUp.distance > STICK_PICKUP_REACH - walkingSpeed(trinketmaster.moveSpeed) / GAME_TPS - 0.6, `${pickedUp.distance}`)
   assert.equal(pickedUp.remaining, 60, 'hundreds of ticks were left, now one second')
   assert.equal(throwCooldown(simulator, pickedUp.tick + 59)?.ready, false)
   assert.equal(throwCooldown(simulator, pickedUp.tick + 60)?.ready, true)
@@ -2982,8 +3000,8 @@ test('warp with no stick anywhere and the throw on cooldown gives the throw back
   assert.deepEqual(frame.get(1)?.getPosition(), TRINKET_AT, 'and the trinketmaster has not gone anywhere')
 
   // The throw can go again at once.
-  simulator.addOrder(1, cast(4, launched + warp.backswingTicks + 1, 't-stick', STICK_EAST, TRINKET_AT))
-  assert.equal(sticksOut(simulator, launched + warp.backswingTicks + 1 + STICK_DOWN).length, 1, 'and does')
+  simulator.addOrder(1, cast(4, launched + 1, 't-stick', STICK_EAST, TRINKET_AT))
+  assert.equal(sticksOut(simulator, launched + 1 + STICK_DOWN).length, 1, 'and does')
 })
 
 test('warp with a stick on the ground still blinks to it, and the throw is not given back', () => {
@@ -3086,7 +3104,6 @@ test('a champion cannot have an ability whose recast does not exist', () => {
     targeting: 'none',
     range: 0,
     windUpTicks: 0,
-    backswingTicks: 0,
     cooldownTicks: 60,
     recast: 't-does-not-exist',
     apply: [damage(1, enemiesInRadius(10))],
@@ -3206,7 +3223,7 @@ test('a cast with no windup does not interrupt a walk, a dash resumes it, and a 
     return simulator
   }
   // Left alone it gets there 120 ticks after the order, at 2.5 px a tick.
-  const arrival = 1 + Math.ceil((walkTo.x - ORIGIN.x) / (archer.moveSpeed / GAME_TPS))
+  const arrival = 1 + Math.ceil((walkTo.x - ORIGIN.x) / (walkingSpeed(archer.moveSpeed) / GAME_TPS))
   const castAt = (simulator: Simulator, seq: number, abilityId: string, target: CastTarget): void => {
     const origin = simulator.at(20).get(1)?.getPosition()
     assert.ok(origin)
@@ -3267,7 +3284,6 @@ defineAbility({
   targeting: 'unit',
   range: 300,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: 600,
   apply: [blind(120, targetUnit())],
 })
@@ -3673,7 +3689,7 @@ test('the dash back goes to the shadow from any distance, and reaches the enemy 
   simulator.addOrder(1, stepAlong(1, 1, NINJA_AT))
   // The ninja then walks a thousand pixels from the shadow, far beyond the reach of any dash.
   simulator.addOrder(1, { id: 'player-1:2', seq: 2, tick: 30, type: 'move', target: { x: 1300, y: 300 } })
-  const castTick = 30 + Math.ceil(700 / (ninja.moveSpeed / GAME_TPS)) + 5
+  const castTick = 30 + Math.ceil(700 / (walkingSpeed(ninja.moveSpeed) / GAME_TPS)) + 5
   const from = simulator.at(castTick).get(1)?.getPosition()
   assert.deepEqual(from, { x: 1300, y: 300 })
   simulator.addOrder(1, cast(3, castTick, 't-shadowreturn', { mode: 'none' }, from))
@@ -3798,7 +3814,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: 600,
   apply: [mark('shadow', 360, self(), { count: 3, cap: 2 })],
 })
@@ -4374,6 +4389,6 @@ test('an area speed-up reaches teammates and the caster, not enemies, and it rea
     const after = simulator.at(tick + 1).get(id)?.getPosition()
     return Math.hypot((after?.x ?? 0) - (before?.x ?? 0), (after?.y ?? 0) - (before?.y ?? 0))
   }
-  assertClose(step(2, 12), brawler.moveSpeed * 1.25 / GAME_TPS)
-  assertClose(step(3, 12), brawler.moveSpeed * 0.75 / GAME_TPS)
+  assertClose(step(2, 12), walkingSpeed(brawler.moveSpeed) * 1.25 / GAME_TPS)
+  assertClose(step(3, 12), walkingSpeed(brawler.moveSpeed) * 0.75 / GAME_TPS)
 })

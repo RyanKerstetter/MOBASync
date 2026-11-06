@@ -1,5 +1,5 @@
-import { abilityDefs, beyondMinCastRange, meetsRequirement, readyKey, withinCastRange, type AbilityDef } from './abilities.js'
-import { boxTouchesCircle, clamp, directionTo, distanceBetween, distanceToSegment } from './geometry.js'
+import { abilityDefs, BACK_ABILITY_ID, beyondMinCastRange, castRangeAgainst, meetsRequirement, readyKey, withinCastRange, type AbilityDef } from './abilities.js'
+import { boxTouchesCircle, clamp, DIRECTION_LENGTH_TOLERANCE, directionTo, distanceBetween, distanceToSegment, isValidSteerDirection, normalize } from './geometry.js'
 import { think, type AiBody, type AiOrder, type AiOther } from './ai.js'
 import { DEFAULT_CHAMPION_ID, getChampion, type Champion } from './champions.js'
 import {
@@ -9,6 +9,7 @@ import {
   GAME_MONSTER_TEAM,
   GAME_RESPAWN_TICKS,
   GAME_SNAPSHOT_HISTORY_TICKS,
+  GAME_STRUCTURE_EJECT_DEPTH,
   GAME_TPS,
 } from './constants.js'
 import {
@@ -25,12 +26,26 @@ import {
   type SimContext,
 } from './effects.js'
 import { effectsOfKind } from './item-effects.js'
-import { advanceObjective, initialObjective, modeHasEconomy, type ObjectiveCore, type ObjectiveUnit } from './modes.js'
+import { advanceObjective, arenaResetTick, initialObjective, modeHasEconomy, type ObjectiveCore, type ObjectiveUnit } from './modes.js'
 import { getCharacterChampion, monsters, type Monster } from './monsters.js'
 import { buyProblem, getItem, ITEM_SLOTS, itemAttackSpeedBonus, itemEffects, itemTotals, KEPT_ON_DEATH, sellValue, withItems, type Inventory } from './items.js'
-import { GAME_STARTING_GOLD, levelForXp, monsterLevelAfterKill, monsterXpAt, PLAYER_KILL_REWARD, type Resources } from './progression.js'
-import { inOwnShop, mayShop, SHOP_HEAL_AMOUNT, shopHealsOn, type ShopZone } from './shops.js'
-import { hastedCooldownTicks, statMultiplier, withStatBuffs, type ChampionStats } from './stats.js'
+import {
+  addDamage,
+  assistXp,
+  catchupXp,
+  creditKill,
+  GAME_STARTING_GOLD,
+  levelForXp,
+  liveDamage,
+  monsterLevelAfterKill,
+  monsterXpAt,
+  PLAYER_KILL_REWARD,
+  playerKillXpAt,
+  respawnTicksAt,
+  type Resources,
+} from './progression.js'
+import { inOwnShop, mayShop, shopHealAmount, shopHealsOn, type ShopZone } from './shops.js'
+import { hastedCooldownTicks, statMultiplier, walkingSpeed, withStatBuffs, type ChampionStats } from './stats.js'
 import { Terrain } from './terrain.js'
 import { shieldedStructures, type StructureRef } from './structures.js'
 import { chooseTurretTarget, turrets, type Turret, type TurretPrey } from './turrets.js'
@@ -56,17 +71,31 @@ import type {
   Vector2,
 } from './index.js'
 
-const DIRECTION_LENGTH_TOLERANCE = 0.01
+// How far ahead of a steered character the place it is heading for is said to be (see `getMoveTarget`): more than a tick's walk, so a page that carries the walk on between ticks never
+// runs past it.
+const STEER_HEADING_DISTANCE = 100
 
 // How far away a feared character heads from whoever it is running from, each step: far enough that it is never there, so it keeps running for as long as it is feared.
 const FLEE_DISTANCE = 1000
 
-// A character dying: the tick it died on, who it was, and who did the damage that took its last
-// health (nobody, if it was its own).
+// How far past touching a body is put when it is spat out of a structure (see `nearestFreeSpot`), and how much of that a place may still be inside one and count as clear.
+const STRUCTURE_EXIT_MARGIN = 0.5
+
+// Sixteen evenly spaced directions, from the first quarter turned three times, so that no trigonometry is run: every peer must get the same numbers.
+const COMPASS: readonly Vector2[] = (() => {
+  const quarter: Array<[number, number]> = [[1, 0], [0.9238795325112867, 0.3826834323650898], [0.7071067811865476, 0.7071067811865476], [0.3826834323650898, 0.9238795325112867]]
+  const turns: Array<(x: number, y: number) => Vector2> = [(x, y) => ({ x, y }), (x, y) => ({ x: -y, y: x }), (x, y) => ({ x: -x, y: -y }), (x, y) => ({ x: y, y: -x })]
+  return turns.flatMap((turn) => quarter.map(([x, y]) => turn(x, y)))
+})()
+
+// A character dying: the tick it died on, who it was, who is credited with the kill, and who with the assist. The killer is the player who landed the last blow (see
+// `creditKill`); if that was not a player's, the player who did the most damage to it; and if no player hurt it, whoever did the damage that took its last health (a turret or
+// a monster: nobody, if it was its own). The assist is the player who did the most damage after the killer, if they are on the killer's team.
 export type DeathRecord = {
   tick: number
   victimId: number
   killerId?: number
+  assistId?: number
 }
 
 // An order a character is to carry out this tick.
@@ -216,6 +245,11 @@ export class CharacterTickSnapshot {
     return this.state.health?.deathTick
   }
 
+  // How much health it has lost after `sinceTick`, as the frame remembers it (see `GameFrameCharacter.wounds`): nothing for a champion that does not remember.
+  getHealthLostSince(sinceTick: number): number {
+    return healthLostSince(this.state, sinceTick)
+  }
+
   isDead(): boolean {
     return this.state.health?.deathTick !== undefined
   }
@@ -224,10 +258,20 @@ export class CharacterTickSnapshot {
     return this.state.dash !== undefined
   }
 
-  // Where the character is currently heading, whether walking or dashing.
+  // Where the character is currently heading, whether walking or dashing. One that is steered is heading a little way along its direction from wherever it is.
   getMoveTarget(): Vector2 | undefined {
-    const target = this.state.dash?.target ?? this.state.movement?.target
-    return target ? { ...target } : undefined
+    if (this.state.dash) return { ...this.state.dash.target }
+    const movement = this.state.movement
+    if (!movement) return undefined
+    if ('target' in movement) return { ...movement.target }
+    const { position } = this.state
+    return { x: position.x + movement.direction.x * STEER_HEADING_DISTANCE, y: position.y + movement.direction.y * STEER_HEADING_DISTANCE }
+  }
+
+  // The direction the character is steered along (a unit vector), while it is: see `SteerOrderSchema`.
+  getSteerDirection(): Vector2 | undefined {
+    const movement = this.state.movement
+    return movement && 'direction' in movement ? { ...movement.direction } : undefined
   }
 
   getNextAttackTick(): number {
@@ -442,6 +486,10 @@ class TickContext implements SimContext {
     return (this.states.get(unitId)?.statuses ?? []).map((status) => ({ ...status }))
   }
 
+  healthLostSince(unitId: number, sinceTick: number): number {
+    return healthLostSince(this.states.get(unitId), sinceTick)
+  }
+
   entitiesOf(ownerId: number, defId: string): Array<{ id: string; position: Vector2 }> {
     return this.entities
       .filter((entity) => entity.ownerId === ownerId && entity.defId === defId)
@@ -562,6 +610,12 @@ export class Simulator {
     return this.setup.respawnTicks ?? GAME_RESPAWN_TICKS
   }
 
+  // How long the character stays dead for, as a frame has it: the respawn time of the game, and more for each level it is above the first (`respawnTicksAt`). A monster's
+  // is its own (`AiProfileDef.respawnTicks`), and a structure does not come back.
+  respawnTicksFor(characterId: number, frame: GameTickSnapshot): number {
+    return respawnTicksAt(this.respawnTicks, levelOfState(frame.getCharacterState(characterId)))
+  }
+
   // With no terrain given, the game is on the plain arena with no walls, and with no mode it is team
   // deathmatch. With no shops it can be shopped in from anywhere.
   constructor(terrain: Terrain = Terrain.plain(), setup: ModeSetup = { kind: 'deathmatch' }, shops: readonly ShopZone[] = []) {
@@ -650,15 +704,60 @@ export class Simulator {
   // left of the team is all it has. (It is always true for a character that is alive, and for any other mode.)
   canRespawn(characterId: number, frame: GameTickSnapshot): boolean {
     const character = this.characters.get(characterId)
+    // In arena a player who falls is out until the round is over, when everyone comes back (see `arenaResetTick`).
+    if (character && !character.isNpc && this.setup.kind === 'arena') return false
     return !character || !this.teamCoreBroken(character.team, (id) => frame.get(id)?.isDead() === false)
   }
 
   // What a death on a frame paid whoever caused it, on the tick it happened: the gold and the experience it put in the killer's frame
-  // (see `killReward`), or nothing for a death that paid no one: it has no killer, the game has no economy, or the killer is not a player.
-  // It is worked out as the frame paid it, from the victim as that frame has it, so it is what the page shows over the body.
+  // (see `killReward`, and `catchupXp` for the killer who is behind), or nothing for a death that paid no one: it has no killer, the game has no economy, or the killer is not a player.
+  // It is worked out as the frame paid it, from the victim as that frame has it, and the levels as they stood when the tick began, so it is what the page shows over the body.
   paidFor(death: DeathRecord, frame: GameTickSnapshot): Pick<Resources, 'gold' | 'xp'> | undefined {
     const reward = this.paidForDeath(death, frame.getCharacterState(death.victimId))
-    return reward ? { gold: reward.gold, xp: reward.xp } : undefined
+    if (!reward || death.killerId === undefined) return undefined
+    return { gold: reward.gold, xp: this.catchupFor(reward.xp, death.killerId, this.levelsBefore(death, frame)) }
+  }
+
+  // What a death on a frame paid whoever is credited with the assist, the experience it put in their frame, or nothing if it has no assist or pays no one (see `assistXp`). It is a
+  // share of what the kill is worth before the killer's catch-up, and then has the assister's own.
+  assistPaidFor(death: DeathRecord, frame: GameTickSnapshot): number {
+    const shared = this.assistXpFor(death, frame.getCharacterState(death.victimId))
+    return shared > 0 && death.assistId !== undefined ? this.catchupFor(shared, death.assistId, this.levelsBefore(death, frame)) : shared
+  }
+
+  private assistXpFor(death: DeathRecord, victim: GameFrameCharacter | undefined): number {
+    if (death.assistId === undefined) return 0
+    const reward = this.paidForDeath(death, victim)
+    return reward ? assistXp(reward.xp) : 0
+  }
+
+  // The levels the players had when the tick of a death began, which are what the tick paid by: the frame before it, or the frame itself if that one has gone.
+  private levelsBefore(death: DeathRecord, frame: GameTickSnapshot): (id: number) => number | undefined {
+    let before = frame
+    if (death.tick > 0) {
+      try {
+        before = this.at(death.tick - 1)
+      } catch (error) {
+        if (!(error instanceof RangeError)) throw error
+      }
+    }
+    return (id) => {
+      const state = before.getCharacterState(id)
+      return state ? levelOfState(state) : undefined
+    }
+  }
+
+  // The experience a player is paid for an award of `xp`, with catch-up: more for each level it is below the highest level of any player in the game (see `catchupXp`). Only players
+  // have a level that counts, whatever level a monster has reached. `levelOf` says what level each was, which is the one thing the live game and the page's count of what was paid have
+  // to agree on.
+  private catchupFor(xp: number, playerId: number, levelOf: (id: number) => number | undefined): number {
+    const mine = levelOf(playerId)
+    if (mine === undefined || !(xp > 0)) return xp
+    let top = mine
+    for (const character of this.characters.values()) {
+      if (!character.isNpc) top = Math.max(top, levelOf(character.id) ?? 1)
+    }
+    return catchupXp(xp, mine, top)
   }
 
   // What a death pays its killer, if it pays: only a player is paid, whatever it killed, and only in a game with an economy.
@@ -878,9 +977,13 @@ export class Simulator {
       const state = cloneFrameCharacter(prior)
       if (state.dash) {
         // A dash replaces walking for as long as it lasts, at its own speed. It goes over walls: only
-        // the arena's edge holds it.
-        state.position = stepToward(prior.position, state.dash.target, state.dash.speed / GAME_TPS, character.champion.radius, this.ground)
-        const finished = state.position.x === state.dash.target.x && state.position.y === state.dash.target.y
+        // the arena's edge holds it. A structure holds it too, unless it is a dash through: a turret does not give way as a champion does, so the dash stops where it meets
+        // it (and is over), where it would otherwise be shoved back every tick and never reach its end.
+        const radius = character.champion.radius
+        const step = stepToward(prior.position, state.dash.target, state.dash.speed / GAME_TPS, radius, this.ground)
+        const stopped = state.dash.through ? undefined : this.stoppedByStructure(prior.position, step, radius, previous)
+        state.position = stopped ?? step
+        const finished = stopped !== undefined || (state.position.x === state.dash.target.x && state.position.y === state.dash.target.y)
         if (state.dash.contact) {
           dashSteps.push({ characterId, from: { ...prior.position }, contact: state.dash.contact, finished })
         }
@@ -905,20 +1008,39 @@ export class Simulator {
             )
           }
         }
-      } else if (state.movement && !isImmobilized(prior.statuses)) {
+      } else if (state.movement && !isImmobilized(prior.statuses) && prior.action === undefined) {
+        // A walk waits for an ability that is being cast, or an auto attack that is winding up (the frame before still has the action in it until it has gone off): an order to
+        // walk during the windup was kept, and begins on the tick after it.
         // Movement over (tick - 1, tick] uses the previous frame's statuses, as they stood then.
         // A monster going home (it has given up, or has been pushed off its post) walks faster than it does otherwise.
         const homeward = character.monster && prior.ai?.mode === 'return' ? character.monster.ai.returnSpeedMultiplier : 1
         const speed = getMoveSpeed(character, prior.statuses, tick - 1, itemTotals(prior.items).moveSpeed ?? 0) * homeward
         const radius = character.champion.radius
+        const movement = state.movement
         // The way round any walls in the way, from where it is now, which is worked out again every
         // tick so it needs nothing kept in the frame: its first point is where to head.
-        const route = this.ground.path(prior.position, state.movement.target, radius)
-        if (!route) {
+        const route = 'target' in movement ? this.ground.path(prior.position, movement.target, radius) : undefined
+        if ('direction' in movement) {
+          // Steered: a tick's walk along the direction, from wherever it is. A wall it walks into pushes it back out the shortest way, which leaves it sliding along the
+          // wall rather than stopped at it. It is never anywhere it was going, so it walks on until it is told something else.
+          const step = speed / GAME_TPS
+          state.position = this.ground.keepOutOfWalls(
+            this.ground.clamp({ x: prior.position.x + movement.direction.x * step, y: prior.position.y + movement.direction.y * step }, radius),
+            radius,
+          )
+        } else if (!route) {
           // There is no way to where it was sent.
           state.movement = undefined
         } else {
-          const heading = route[0] ?? prior.position
+          // The pathfinder knows the walls and not the structures, and a structure does not give way, so a point on the way can be inside one (the corner of a wall that a
+          // structure stands against): a body would step onto it, be pushed back out, and do it again for good. A point like that is passed over for the next on the way.
+          const standing = (id: number): boolean => {
+            const other = previous.getCharacterState(id)
+            return other !== undefined && isAlive(other)
+          }
+          let next = 0
+          while (next < route.length - 1 && this.insideStructure(route[next], radius, standing)) next += 1
+          const heading = route[next] ?? prior.position
           state.position = this.ground.keepOutOfWalls(
             stepToward(prior.position, heading, speed / GAME_TPS, radius, this.ground),
             radius,
@@ -932,13 +1054,22 @@ export class Simulator {
       }
       state.statuses = state.statuses.filter((status) => status.endTick > tick)
       state.markers = state.markers.filter((marker) => marker.endTick > tick)
+      // What it remembers losing is forgotten as it gets older than its memory, so a frame holds only what could still be read.
+      if (state.wounds) {
+        const memory = character.champion.healthMemoryTicks ?? 0
+        const kept = state.wounds.filter((wound) => wound.tick > tick - memory)
+        if (kept.length > 0) state.wounds = kept
+        else delete state.wounds
+      }
       // One that was invisible and is not now has run out of time, and is seen: what that does is done once everyone is where the tick has put them. (One that attacked or
       // cast was seen as it did: see `revealed`. One that died has no statuses.)
       if (isAlive(prior) && isInvisible(prior.statuses) && !isInvisible(state.statuses)) leaving.push(characterId)
       // A dead character comes back a fixed time after the tick it died on: a monster when its profile says (never, if it does not),
       // and a structure never, as it is destroyed for the rest of the game. In Core Destruction a player whose team's core is broken
-      // does not either: it is a player of a team that is running out of them.
-      const wait = character.monster ? character.monster.ai.respawnTicks : character.structure ? undefined : this.respawnTicks
+      // does not either: it is a player of a team that is running out of them. In arena no player comes back during a round: they all do when it is over (below).
+      const wait = character.monster
+        ? character.monster.ai.respawnTicks
+        : character.structure || this.setup.kind === 'arena' ? undefined : respawnTicksAt(this.respawnTicks, levelOfState(prior))
       if (wait !== undefined && state.health?.deathTick !== undefined && tick === state.health.deathTick + wait) {
         const standing = (id: number): boolean => previous.getCharacterState(id)?.health?.deathTick === undefined
         // A monster comes back a level higher, in a game with an economy (the levels of the game are that).
@@ -952,13 +1083,27 @@ export class Simulator {
       if (tick < character.spawnTick) continue
       states.set(character.id, this.createInitialCharacterFrame(character))
     }
+    // In arena, the tick a round that has been decided has waited long enough for, the next one begins: everyone, living or dead (and every monster and turret the
+    // map has), is put back at their spawn with full health and nothing on them, and whatever was in play is gone, as if the game began again but for the score.
+    const newRound = this.setup.kind === 'arena' && arenaResetTick(previous.getObjective()) === tick
+    if (newRound) {
+      for (const [characterId, state] of states) {
+        const character = this.characters.get(characterId)
+        if (character) respawnCharacter(character, state, tick)
+      }
+      // A dash or an invisibility that was under way is over with the round, so nothing it would have done on this tick is done.
+      dashSteps.length = 0
+      leaving.length = 0
+    }
+    const carried = newRound ? [] : previous.getEntities()
     pushCharactersApart(states, this.characters, this.ground)
+    this.spitOutOfStructures(states)
     const characters = [...this.characters.values()].sort((left, right) => left.id - right.id)
     const context = new TickContext(
       tick,
       this.characters,
       states,
-      previous.getEntities(),
+      carried,
       (historyTick) => this.at(historyTick),
       this.ground,
     )
@@ -971,13 +1116,13 @@ export class Simulator {
       runEffects(character.champion.onLeaveInvisibility, context, leavingSource(character, state, tick, `v:${characterId}:t${tick}`))
     }
 
-    // Burning and poisoned characters take their burn or poison on every pulse tick, as damage from whoever lit or poisoned them.
+    // Burning, bleeding, spored and poisoned characters take their burn, bleed, spore or poison on every pulse tick, as damage from whoever put it on them.
     if (tick % GAME_BURN_PULSE_TICKS === 0) {
       for (const character of characters) {
         const state = states.get(character.id)
         if (!state || !isAlive(state)) continue
         for (const status of state.statuses) {
-          if (status.kind !== 'burn' && status.kind !== 'poison') continue
+          if (status.kind !== 'burn' && status.kind !== 'bleed' && status.kind !== 'spore' && status.kind !== 'poison') continue
           context.emitEvent({
             type: 'damage',
             id: `${status.id}:pulse:t${tick}`,
@@ -991,9 +1136,9 @@ export class Simulator {
       }
     }
 
-    // A shop is a healing area: on its heal ticks, every living player standing in a shop of its own team gets health back. It is a heal like
-    // any other (which a structure never takes, and which stops at the maximum), for the player itself, so it is worked out from where
-    // everyone stands on this tick, the same on every peer.
+    // A shop is a healing area: on its heal ticks, every living player standing in a shop of its own team gets a share of its maximum health back (see
+    // `shopHealAmount`). It is a heal like any other (which a structure never takes, and which stops at the maximum), for the player itself, so it is
+    // worked out from where everyone stands on this tick, the same on every peer.
     if (this.shops.length > 0 && shopHealsOn(tick)) {
       for (const character of characters) {
         const state = states.get(character.id)
@@ -1005,7 +1150,7 @@ export class Simulator {
           rootId: `shop:heal:t${tick}`,
           ownerId: character.id,
           unitId: character.id,
-          amount: SHOP_HEAL_AMOUNT,
+          amount: shopHealAmount(state.health.maxHp),
         })
       }
     }
@@ -1053,14 +1198,33 @@ export class Simulator {
       }
       if (!isAlive(state)) continue
       // A feared character is not in charge of where it goes or whom it fights: it is told nothing until the fear is over. (Casting is refused as it is for a stun.)
-      if ((order.type === 'move' || order.type === 'attack') && isFeared(state.statuses)) continue
-      if (order.type === 'move') {
-        // Walking somewhere cancels a windup and stops going after anyone.
-        state.action = undefined
+      if ((order.type === 'move' || order.type === 'steer' || order.type === 'attack') && isFeared(state.statuses)) continue
+      if (order.type === 'move' || order.type === 'steer') {
+        let walk: NonNullable<GameFrameCharacter['movement']>
+        if (order.type === 'move') {
+          walk = { target: this.ground.resolve(order.target, character.champion.radius) }
+        } else {
+          // A direction that is not one is refused (the server refuses it first). A stop only stops steering: it does nothing to a character that is not being steered (one
+          // walking to a place, going after someone, channelling Back), so letting go of the keys never undoes what was given since, and it cancels no windup.
+          if (!isValidSteerDirection(order.direction)) continue
+          const direction = normalize(order.direction)
+          if (!direction) {
+            if (state.movement && 'direction' in state.movement) state.movement = undefined
+            continue
+          }
+          walk = { direction }
+        }
+        // Walking somewhere, or steering, stops going after anyone. Whether it cancels a windup that is under way is up to the order (the player's controls settings): by
+        // default it cancels an auto attack's and not an ability's, and a windup that is kept is finished and the walk begins after it (see the walking step). Back is the one
+        // cast that walking always ends.
+        const keepsWindup = isCastingAbility(state, tick)
+          ? order.keepCast !== false
+          : order.keepAuto === true && state.action?.kind === 'attack' && isWindingUp(state, tick)
+        if (!keepsWindup) state.action = undefined
         state.attackTarget = undefined
-        state.movement = { target: this.ground.resolve(order.target, character.champion.radius) }
+        state.movement = walk
       } else if (order.type === 'attack') {
-        this.lockOnto(character, state, order, states)
+        this.lockOnto(character, state, order, states, tick)
       } else {
         this.startCast(context, character, state, order, states, tick)
       }
@@ -1068,9 +1232,10 @@ export class Simulator {
     // Whoever has a target now goes after it, in the same tick the order arrived if it can.
     this.driveAttacks(context, characters, states, tick)
 
-    const entities = this.advanceEntities(context, previous.getEntities(), states, tick)
+    const entities = this.advanceEntities(context, carried, states, tick)
+    // An action is over when it launches: there is no backswing, so the character is free to act on the next tick (and on this one, for what is left of its orders).
     for (const state of states.values()) {
-      if (state.action && state.action.endTick <= tick) state.action = undefined
+      if (state.action && state.action.launchTick <= tick) state.action = undefined
     }
     const deaths = this.applyWrites(context, states, entities, tick)
     this.anchorStructures(states)
@@ -1224,6 +1389,116 @@ export class Simulator {
     return issued
   }
 
+  // Where a dash that steps from one point to another is stopped by a structure that stands, if it is: the point on the step where the dasher's body touches it. A dasher
+  // that is touching one already is stopped on the spot if the step goes further in, and not if it is going away. The first structure along the step is the one that stops it.
+  private stoppedByStructure(from: Vector2, to: Vector2, radius: number, frame: GameTickSnapshot): Vector2 | undefined {
+    const dx = to.x - from.x
+    const dy = to.y - from.y
+    const length = dx * dx + dy * dy
+    if (length === 0) return undefined
+    let stopAt: number | undefined
+    for (const other of this.characters.values()) {
+      if (!other.structure) continue
+      const otherState = frame.getCharacterState(other.id)
+      if (!otherState || !isAlive(otherState)) continue
+      const reach = radius + other.champion.radius
+      const fx = from.x - other.initialPosition.x
+      const fy = from.y - other.initialPosition.y
+      const gap = fx * fx + fy * fy - reach * reach
+      const along = 2 * (fx * dx + fy * dy)
+      let meets: number
+      if (gap <= 0) {
+        if (along >= 0) continue
+        meets = 0
+      } else {
+        const discriminant = along * along - 4 * length * gap
+        if (discriminant < 0) continue
+        meets = (-along - Math.sqrt(discriminant)) / (2 * length)
+        if (meets < 0 || meets > 1) continue
+      }
+      if (stopAt === undefined || meets < stopAt) stopAt = meets
+    }
+    return stopAt === undefined ? undefined : { x: from.x + dx * stopAt, y: from.y + dy * stopAt }
+  }
+
+  // The point nearest to this one where a body of this radius is not inside a structure that stands: it is moved out along the line from the structure's middle (from `from`,
+  // for a point right on the middle). A structure is solid to a body that walks, so a dash or a blink must not end inside one, where the body would have nowhere to go.
+  private outOfStructures(point: Vector2, radius: number, states: ReadonlyMap<number, GameFrameCharacter>, from: Vector2): Vector2 {
+    let at = point
+    for (const other of this.characters.values()) {
+      if (!other.structure) continue
+      const otherState = states.get(other.id)
+      if (!otherState || !isAlive(otherState)) continue
+      const reach = radius + other.champion.radius
+      const middle = other.initialPosition
+      const distance = distanceBetween(at, middle)
+      if (distance >= reach) continue
+      const away = distance > 0 ? { x: (at.x - middle.x) / distance, y: (at.y - middle.y) / distance } : directionTo(middle, from) ?? { x: 1, y: 0 }
+      at = { x: middle.x + away.x * reach, y: middle.y + away.y * reach }
+    }
+    return at
+  }
+
+  // Where a dash or a blink to this point really ends: the nearest place a body of this radius can stand, which is neither in a wall nor in a structure. (Taking it out of a
+  // structure can put it back in a wall, and the other way round, so it is done twice.)
+  private standableSpot(point: Vector2, radius: number, states: ReadonlyMap<number, GameFrameCharacter>, from: Vector2): Vector2 {
+    let at = this.ground.resolve(point, radius)
+    for (let pass = 0; pass < 2; pass += 1) at = this.ground.resolve(this.outOfStructures(at, radius, states, from), radius)
+    return at
+  }
+
+  // Whether a body of this radius at this point would be inside a structure that stands (`standing` says which do), by more than `slack`.
+  private insideStructure(point: Vector2, radius: number, standing: (id: number) => boolean, slack = 0): boolean {
+    for (const other of this.characters.values()) {
+      if (!other.structure || !standing(other.id)) continue
+      if (distanceBetween(point, other.initialPosition) < radius + other.champion.radius - slack) return true
+    }
+    return false
+  }
+
+  // A structure is pushed out of by the push alone, since it does not give way; when a wall or the edge of the arena holds a body in (the structure stands against it, and the push
+  // goes into it), the push never gets it out, and it was left wedged. A body that is deeper in a structure than `GAME_STRUCTURE_EJECT_DEPTH` of its own radius, after the push,
+  // is put on the nearest place it can stand instead. Walking into a structure settles about a third of a step in, nowhere near that deep.
+  private spitOutOfStructures(states: ReadonlyMap<number, GameFrameCharacter>): void {
+    const standing = (id: number): boolean => {
+      const other = states.get(id)
+      return other !== undefined && isAlive(other)
+    }
+    for (const state of [...states.values()].sort((left, right) => left.characterId - right.characterId)) {
+      const character = this.characters.get(state.characterId)
+      if (!character || character.structure || !isAlive(state) || state.dash?.through || state.ai?.mode === 'return') continue
+      const radius = character.champion.radius
+      if (!this.insideStructure(state.position, radius, standing, radius * GAME_STRUCTURE_EJECT_DEPTH)) continue
+      state.position = this.nearestFreeSpot(state.position, radius, standing, states)
+    }
+  }
+
+  // The nearest place to this point where a body of this radius is out of every structure that stands and out of the walls and the edge of the arena: the places all round the
+  // structures it is in, one body's width out from each, are tried, and the nearest that is clear is the one. Where there is none (a gap too narrow for it) it is put out the
+  // way a dash is (see `standableSpot`).
+  private nearestFreeSpot(point: Vector2, radius: number, standing: (id: number) => boolean, states: ReadonlyMap<number, GameFrameCharacter>): Vector2 {
+    let best: Vector2 | undefined
+    let bestDistance = Infinity
+    for (const other of this.characters.values()) {
+      if (!other.structure || !standing(other.id)) continue
+      const reach = radius + other.champion.radius
+      if (distanceBetween(point, other.initialPosition) >= reach) continue
+      for (const way of COMPASS) {
+        const candidate = this.ground.resolve({
+          x: other.initialPosition.x + way.x * (reach + STRUCTURE_EXIT_MARGIN),
+          y: other.initialPosition.y + way.y * (reach + STRUCTURE_EXIT_MARGIN),
+        }, radius)
+        if (this.insideStructure(candidate, radius, standing, STRUCTURE_EXIT_MARGIN)) continue
+        const distance = distanceBetween(point, candidate)
+        if (distance < bestDistance) {
+          best = candidate
+          bestDistance = distance
+        }
+      }
+    }
+    return best ?? this.standableSpot(point, radius, states, point)
+  }
+
   // A structure stands where it was put: whatever pushed or pulled it this tick is undone, and it is not walking or dashing anywhere.
   private anchorStructures(states: ReadonlyMap<number, GameFrameCharacter>): void {
     for (const character of this.characters.values()) {
@@ -1325,6 +1600,7 @@ export class Simulator {
     state: GameFrameCharacter,
     order: GameAttackOrder,
     states: ReadonlyMap<number, GameFrameCharacter>,
+    tick: number,
   ): void {
     const target = this.characters.get(order.targetId)
     const targetState = target ? states.get(target.id) : undefined
@@ -1334,6 +1610,8 @@ export class Simulator {
     if (target.structure && this.shieldedBy((id) => { const other = states.get(id); return other !== undefined && isAlive(other) }).has(target.id)) return
     state.attackTarget = { targetId: order.targetId, orderId: order.id }
     state.movement = undefined
+    // Going after someone ends Back, as walking does.
+    if (isBacking(state, tick)) state.action = undefined
   }
 
   // Everyone who is going after someone does what that needs this tick. A target that is dead or
@@ -1372,7 +1650,7 @@ export class Simulator {
       if (isWindingUp(state, tick) || state.dash || isStunned(state.statuses)) continue
 
       const inReach = cast
-        ? withinCastRange(state.position, targetState.position, cast.range)
+        ? withinCastRange(state.position, targetState.position, castRangeAgainst(cast, targetState.statuses))
         : distanceBetween(state.position, targetState.position) <= character.champion.attackRangeWith(state.statuses, itemTotals(state.items).attackRange ?? 0)
       if (!inReach) {
         state.movement = { target: { ...targetState.position } }
@@ -1413,7 +1691,6 @@ export class Simulator {
       targetId: lock.targetId,
       startTick: tick,
       launchTick,
-      endTick: launchTick,
     }
     if (launchTick === tick) this.launchAction(context, character, state, states, tick)
   }
@@ -1422,7 +1699,7 @@ export class Simulator {
     context: TickContext,
     character: SimCharacter,
     state: GameFrameCharacter,
-    order: Pick<CastOrder, 'id' | 'abilityId' | 'target' | 'origin'>,
+    order: Pick<CastOrder, 'id' | 'abilityId' | 'target' | 'origin' | 'keepAttacking'>,
     states: ReadonlyMap<number, GameFrameCharacter>,
     tick: number,
   ): void {
@@ -1431,11 +1708,13 @@ export class Simulator {
       def
       && character.champion.hasAbility(def.id)
       && isAlive(state)
-      && !isWindingUp(state, tick)
+      && (!isWindingUp(state, tick) || isBacking(state, tick))
       && !state.dash
-      && !isStunned(state.statuses)
-      && !isSilenced(state.statuses)
+      // An unstoppable ability (a cleanse) is cast through what would stop any other: a stun, a knock-up, a fear or a silence.
+      && (!isStunned(state.statuses) || def.unstoppable === true)
+      && (!isSilenced(state.statuses) || def.universal === true || def.unstoppable === true)
       && !(def.movement && isImmobilized(state.statuses))
+      && !(def.id === BACK_ABILITY_ID && this.carriesFlag(character.id, tick))
       && meetsRequirement(
         def,
         (defId) => context.entitiesOf(character.id, defId).length > 0,
@@ -1451,7 +1730,7 @@ export class Simulator {
     // reaching it (see `driveAttacks`). Walking anywhere else, or being told to attack, ends that.
     if (order.target.mode === 'unit') {
       const unitState = states.get(order.target.unitId)
-      if (unitState && !withinCastRange(order.origin, unitState.position, def.range)) {
+      if (unitState && !withinCastRange(order.origin, unitState.position, castRangeAgainst(def, unitState.statuses))) {
         state.attackTarget = { targetId: order.target.unitId, orderId: order.id, abilityId: def.id }
         state.movement = undefined
         return
@@ -1461,10 +1740,16 @@ export class Simulator {
     // A cast with a windup stops the character: it stops walking, and going after its target, to cast,
     // and does not go back to either. One with none does not: it carries on around it, so a walk
     // goes on through it (and resumes after a dash it started), and an attack can be followed by an
-    // ability and then another.
+    // ability and then another. Steering is only held up by a windup: the keys that steer are still down, so it goes on after the cast (the walking step waits for it).
+    // So is an attack on an enemy, when the order says to keep it (the player's controls settings): the lock waits out the windup (see `driveAttacks`), and the
+    // character goes after the enemy again once the cast is done. A lock made by an ability is not kept, as the cast is what it was for. Back is the exception to
+    // both, as it is a wait in place to be taken home.
     if (def.windUpTicks > 0) {
-      state.movement = undefined
-      state.attackTarget = undefined
+      const back = def.id === BACK_ABILITY_ID
+      const steering = state.movement !== undefined && 'direction' in state.movement
+      if (!steering || back) state.movement = undefined
+      const keepsAttack = order.keepAttacking === true && !back && state.attackTarget !== undefined && state.attackTarget.abilityId === undefined
+      if (!keepsAttack) state.attackTarget = undefined
     }
     const launchTick = tick + def.windUpTicks
     state.action = {
@@ -1475,9 +1760,14 @@ export class Simulator {
       origin: { ...order.origin },
       startTick: tick,
       launchTick,
-      endTick: launchTick + def.backswingTicks,
     }
     if (launchTick === tick) this.launchAction(context, character, state, states, tick)
+  }
+
+  // Whether the character has a flag on it, as the frame before this tick has it: a flag cannot be taken home by Back.
+  private carriesFlag(characterId: number, tick: number): boolean {
+    const objective = this.at(tick - 1).getObjective()
+    return objective?.kind === 'ctf' && objective.flags.some((flag) => flag.carrierId === characterId)
   }
 
   private isValidCastTarget(
@@ -1603,9 +1893,16 @@ export class Simulator {
     tick: number,
   ): SimEntity[] {
     const remaining: SimEntity[] = []
+    // What the casts and attacks of this tick have taken out of the world (a fireball set off, a stick called back) does nothing more on it: it is gone as the tick ends, and it does
+    // not get to hit, be picked up or go off first. Only what was taken before the entities move counts, so the order they are moved in does not matter.
+    const takenAway = context.entityRemovals.slice()
     for (const entity of entities) {
       const def = getEntityDef(entity.defId)
       if (!def) continue
+      if (takenAway.some((removal) => removal.ownerId === entity.ownerId && removal.defId === entity.defId)) {
+        remaining.push(entity)
+        continue
+      }
       // A volley's later copies wait at the origin until their start tick.
       if (tick < entity.startTick) {
         remaining.push(entity)
@@ -1886,6 +2183,28 @@ export class Simulator {
     }
   }
 
+  // Health back for whoever did a hit, from the lifesteal statuses they have on (Hammer's Rage): their share of the damage it really dealt (`dealt`, after the target's
+  // resistance), from an auto attack or an ability, and not from an item's poison or a burn's pulse. The shares add up, to the whole of it at most. (The lifesteal of items
+  // is done by `itemAftermath`, and adds to this.)
+  private statusLifesteal(event: DamageEvent, states: ReadonlyMap<number, GameFrameCharacter>, dealt: number): void {
+    if (!(dealt > 0) || event.overTime || damageSource(event) === 'item') return
+    const owner = states.get(event.ownerId)
+    if (!owner || !isAlive(owner)) return
+    const share = owner.statuses.reduce((total, status) => (status.kind === 'lifesteal' ? total + status.amount : total), 0)
+    if (share > 0) healCharacter(owner, Math.round(dealt * Math.min(1, share)))
+  }
+
+  // What a hit that dealt damage does besides hurting: if it was a player's, to an enemy, the damage is in the tally of who has hurt the victim (`GameFrameCharacter.credit`), which
+  // decides who is credited when it dies; and it ends the victim's Back, whoever did it. A hit that dealt none (all of it resisted) does neither.
+  private creditDamage(event: DamageEvent, state: GameFrameCharacter, dealt: number, tick: number): void {
+    if (!(dealt > 0)) return
+    if (isBacking(state, tick)) state.action = undefined
+    const attacker = this.characters.get(event.ownerId)
+    const victim = this.characters.get(event.targetId)
+    if (!attacker || !victim || attacker.isNpc || attacker === victim || !areEnemies(attacker, victim)) return
+    state.credit = addDamage(state.credit, attacker.id, dealt, tick)
+  }
+
   private applyWrites(
     context: TickContext,
     states: ReadonlyMap<number, GameFrameCharacter>,
@@ -1902,9 +2221,9 @@ export class Simulator {
       if (!state || !isAlive(state) || isStructure(unitId)) continue
       // Reapplying the same provenance ID refreshes the status instead of stacking it.
       state.statuses = replaceById(state.statuses, status)
-      // A stun interrupts a windup that has not launched yet; nothing is spent. So does a fear, which also makes it drop whoever it was going after and where it was walking:
-      // it is running from someone now.
-      if ((status.kind === 'stun' || status.kind === 'fear') && state.action && state.action.launchTick > tick) state.action = undefined
+      // A stun (or a knock-up, which is one) interrupts a windup that has not launched yet; nothing is spent. So does a fear, which also makes it drop whoever it was going after
+      // and where it was walking: it is running from someone now.
+      if ((status.kind === 'stun' || status.kind === 'airborne' || status.kind === 'fear') && state.action && state.action.launchTick > tick) state.action = undefined
       if (status.kind === 'fear') {
         state.attackTarget = undefined
         state.movement = undefined
@@ -1925,9 +2244,9 @@ export class Simulator {
       const character = this.characters.get(unitId)
       if (!state || !character || !isAlive(state) || character.structure) continue
       state.dash = {
-        // A dash goes over walls, so it can end behind one, but not in one: it lands on the nearest
+        // A dash goes over walls, so it can end behind one, but not in one, and not in a structure: it lands on the nearest
         // place the character can stand.
-        target: this.ground.resolve(target, character.champion.radius),
+        target: this.standableSpot(target, character.champion.radius, states, state.position),
         speed,
         ...(through ? { through: true } : {}),
         ...(contact ? { contact: { ...contact, origin: { ...contact.origin }, hitIds: [] } } : {}),
@@ -1969,9 +2288,12 @@ export class Simulator {
             const linkerState = states.get(link.ownerId)
             if (!linker || !linkerState) continue
             // What is left of the links is a share that the champion lives through, so it is never the one that kills it.
+            const linkerHad = linkerState.health?.hp ?? 0
             applyDamage(linkerState, strike.amount * link.share * fit, tick, statsOfState(linker, linkerState)?.resistance ?? 0, linker.champion.damageReduction)
+            rememberWound(linker, linkerState, linkerHad - (linkerState.health?.hp ?? 0), tick)
           }
           const resistance = statsOfState(this.characters.get(event.targetId), state)?.resistance ?? 0
+          const had = state.health?.hp ?? 0
           const dealt = applyDamage(
             state,
             strike.amount * (1 - Math.min(1, linkedShare)),
@@ -1979,7 +2301,11 @@ export class Simulator {
             resistance * (1 - strike.pierce),
             this.characters.get(event.targetId)?.champion.damageReduction ?? 0,
           )
+          // What the hit took off its health, and not what its shields took: that is the health it has lost.
+          rememberWound(this.characters.get(event.targetId), state, had - (state.health?.hp ?? 0), tick)
           this.itemAftermath(hit, state, states, tick, dealt, strike.heal)
+          this.statusLifesteal(hit, states, dealt)
+          this.creditDamage(event, state, dealt, tick)
           if (hadHealth && state.health?.hp === 0) killers.set(event.targetId, event.ownerId)
           // A monster that is minding its own business and is hurt by an enemy knows who to go after.
           if (state.ai?.mode === 'idle' && event.amount > 0) {
@@ -1989,11 +2315,14 @@ export class Simulator {
           }
         }
       } else if (event.type === 'lose-health') {
-        const health = states.get(event.unitId)?.health
-        if (health && health.deathTick === undefined && health.hp > 1 && !isStructure(event.unitId)) {
+        const loser = states.get(event.unitId)
+        const health = loser?.health
+        if (loser && health && health.deathTick === undefined && health.hp > 1 && !isStructure(event.unitId)) {
+          const had = health.hp
           health.hp = Math.max(1, health.hp - event.amount)
           health.hpSeq += 1
           health.finalizedTick = tick
+          rememberWound(this.characters.get(event.unitId), loser, had - health.hp, tick)
         }
       } else if (event.type === 'heal') {
         const state = states.get(event.unitId)
@@ -2032,8 +2361,15 @@ export class Simulator {
     for (const state of [...states.values()].sort((left, right) => left.characterId - right.characterId)) {
       const health = state.health
       if (!health || health.deathTick !== undefined || health.hp > 0) continue
-      const killerId = killers.get(state.characterId)
+      // The kill is the player's who landed the last blow, and the assist the player's who did the most damage after them, if they are on the killer's team: when it was a
+      // turret or a monster that took the last of its health, the players who hurt it are still credited, the one who did the most damage as the killer. With no player in the
+      // tally it is whoever took the last of it.
+      const hurtBy = liveDamage(state.credit, tick).filter((share) => this.characters.has(share.id))
+      const lastHitId = killers.get(state.characterId)
+      const credited = creditKill(hurtBy, (id) => this.characters.get(id)?.team, lastHitId)
+      const killerId = credited.killerId ?? lastHitId
       killCharacter(state, tick)
+      delete state.credit
       // A champion that dies lets go of what it had linked to itself: its markers of the key it names come off every unit, so the link does not come back with it when it respawns.
       const linkKey = this.characters.get(state.characterId)?.champion.damageLink?.key
       if (linkKey !== undefined) {
@@ -2048,18 +2384,32 @@ export class Simulator {
         tick,
         victimId: state.characterId,
         ...(killerId !== undefined && killerId !== state.characterId ? { killerId } : {}),
+        ...(credited.assistId !== undefined && credited.assistId !== killerId && credited.assistId !== state.characterId ? { assistId: credited.assistId } : {}),
       })
     }
     // A kill pays its experience and its gold on the tick it happens, in the frame, so a level and a purchase are the same tick on every peer and a
     // death that a late order undoes takes them back with the rest of the frame. (The shards are credited when the kill can no longer
-    // be undone: see `confirmDeathsUpTo`.) Only a player is paid, whatever it killed.
+    // be undone: see `confirmDeathsUpTo`.) Only a player is paid, whatever it killed. A player who is behind the best in the game is paid more experience (catch-up), by the levels
+    // as they stood when the tick began, so what is paid does not depend on who is paid first.
+    const levels = new Map<number, number>()
+    for (const character of this.characters.values()) {
+      const levelled = states.get(character.id)
+      if (!character.isNpc && levelled) levels.set(character.id, levelOfState(levelled))
+    }
+    const levelAtStart = (id: number): number | undefined => levels.get(id)
     for (const death of deaths) {
       const reward = this.paidForDeath(death, states.get(death.victimId))
       const killer = death.killerId === undefined ? undefined : this.characters.get(death.killerId)
       const state = death.killerId === undefined ? undefined : states.get(death.killerId)
       if (!reward || !killer || !state) continue
-      if (reward.xp > 0) gainExperience(killer, state, reward.xp)
+      const earned = this.catchupFor(reward.xp, killer.id, levelAtStart)
+      if (earned > 0) gainExperience(killer, state, earned)
       if (reward.gold > 0) state.gold = (state.gold ?? 0) + reward.gold
+      // The assist is paid a share of the experience on top of that, and no gold (see `assistXp`): a share of the kill's, and then its own catch-up.
+      const assister = death.assistId === undefined ? undefined : this.characters.get(death.assistId)
+      const assisterState = death.assistId === undefined ? undefined : states.get(death.assistId)
+      const shared = assister ? this.catchupFor(this.assistXpFor(death, states.get(death.victimId)), assister.id, levelAtStart) : 0
+      if (assister && assisterState && shared > 0) gainExperience(assister, assisterState, shared)
     }
     // A champion that resets its cooldowns on a kill (Cloak's passive) has every ability it can cast ready again, on the tick it kills a champion (a player: a monster or a
     // structure is not one), if it is still standing. Its items' cooldowns are not abilities, and are left.
@@ -2076,8 +2426,8 @@ export class Simulator {
       const state = states.get(unitId)
       const character = this.characters.get(unitId)
       if (!state || !character || !isAlive(state) || character.structure) continue
-      // A blink goes over walls, and lands where the character can stand.
-      state.position = this.ground.resolve(target, character.champion.radius)
+      // A blink goes over walls, and lands where the character can stand: not in a wall, and not in a structure.
+      state.position = this.standableSpot(target, character.champion.radius, states, state.position)
     }
     for (const { ownerId, defId } of context.entityRemovals) {
       for (let index = entities.length - 1; index >= 0; index -= 1) {
@@ -2232,13 +2582,13 @@ function refitHealth(character: SimCharacter, state: GameFrameCharacter): void {
   health.hp = Math.min(stats.maxHp, Math.max(1, health.hp + change))
 }
 
-// What killing this character pays whoever does it: what a monster's or a turret's entry says it is worth (a core is a turret), or a flat amount for a player. A
-// monster pays more experience for each level it has gained (`monsterXpAt`, at the level it died at) and the same gold and shards; the level is not
-// needed for the shards, which are credited later, so that one can be left out.
+// What killing this character pays whoever does it: what a monster's or a turret's entry says it is worth (a core is a turret), or `PLAYER_KILL_REWARD` for a player. A
+// monster pays more experience for each level it has gained (`monsterXpAt`, at the level it died at) and the same gold and shards, and so does a player (`playerKillXpAt`); the
+// level is not needed for the shards, which are credited later, so that one can be left out. (Catch-up is the killer's, and is added to this by whoever pays it.)
 function killReward(victim: SimCharacter | undefined, victimLevel = 1): Readonly<Resources> {
   const monster = victim?.monster
   if (monster) return { ...monster.reward, xp: monsterXpAt(monster.reward.xp, monster.xpGrowth, victimLevel) }
-  return victim?.turret?.reward ?? PLAYER_KILL_REWARD
+  return victim?.turret?.reward ?? { ...PLAYER_KILL_REWARD, xp: playerKillXpAt(PLAYER_KILL_REWARD.xp, victimLevel) }
 }
 
 // Gives the character experience. A level gained is more health: the maximum goes up to what the new level's stats say, and so does
@@ -2254,6 +2604,23 @@ type DamageEvent = Extract<GameEvent, { type: 'damage' }>
 function damageSource(event: DamageEvent): 'attack' | 'item' | 'ability' {
   if (event.id.startsWith(ATTACK_SOURCE_PREFIX)) return 'attack'
   return event.id.startsWith(ITEM_SOURCE_PREFIX) ? 'item' : 'ability'
+}
+
+// How much health a character's frame says it has lost after `sinceTick` (see `GameFrameCharacter.wounds`).
+function healthLostSince(state: GameFrameCharacter | undefined, sinceTick: number): number {
+  return (state?.wounds ?? []).reduce((total, wound) => (wound.tick > sinceTick ? total + wound.amount : total), 0)
+}
+
+// Notes in a champion's frame that it lost `amount` health on this tick, if it is one that remembers what it loses (`ChampionDef.healthMemoryTicks`), and forgets what is older
+// than its memory. Each tick is one entry, however many hits there were in it.
+function rememberWound(character: SimCharacter | undefined, state: GameFrameCharacter, amount: number, tick: number): void {
+  const memory = character?.champion.healthMemoryTicks
+  if (memory === undefined || !(amount > 0)) return
+  const kept = (state.wounds ?? []).filter((wound) => wound.tick > tick - memory)
+  const last = kept[kept.length - 1]
+  state.wounds = last?.tick === tick
+    ? [...kept.slice(0, -1), { tick, amount: last.amount + amount }]
+    : [...kept, { tick, amount }]
 }
 
 // Gives the character health back, up to the most it can have. One that is dead, or has no health left, has none to give. What it got back is added to what it has got back in all (`healed`).
@@ -2374,6 +2741,8 @@ function clearActivity(state: GameFrameCharacter): void {
   state.statuses = []
   state.markers = []
   state.queuedOrders = []
+  // What it lost before is not what it lost lately once it is back.
+  delete state.wounds
 }
 
 // Whether any of the statuses is one of these kinds.
@@ -2381,11 +2750,11 @@ export function hasStatus(statuses: readonly Status[], ...kinds: Array<Status['k
   return statuses.some((status) => kinds.includes(status.kind))
 }
 
-// A root stops walking; a stun stops that and attacking and casting too.
-const isImmobilized = (statuses: readonly Status[]): boolean => hasStatus(statuses, 'root', 'stun')
+// A root stops walking; a stun stops that and attacking and casting too, and so does being knocked up (airborne), which holds it as a stun does.
+const isImmobilized = (statuses: readonly Status[]): boolean => hasStatus(statuses, 'root', 'stun', 'airborne')
 
-// Whether the character cannot act: a stun stops it attacking and casting, and so does a fear, which also walks it away (see `isFeared`).
-const isStunned = (statuses: readonly Status[]): boolean => hasStatus(statuses, 'stun', 'fear')
+// Whether the character cannot act: a stun (or a knock-up) stops it attacking and casting, and so does a fear, which also walks it away (see `isFeared`).
+const isStunned = (statuses: readonly Status[]): boolean => hasStatus(statuses, 'stun', 'airborne', 'fear')
 
 // Whether the character is running from someone, and is not in charge of where it goes.
 const isFeared = (statuses: readonly Status[]): boolean => hasStatus(statuses, 'fear')
@@ -2430,7 +2799,7 @@ const isDisarmed = (statuses: readonly Status[]): boolean => hasStatus(statuses,
 
 // Haste bonuses add together; only the strongest slow applies; the slow scales the hasted speed.
 // A fading haste counts for the share of its length still to run at `tick`.
-// `itemSpeed` is what the character's items add to its speed (see items.ts).
+// `itemSpeed` is what the character's items add to its speed (see items.ts). What it walks at with neither is `walkingSpeed`, which has the game's move speed multiplier in it.
 function getMoveSpeed(character: SimCharacter, statuses: readonly Status[], tick: number, itemSpeed = 0): number {
   let strongestSlow = 0
   let hasteBonus = 0
@@ -2438,7 +2807,7 @@ function getMoveSpeed(character: SimCharacter, statuses: readonly Status[], tick
     if (status.kind === 'slow') strongestSlow = Math.max(strongestSlow, status.amount)
     else if (status.kind === 'haste') hasteBonus += status.fades ? status.amount * shareLeft(status, tick) : status.amount
   }
-  return (character.champion.moveSpeed + itemSpeed) * (1 + hasteBonus) * (1 - Math.min(1, strongestSlow))
+  return walkingSpeed(character.champion.moveSpeed, itemSpeed) * (1 + hasteBonus) * (1 - Math.min(1, strongestSlow))
 }
 
 // How much of a status's length is still ahead at `tick`: 1 as it starts, 0 as it ends.
@@ -2480,6 +2849,18 @@ function isWindingUp(state: GameFrameCharacter, tick: number): boolean {
   return state.action !== undefined && tick < state.action.launchTick
 }
 
+// Whether the character is channelling Back: a cast of it that has not gone off yet. Walking, attacking, casting something else, a stun or a fear, and taking damage
+// all end it, and it takes the character to its spawn when it goes off (see `BACK_ABILITY_ID`).
+function isBacking(state: GameFrameCharacter, tick: number): boolean {
+  return state.action?.kind === 'cast' && state.action.abilityId === BACK_ABILITY_ID && tick < state.action.launchTick
+}
+
+// Whether the character is winding up an ability that walking does not cancel: a cast that has not gone off yet, other than Back. An order to walk given during one is kept, and
+// the walk begins when the ability has been cast; an auto attack's windup is not one, and a walk cancels it.
+function isCastingAbility(state: GameFrameCharacter, tick: number): boolean {
+  return state.action?.kind === 'cast' && tick < state.action.launchTick && !isBacking(state, tick)
+}
+
 function toCooldown(tick: number, readyTick: number): { ready: boolean; ticksRemaining: number } {
   return {
     ready: tick >= readyTick,
@@ -2509,6 +2890,8 @@ function cloneOrder(order: CharacterOrder): CharacterOrder {
   switch (order.type) {
     case 'move':
       return { ...order, target: { ...order.target } }
+    case 'steer':
+      return { ...order, direction: { ...order.direction } }
     case 'attack':
       return { ...order }
     case 'cast':
@@ -2550,6 +2933,9 @@ function cloneObjective(objective: ObjectiveState): ObjectiveState {
   if (objective.kind === 'core') {
     return { ...objective, broken: [...objective.broken], eliminated: [...objective.eliminated], scores: { ...objective.scores } }
   }
+  if (objective.kind === 'arena') {
+    return { ...objective, rounds: [...objective.rounds], scores: { ...objective.scores }, ...(objective.over ? { over: { ...objective.over } } : {}) }
+  }
   return {
     ...objective,
     flags: objective.flags.map((flag) => ({ ...flag, position: { ...flag.position } })),
@@ -2568,9 +2954,9 @@ function cloneFrameCharacter(character: GameFrameCharacter): GameFrameCharacter 
     position: { ...character.position },
     ...(character.health ? { health: { ...character.health } } : {}),
     ...(character.movement ? {
-      movement: {
-        target: { ...character.movement.target },
-      },
+      movement: 'target' in character.movement
+        ? { target: { ...character.movement.target } }
+        : { direction: { ...character.movement.direction } },
     } : {}),
     ...(character.dash ? {
       dash: {
@@ -2604,11 +2990,15 @@ function cloneFrameCharacter(character: GameFrameCharacter): GameFrameCharacter 
   delete clone.gold
   delete clone.items
   delete clone.level
+  delete clone.credit
+  delete clone.wounds
   if (character.attackLaunchTick !== undefined) clone.attackLaunchTick = character.attackLaunchTick
   if (character.xp !== undefined) clone.xp = character.xp
   if (character.gold !== undefined) clone.gold = character.gold
   if (character.items) clone.items = { ...character.items }
   if (character.level !== undefined) clone.level = character.level
+  if (character.credit) clone.credit = { tick: character.credit.tick, by: character.credit.by.map((share) => ({ ...share })) }
+  if (character.wounds) clone.wounds = character.wounds.map((wound) => ({ ...wound }))
   return clone
 }
 

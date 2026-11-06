@@ -1,6 +1,7 @@
 export type HealthBarLayout = {
-  // How much of the bar's width is current health, and the shield laid after it.
+  // How much of the bar's width is current health, the heal that is ready laid after it, and the shield laid after that.
   healthWidth: number
+  healWidth: number
   shieldWidth: number
   // Tick marks across the bar, measured from its left edge. A major one marks a round number.
   ticks: Array<{ x: number; major: boolean }>
@@ -10,14 +11,16 @@ export type HealthBarLayout = {
 // shield on the end of it, and a tick for every `every` points of health, a major one every
 // `major`. The bar spans the maximum health, or the health plus shield when that is more, so a big
 // shield shrinks the rest of the bar to make room instead of running off the end.
+// `heal` is a heal that is ready to be cast (see `RenderedCharacter.healPreview`): it is laid between the health and the shield, and fills no more than the health that is missing.
 export function layoutHealthBar(
-  health: { hp: number; maxHp: number; shield: number },
+  health: { hp: number; maxHp: number; shield: number; heal?: number },
   width: number,
   ticks: { every: number; major: number },
 ): HealthBarLayout {
   const hp = Math.max(0, health.hp)
   const shield = Math.max(0, health.shield)
-  const span = Math.max(1, health.maxHp, hp + shield)
+  const heal = Math.max(0, Math.min(health.heal ?? 0, health.maxHp - hp))
+  const span = Math.max(1, health.maxHp, hp + heal + shield)
   const marks: HealthBarLayout['ticks'] = []
   if (ticks.every > 0) {
     // A tick on the very end of the bar would only double up with its edge.
@@ -28,6 +31,7 @@ export function layoutHealthBar(
   }
   return {
     healthWidth: width * hp / span,
+    healWidth: width * heal / span,
     shieldWidth: width * shield / span,
     ticks: marks,
   }

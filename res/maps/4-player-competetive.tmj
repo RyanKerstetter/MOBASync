@@ -1722,15 +1722,15 @@
                  "x":16,
                  "y":-16
                 }],
-         "height":32,
+         "height":16,
          "id":10,
          "name":"wall-paths",
          "opacity":1,
          "startx":16,
-         "starty":-32,
+         "starty":-16,
          "type":"tilelayer",
          "visible":true,
-         "width":48,
+         "width":16,
          "x":0,
          "y":0
         }, 
@@ -2288,7 +2288,6 @@
         {
          "draworder":"topdown",
          "id":12,
-         "locked":true,
          "name":"Shops",
          "objects":[
                 {
@@ -2326,6 +2325,42 @@
                  "width":168,
                  "x":-136,
                  "y":-376
+                }, 
+                {
+                 "height":168,
+                 "id":657,
+                 "name":"shop-4",
+                 "opacity":1,
+                 "properties":[
+                        {
+                         "name":"team-name",
+                         "type":"int",
+                         "value":4
+                        }],
+                 "rotation":0,
+                 "type":"shop",
+                 "visible":true,
+                 "width":176,
+                 "x":536,
+                 "y":-1064
+                }, 
+                {
+                 "height":168,
+                 "id":658,
+                 "name":"shop-3",
+                 "opacity":1,
+                 "properties":[
+                        {
+                         "name":"team-name",
+                         "type":"int",
+                         "value":3
+                        }],
+                 "rotation":0,
+                 "type":"shop",
+                 "visible":true,
+                 "width":176,
+                 "x":536,
+                 "y":304
                 }],
          "opacity":1,
          "type":"objectgroup",
@@ -3746,7 +3781,7 @@
                  "visible":true,
                  "width":0,
                  "x":424,
-                 "y":23.9999999999999
+                 "y":24
                 }, 
                 {
                  "height":0,
@@ -3770,7 +3805,7 @@
                  "visible":true,
                  "width":0,
                  "x":824,
-                 "y":24.0000000000001
+                 "y":24
                 }],
          "opacity":1,
          "type":"objectgroup",
@@ -3779,7 +3814,7 @@
          "y":0
         }],
  "nextlayerid":13,
- "nextobjectid":657,
+ "nextobjectid":659,
  "orientation":"orthogonal",
  "renderorder":"right-down",
  "tiledversion":"1.12.2",

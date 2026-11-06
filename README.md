@@ -93,7 +93,23 @@ something: a walk to within a few units of the last one given is not sent again,
 the champion is already after. A walk that was cut short, such as by a cast with a windup, is given again. Opening the
 menu, aiming an ability, dying, or letting go of the button (anywhere) stops it.
 Space attacks the enemy closest to the mouse cursor, near or far, and not the one closest to your champion (one out of
-reach is walked up to, as when it is right-clicked). All are timestamped intents
+reach is walked up to, as when it is right-clicked). **B** is Back (see "Back", below).
+
+**WASD movement** (a switch in the menu's Controls tab, off to begin with) steers the champion with W, A, S and D, and moves
+its abilities to Q, E and R (`abilityKeyCodes` in `apps/client/src/movement-keys.ts`; the HUD, the champion select and the
+status line show the keys in use). The page sends the direction the keys make, a unit vector, and not the keys: a `steer`
+order, given only when that direction changes (a key held down sends nothing more), and a stop (`{0, 0}`) when the last key
+is let go. In the simulator a steered champion walks a tick's walk along its direction every tick, sliding along a wall it
+walks into, until it is told something else; it never arrives anywhere. A stop only ends steering, so it does nothing to a
+champion walking to a place or going after someone. A right-click or Space takes over from steering, and the keys steer
+again at their next change. A cast with a windup holds steering up and it goes on after the cast, but Back ends it. When
+the game leaves a steered champion standing (a fear that ran out, a respawn with the keys still down), the page gives the
+direction again, at most once every `STEER_RESUME_INTERVAL_MS`. A direction that is not a unit vector (to within
+`DIRECTION_LENGTH_TOLERANCE` on its squared length) or none is refused by the server (`bad_direction`, and it is not sent on)
+and by the simulator (`isValidSteerDirection`), so a steer cannot walk a champion faster than it walks. Opening the menu or
+the window losing focus lets go of every key.
+
+All are timestamped intents
 ordered deterministically by `(tick, sequence, player, id)`. The client inserts
 its own order into the simulator immediately. The server acknowledges log
 insertion separately from gameplay validity. Every peer uses the shared
@@ -139,9 +155,14 @@ around it and a crosshair cursor), so you can see that the attack can be queued;
 on keeps slightly heavier red ticks for as long as it is (`render/attack-marker.ts`). Neither shows while an ability is
 being aimed, since the click would cast it, or while dead.
 
-What is affecting a champion is written in small words above its name (`stunned`, `rooted`, `silenced`,
-`blinded`, `burning`, `slowed`, `hasted`, all that apply, the most disabling first; `render/status-labels.ts`), not
-drawn as a coloured ring around it.
+What is affecting a champion is written in small words above its name (`stunned`, `airborne`, `rooted`, `silenced`,
+`blinded`, `burning`, `bleeding`, `spored`, `slowed`, `hasted`, all that apply, the most disabling first; `render/status-labels.ts`), not
+drawn as a coloured ring around it. A knocked-up (`airborne`) body is also drawn up off the ground, rising and falling back over the knock-up (`RenderedCharacter.lift`, `AIRBORNE_LIFT`).
+A **bleeding** body sheds drops of blood that fall from it to its feet, a few at a time, and its figure flushes red and pales again (`render/bleed-look.ts`: `layoutBleedDrops`, `bleedTint`). A **spored**
+body (one carrying an Ent's spore) puffs pale green spores that drift away from it and up (`render/spore-look.ts`: `layoutSpores`). A champion
+**going back** (channelling Back) has a ring round its feet whose bright arc goes round from the top as the channel runs, closing as it is taken home, over a glow that grows, and motes of light rising
+round it (`render/back-look.ts`: `layoutBack`, from `RenderedCharacter.backing`), so everyone who can see it knows it is going and how long it has left. Both are part of the body, so they are hidden
+with it from a team that cannot see it, and both are worked out from the time alone, with nothing kept between frames.
 
 ## The map and the camera
 
@@ -540,6 +561,18 @@ leaves out the two side panels of the HUD (the level and stats, and the items an
   **Played alone** (one team, of one player or more), there is no other team: the game has only that team's core and turrets, no one is ever the
   last team standing (`winningTeam` is `undefined` for a setup of one team), and the game ends only when its players have all gone back to the
   lobby or left (`closeIfEmpty`), or the leader ends it.
+- **Arena:** for two teams or more (as many as the map has starting places for), on any map: it needs nothing on it. It is played in **rounds**. Nobody
+  respawns during a round, and a round is won by the **last team with a player alive** (`teamsStanding`, on the tick that leaves one). A round that has been
+  won waits `GAME_ARENA_ROUND_PAUSE_TICKS` (4 seconds) so the win can be seen, and nothing in the wait changes who won it; then the next round begins
+  (`arenaResetTick`): **every** character in the game, living or dead, monsters and turrets included, is put back at its spawn at full health with its
+  cooldowns, statuses and orders cleared, and whatever was in play (shots, zones, summons) is gone. A round whose last players fall on the same tick has
+  no winner and is played again. A team's score is the rounds it has won, and the first team to win **Rounds to win** of them wins the game (the leader
+  sets it, 1 to 10, 3 by default; arena always has one, so 0 is refused). The objective keeps the winner of each round in order (`rounds`), and the
+  mode's panel shows a **box for every round the game can take**, filled in with the colour of the team that won it, with the one being fought outlined.
+  With m teams and n rounds to win that is `arenaMaxRounds` = **m(n − 1) + 1**: every team can win n − 1 rounds without anyone having won, and the round
+  after that decides it. With two teams it is 2n − 1, a best of 2n − 1. Under the boxes it says who won the round just over and how long until the next.
+  A champion that is out says `Out until the round is over` where its health was, and counts down to the next round once the round is decided. The
+  respawn time is not used, and the lobby does not show it. `tests/arena.test.ts`.
 
 **Winning.** The leader sets the score a team wins at for each mode but core destruction (`Kills to win`, `Points to win`,
 `Captures to win`; defaults 25, 100 and 3; 0 is no limit, and a game with none goes on until the leader ends it). The server checks
@@ -547,11 +580,16 @@ the score as the commit tick has it, which no late order can still change, so no
 taken back (`winningTeam`, in `ServerGameState.advanceTick`). The team that has reached the limit and is ahead of
 every other wins; two teams that reach it level play on until one is ahead. The score each team is playing to is in
 the title of the mode's panel on screen (`TEAM DEATHMATCH · FIRST TO 25 KILLS`). Core destruction is won by being the last team out
-of the game (`winningTeam` reads who is out from the objective), checked at the commit tick in the same way.
+of the game (`winningTeam` reads who is out from the objective), checked at the commit tick in the same way. Arena is won by rounds (`Rounds to win`,
+`ARENA · FIRST TO 3 ROUNDS`): rounds are won one at a time, so the first team to reach the limit is always ahead of the rest. A mode whose limit cannot be
+none says so with `minLimit` on its entry in `GAME_MODES` (`limitRange` reads it), and the lobby's box then starts there and does not offer 0.
 
 **Respawn time** is a rule too (1 to 60 seconds, three by default). It is part of the setup the snapshot carries
 (`respawnTicks`), so every peer brings a champion back on the same tick, and a champion that is dead sees
-`Respawning in 8s` where its health was.
+`Respawning in 8s` where its health was. It is what a **level 1** champion waits: a champion waits `GAME_RESPAWN_TICKS_PER_LEVEL` (2 seconds, in
+`constants.ts`) more for each level it has above the first, so the wait is the rule plus 2 seconds for each level gained (`respawnTicksAt`, in `progression.ts`: the one place
+that says how it scales, read by the simulator, which brings the champion back, and by the page, for its countdown, through `Simulator.respawnTicksFor`). A game with no experience
+has no levels above the first, so it is the rule alone. A monster is not a champion: it comes back by its own `respawnTicks`, whatever its level. `tests/respawn-scaling.test.ts`.
 
 **Lose items on death** is a rule for Core Destruction, the one mode with items (off by default; the tick box is in the lobby's rules and only
 shows while that mode is picked). With it on, a player who dies loses every item they carry but their **pet** (`KEPT_ON_DEATH` in `items.ts`). The items
@@ -559,10 +597,10 @@ are lost, not sold: they pay nothing back. Their gold is kept, and a dead champi
 the respawn time it is part of the setup the snapshot carries (`loseItemsOnDeath`, only present when it is on), and the items go on the tick of the
 death, in the frame, so a late order that undoes the death gives them back.
 
-**Gold and shop** is a rule for Core Destruction too (on by default; a tick box in the lobby's rules, shown while that mode is picked). With it off the game is played for experience alone: a kill
+**Gold and shop** is a rule for Core Destruction too (off by default in a new lobby, which is `defaultRules().gold`; a tick box in the lobby's rules, shown while that mode is picked). With it off the game is played for experience alone: a kill
 pays its experience and no gold (a monster's or a turret's entry still says what it is worth, and only the gold of it is not paid), nobody starts with the gold a player does, there are no items, and the shop
 cannot be opened (the HUD has the level and the stats, and not the panel of items and shops). The levels and everything that grows with them are as they were, so it is a way to play with just the
-experience scalings. It is part of the setup the snapshot carries (`noGold`, only present when the gold is off, so a game with no word of it has gold; `Simulator.hasGold`), a page that joins the
+experience scalings. It is part of the setup the snapshot carries (`noGold`, only present when the gold is off, so a game set up with no word of it has gold, as the simulator's own tests are; `Simulator.hasGold`), a page that joins the
 game gets it with it, and `Lose items on death` is put away in the lobby while there is no gold, since there are no items to lose. The shards are not gold and are paid as before (the shard shop is not
 shown). It is tested in `tests/no-gold.test.ts`.
 
@@ -603,7 +641,8 @@ biggest, a tie to the lower number) is the first flag of the map. A snapshot wit
 If players leave champion select and the mode cannot be played by whoever is left (capture the flag down to
 one team), the start is called off and the lobby is back to being a lobby.
 
-What the players see: the top middle of the screen (`ui/mode-hud.ts`, `mode-hud-view.ts`) names the mode and
+What the players see: the top middle of the screen (`ui/mode-hud.ts`, `mode-hud-view.ts`) names the mode, with beside it a **clock that counts up** from the start of the game (`3:07`, and `1:03:07` once it has
+been an hour: `formatGameClock`), and
 shows each team's score, highest first with the local player's team marked; on the hill, the bar in the colour
 of the team whose it is, with who is capturing, pushing back or holding it (and that it is contested); in
 capture the flag, a card for each flag (at base, dropped, or carried by whom, in the carrier's team colour)
@@ -617,6 +656,10 @@ share written over it, flickering while contested and with a heavy outline once 
 ring at their bases, a dropped flag lies on the ground with a pulsing ring, and a carried flag is held at the
 carrier's side over it, with a ring in the flag's colour round the carrier. `ClientGameState.getModeView`
 makes all of it from the frame being drawn.
+
+The **clock** is the game's own: the server's tick (the game begins on tick 0), estimated forward to this moment with the same estimate that draws everything else (`ClientGameState.getGameSeconds`), over `GAME_TPS`, so
+every player's page reads the same time to within the network's delay. It shows whole seconds, rounded down, in every mode, and the page only touches the text when the second changes. It stops when the
+server says the game is over (`game:ended`) and shows the time the game ended at, behind the results. `tests/mode-hud.test.ts`.
 
 ## Monsters
 
@@ -706,9 +749,8 @@ iteration order that is not by ID. If a monster needs a variety of choices, deri
 each other, so a blast from one never hurts another. The team is no team of the game: monsters have no score, are not on
 the leaderboard or the results, stand on the hill and walk over flags without taking either, and a game with only monsters
 left is not a game with players in it. A player's `kills` are kills of players, and so are a team's in team
-deathmatch, so killing a monster, or being killed by one, scores for no one: the death still reaches `onDeathConfirmed`
-(the killfeed shows "Alice defeated Wolf"), with the victim and killer to look up, for whatever the game decides it is
-worth.
+deathmatch, so killing a monster, or being killed by one, scores for no one: the death still reaches `onDeathConfirmed`, with the victim, the killer and the assist to
+look up, for whatever the game decides it is worth. The killfeed is not told of a monster that dies (see "Who is credited with a kill", below).
 
 **On the page.** Monsters are named and drawn like champions (from the sprites in `champion-sprites.ts` under the
 monster's id, or as a circle in the monsters' colour without), can be right-clicked and attacked, and are what Space
@@ -933,7 +975,33 @@ as nothing is bought with them. The numbers are in `progression.ts`.
 
 - **What a kill pays.** Whoever makes a kill is paid, whatever they killed: a monster pays what its entry in `monsters.ts`
   says (`reward`, below, and more experience for each level it has gained: see "Monsters level up"), and a player pays
-  `PLAYER_KILL_REWARD` (300 gold, 60 experience), flat, whatever level either is. A monster that kills is paid nothing. The golem alone pays shards.
+  `PLAYER_KILL_REWARD`, with **more experience for each level the player killed is**: `PLAYER_KILL_XP_PER_LEVEL` (0.2) of the reward more for each level above the first, in whole points
+  (`playerKillXpAt`: a level 1 player pays the 80 experience as it is, a level 6 one twice that), and the same gold whatever the level. How much the killer is paid is then
+  changed by **catch-up** (below). A monster that kills is paid nothing. The golem alone pays shards. Who is paid is decided by the damage done (below).
+- **Catch-up.** Experience paid to a player who is behind is multiplied, so one who has fallen behind can come back. Every time experience is paid (for a kill of a player, a
+  monster or a turret, and for an assist), the player is paid `1 + GAME_CATCHUP_XP_PER_LEVEL` (0.2) **for each level it is below the highest level of any player in the game** (`catchupMultiplier`,
+  `catchupXp`, in `progression.ts`: the one place that says how it pays, in whole points). So a level 2 player in a game whose best is level 6 is paid 1.8 times as much. The best
+  player is behind no one and is paid as it is, and nobody is ever paid less. **Which players count:** every player, on any team, dead or alive; a monster has levels but is no player,
+  and does not. **Which levels:** the levels as they stood when the tick began, for everyone paid on it, so what a player is paid does not depend on who is paid first (two players
+  levelled by kills on the same tick are neither paid as if the other were ahead). It is worked out where the experience is paid (`Simulator.catchupFor`, in `applyWrites`) and, for the number
+  the page shows over the body (`Simulator.paidFor` and `assistPaidFor`), from the frame before the tick, so what the page says is what was paid. **An assist** is a share (`ASSIST_XP_SHARE`)
+  of what the kill is worth before the killer's catch-up, and then has the assister's own, so a killer who is far behind does not make the assist any larger. A game with no economy has no
+  levels and pays nothing, so there is nothing to catch up on. `tests/catchup.test.ts`.
+- **Who is credited with a kill.** The player who lands the **last blow** gets the kill. The players who hurt the victim are then listed after them by **how much damage they
+  did**, the most first, and the one **second in that list** gets the **assist**, if they are on the killer's team. Nobody else is credited: not the third in the list, and not the
+  second when they are an enemy of the killer (the teammate behind them gets nothing either). It is the same for every victim (a player, a monster, a turret). When the last blow is
+  not a player's (a turret or a monster takes the last of a player's health), the players who hurt it first are still credited, and the one who did the most damage is the killer,
+  as if they had landed it. Equal damage goes to whoever began hurting it first. If no player hurt it, the killer is whoever took the last of its health (a turret, a monster), as it
+  always was, and pays nothing. Only damage that players deal to their enemies counts, as it comes off the victim's health or its shields, after its resistance; a share of a hit
+  handed to a linked champion does not.
+- **What an assist pays.** `ASSIST_XP_SHARE` (0.4, in `progression.ts`) of the experience the kill paid, in whole points (`assistXp`), and **no gold**. It is on top of the
+  killer's reward, which is paid whole, and it is not a kill: it is not counted in `kills` or in a team's score. It is paid on the tick of the death, in the assister's frame, like
+  the killer's, so the level it makes is the same on every peer and a late order takes it back. A game with no economy pays nothing, but the death still names the assist (for the killfeed).
+- **The damage is a tally in the victim's frame.** `GameFrameCharacter.credit` is each player's damage to it, in the order they first did any, and the tick of the last
+  of it (`DamageCredit`, `addDamage`, in `progression.ts`; the damage is added in `Simulator.creditDamage`). It is in the frame because who is credited decides what is paid,
+  which changes what a frame works out, so a death that a late order undoes takes the credit back, and a snapshot's checkpoint carries it. The tally **runs out**: once nobody has
+  hurt the victim for `GAME_CREDIT_WINDOW_TICKS` (10 seconds) it begins again, so a scrape from long ago is not an assist, and a long fight, where someone is always hitting it, is
+  not cut short. It is gone when the victim dies. `creditKill` and `rankDamage` are the rules on their own. `tests/credit.test.ts`.
 - **Setting a monster's reward.** `MonsterDef.reward` is `{ gold, xp, shards }`, each a whole number, 0 or more. Whatever it
   leaves out is `DEFAULT_MONSTER_REWARD` (25 gold, 25 experience, no shards), so a monster that says nothing is worth that.
   At level 1 the slime pays 20 gold and 60 experience, and the golem 120 gold, 100 experience and 1 shard.
@@ -1005,10 +1073,11 @@ that starts at its slot, as it does a turret (`rankTeams`): the biggest team sho
 - **A game with no shops can be shopped in from anywhere**, so a map made without any (the free-for-all one) is not left with items nobody can buy.
 - **A map with shops needs one for every slot that has spawn points**, or that team could never buy: it is refused, saying which slot (see below).
 
-**A shop is also a healing area.** A living player standing in a shop of its own team gets health back: `SHOP_HEAL_AMOUNT` (25) every
-`SHOP_HEAL_INTERVAL_TICKS` (15 ticks, so four times a second), which is `SHOP_HEAL_PER_SECOND` (100 a second). **`SHOP_HEAL_AMOUNT` is the number to
-change** (in `shops.ts`; set it to 0 for no healing, and the area is not tinted), and the interval is how often it comes. It is the simulator's rule, in
-`computeFrame`, as a `heal` event for each player in its shop on every heal tick (`shopHealsOn`, `inOwnShop`): a heal like any other, so it stops at
+**A shop is also a healing area.** A living player standing in a shop of its own team gets a share of its **maximum health** back every
+`SHOP_HEAL_INTERVAL_TICKS` (15 ticks, so four times a second), enough to fill it **from nothing in `SHOP_HEAL_SECONDS`** (5): a `SHOP_HEALS_TO_FILL`th of the maximum each time (a twentieth at the defaults;
+`shopHealAmount`, rounded up to a whole number so a champion is never kept more than the time from full), so a champion with three times the health gets three times the heal and
+takes just as long. **`SHOP_HEAL_SECONDS` is the number to change** (in `shops.ts`; set it to 0 for no healing, and the area is not tinted), and the interval is how often it comes.
+It is the simulator's rule, in `computeFrame`, as a `heal` event for each player in its shop on every heal tick (`shopHealsOn`, `inOwnShop`): a heal like any other, so it stops at
 the maximum health, does not make a hit's damage numbers, and the same on every peer on the same tick, and a late order that moves a player in or out
 of its shop changes it with the rest. It heals the team that owns the shop only (not an enemy standing in it, and not a champion in the other team's),
 never the dead, a monster or a structure, and **in every mode that has shops**, not only the one with an economy. Unlike buying, healing is not allowed
@@ -1085,6 +1154,31 @@ the attack speed of a `base` have to be said, and a number that is not (or is ne
 is the base plus the growth for every level above the first (`StatBlock.grownBy`). A stat written on the champion itself (`maxHp: 800`
 beside `radius`, as it used to be) is refused with an error, and not quietly ignored.
 
+### Move speed
+
+**`GAME_MOVE_SPEED_MULTIPLIER`** (in `constants.ts`, 1 as the game is written) is the one number to change to make everything walk faster or slower, without touching a champion, a
+monster or an item: 1.25 is a quarter faster. Every speed in the game is written on one scale (a champion walks at about 150 a second, an item adds 8 to 20), so one multiplier keeps
+their sizes against each other as they were. It is worked out in exactly one place, **`walkingSpeed(base, items)`** in `stats.ts`, which is `(base + items) * the multiplier`, and everything that
+needs a speed asks it:
+
+- the simulator, which moves a body (`getMoveSpeed`, in `simulator.ts`: `walkingSpeed`, then the haste and the slow as shares of it, so a 30% haste is 30% of the new speed, and a monster's
+  walk home on top of that), for every champion and monster, and for a feared one running away;
+- the stats a player is shown (`Champion.statsAt` for the champion's own, `withItems` for what its items add), and so the stats panel in the game (`ClientGameState.getLocalStats`) and
+  the inspect panel, which are the speed the champion really has;
+- the page, which smooths how the other champions are drawn between ticks by the speed they walk at (`ClientGameState`), and the move speed on the champion select screen;
+- an item's tooltip, which says what the item really adds, in whole points (`itemStatLines`).
+
+What it does **not** change is anything with a speed of its own: a dash, a blink or a knockback, a shot or an entity that flies (their speeds are written into the ability), the
+time an attack or a cast takes, or a monster's range or timers. Walking faster than a dash is written to be quick is what the knob does to a dash, so a dash that was a burst of speed
+is less of one; change those where they are written. The multiplier is a constant of the build, the same for the server and every page, and not a rule of the lobby, so a game
+cannot disagree with itself about it (making it a rule would put it in the setup the snapshot carries, as `respawnTicks` is).
+
+**The tests do not depend on it.** The champions, monsters and items that the tests define (`defineChampion`, `defineMonster` and `defineItem`, in `tests/fixtures.ts`) walk exactly as fast as
+they are written, whatever the multiplier is, so that a scene placed by how far a second takes a body comes out the same; a test reads the speed a body walks at with `walkingSpeed(body.moveSpeed)`
+and never `body.moveSpeed`, which is the number as written into the game. `tests/move-speed.test.ts` is the one that makes its bodies by hand, and checks that the simulator, the stats and the
+tooltips all use the multiplier, and agree. The suite has been run at 0.5, 1.5 and 2 with the same results as at 1; the game's own champions (which the few tests that use them place by
+their speed too) are what limit it, at about 3, where one test of the Cloak's Ghost no longer fits the arena.
+
 ### Scaling an ability
 
 Nothing multiplies an ability's damage on its own: `damage(100)` is 100 whatever the caster has, and a burn is as written. An ability grows with
@@ -1142,7 +1236,17 @@ lower ID goes toward -x. The arena's edge still holds whoever is pushed against 
 other takes the rest of the room. The dead are ghosts that neither push nor are pushed, and so is a monster that is going home (see "Monsters"), and a
 character that respawns onto someone is pushed off them. Dashes and knockbacks collide too, so
 a leap into someone shoves them ahead of it rather than passing through (a dash made `through` is the
-exception, below). The client needs
+exception, below). **A structure cannot be shoved**, so a dash that is not a dash through **stops where its body meets one** (`Simulator.stoppedByStructure`: the first
+turret or core along the step) and is over, where it used to be pushed back every tick, never reaching the end of its way, and leave the champion dashing for good with no order
+possible. A dash that starts against a structure and goes away is not stopped. A dash through, a blink and a pull do not end **inside** a structure either: they land on the
+nearest place a body can stand, out of the walls and out of any structure that stands (`standableSpot`; a destroyed one is no obstacle). `tests/dash-structure.test.ts`. **A body that walks into a structure is not left wedged against it**, in two ways. The pathfinder
+knows the walls and not the structures, so a point on its way can be inside one (the corner of a wall that a structure stands against): the walking step passes over a point like
+that for the next on the way (`Simulator.insideStructure`), where it used to step onto it, be pushed back out, and do it again for good. And a body that is deeper in a structure
+than `GAME_STRUCTURE_EJECT_DEPTH` (in `constants.ts`) of its own radius, after the push, is put on the nearest place it can stand (`Simulator.spitOutOfStructures`): that is a
+body that a wall or the edge of the arena holds in, so the push goes nowhere. The places tried are sixteen round the structure, one body's width out, and the nearest that is
+clear of the walls and the structures is the one. Walking into a structure in the open settles about a third of a step in, nowhere near that deep, so it is unchanged. A gap
+between a structure and a wall that is narrower than a champion is shut to every champion, whatever the pathfinder thinks, which only the map can mend.
+`tests/structure-wedge.test.ts`. The client needs
 nothing for it: the local champion is drawn along its last net step, push included.
 
 The camera is locked on the champion you control: that champion is always the middle of the
@@ -1200,16 +1304,27 @@ when `hasEconomy`): none in the modes with no economy, and none on a monster, a 
 
 Escape opens a menu over the game (and closes it again). The game goes on behind it, and while it is
 open nothing reaches the game: no keys, and no clicks on the map. If an ability is being aimed,
-Escape drops the aim first, as it always has, and opens the menu on the next press. It has three tabs, and **Leave game**
-under them, which takes the player back to the lobby and leaves the game to the others (the lobby's own Leave button is what
-leaves the lobby). It hangs from near the top of the screen, so the tabs stay where they are as pages of different heights are
-opened, and it remembers the tab it was left on while the page is open.
+Escape drops the aim first, as it always has, and opens the menu on the next press. It has three tabs, down its **left side**
+with the page beside them, and **Leave game** right under the tabs, which takes the player back to the lobby and leaves the game to the others (the lobby's own
+Leave button is what leaves the lobby). It hangs from near the top of the screen, so the tabs stay where they are as pages of different heights are
+opened beside them, and it remembers the tab it was left on while the page is open. On a narrow screen (under 36rem) there is no room for a column of
+tabs beside the page, and they go back to a row along the top.
 
-- **Graphics** has an **Effects** section: a switch for each effect drawn over the ground, each off until it is turned on, and each
+- **Graphics** has a **Frame rate** section (below) and an **Effects** section: a switch for each effect drawn over the ground, each off until it is turned on, and each
   showing only itself. **Turret attack range** is the ring round each turret and core that shows how far it shoots
   (`TurretRangeLayer`), **Your attack range** is the ring round your own champion (`IndicatorLayer`; the ring of an ability being aimed is
-  not part of it, and is always drawn) and **Shop glow** is the green tint over each shop (`ShopAreaLayer`).
-- **Controls** has the **cast mode** (quick cast, or quick cast with an indicator), and under **Targeting** the **click radius**, a slider
+  not part of it, and is always drawn) and **Shop glow** is the green tint over each shop (`ShopAreaLayer`). Under **Markers**, **Attack marker size** is a slider
+  from `MIN_ATTACK_MARKER_SIZE` to `MAX_ATTACK_MARKER_SIZE` percent, in steps of `ATTACK_MARKER_SIZE_STEP` (its own size to begin with), for the ticks round the enemy your
+  attack is locked on: their gap to the body, their length and their line all grow by it (`attackMarkerLook` in `render/attack-marker.ts`). The mark on an enemy under
+  the mouse stays its own size. It is kept as `attackMarkerSize`, whole percent, read back held between the least and the most.
+- **Controls** has, under **Casting**, the **cast mode** (quick cast, or quick cast with an indicator) and **Keep attacking after casting** (on to begin with): with it
+  on, an ability with a windup cast while attacking an enemy leaves the attack lock in place, so the champion goes back to attacking it the tick the cast goes off,
+  instead of standing there. It is carried on each cast order as `keepAttacking`, so the simulator does the same on every peer. Back ends the attack whatever it says,
+  and so does an ability aimed at an enemy out of its reach, which replaces the attack lock with a walk up to cast; a cast with no windup never ended it. Under
+  **Moving**, **WASD movement** (off to begin with: see "WASD movement",
+  above) and two switches for what a walk does to a windup under way, **Moving doesn't cancel attacks** (off to begin with) and **Moving doesn't cancel abilities**
+  (on to begin with), which are carried on each move and steer order as `keepAuto` and `keepCast`, so the simulator does the same on every peer (a windup that is kept
+  is finished, and the walk begins after it; Back is ended by a walk whatever they say); and under **Targeting** the **click radius**, a slider
   from 0 to `MAX_CLICK_RADIUS` pixels (`DEFAULT_CLICK_RADIUS` to begin with) that widens how far past the edge of an enemy a click still picks
   it. It applies to everything that picks an enemy under the mouse (`ClientGameState.getEnemyNear`): right-clicking to attack (and holding the button), and
   an ability aimed at a unit, and so to the indicator on the enemy. It is added to the small slack every click has (`PICK_SLACK`), so the enemy nearest
@@ -1218,10 +1333,20 @@ opened, and it remembers the tab it was left on while the page is open.
 - **Dev** has the **debug view** (the same as P, see below) and the **diagnostics** (the frame rate and network text at the top left), and, in a
   development build only, the tools to draw the champions from a folder of art picked from disk or to go back to the art the game came with.
 
+**The frame rate limit** is a dropdown (a `choice` with `dropdown: true`, so a long list takes one row and not a button each) of the most frames a second the page draws: **Uncapped** (the default), 240, 180, 165, 144, 120, 90, 75, 60, 45 or 30
+(`FRAME_RATE_OPTIONS` in `game-settings.ts`, `UNCAPPED_FPS` being 0). It is applied as soon as a button is pressed, to the renderer's ticker (`app.ticker.maxFPS`, where 0 is no limit), and is
+kept with the other settings (`maxFps`, one of the rates on the list, and read back as uncapped if it is not). **It is only how often the world is drawn.** The game does not tick with the frames:
+the server ticks at `GAME_TPS` on a timer of its own, and the page works out which tick it is on from the time (`ClientGameState.estimateTick`) and draws between ticks: other champions are blended
+between two ticks a little behind now (`getDelayedRemoteView`), entities by `entityPosAt` at the tick as a fraction, and the local champion by carrying its last step on for the part of a tick
+that has gone (`extrapolateLocalPosition`, which goes along its walk target or dash, so a movement with no target would step at the tick rate until it is given the same). So a rate above `GAME_TPS` draws more frames between
+the same ticks, and one below it draws fewer, and neither changes what the game does. A number is a ceiling: a browser cannot draw faster than the display refreshes (which is what Uncapped comes to), and a
+cap that is not a whole share of the refresh rate is kept to on average, by skipping frames, so it is drawn a little unevenly. The Dev tab's diagnostics show the frame rate it comes to. (There was a
+`GAME_FPS` constant that capped it at 60; the cap is this setting now.)
+
 It is built to grow. `menuTabs` in `game-menu.ts` is the list of tabs, as data: each is a few sections, each a few rows, and a row is a `choice` (a few
 options with the current one lit), a `toggle` (a switch, with a line under it on what it does) or an `action` (a button), each given what to do by the
-game, so the menu knows nothing of it. Adding an option is adding a row there, and `createGameMenu` draws it (a switch is one button with
-`role="switch"` and `aria-checked`, the tabs are a `tablist`, and the control that has the keyboard keeps it when the menu is drawn again). A new effect is a
+game, so the menu knows nothing of it (a `choice` can have a line under it on what it does, as a switch and a slider do). Adding an option is adding a row there, and `createGameMenu` draws it (a switch is one button with
+`role="switch"` and `aria-checked`, the tabs are a vertical `tablist`, and the control that has the keyboard keeps it when the menu is drawn again). A new effect is a
 key in `EffectSettings` (`render/effect-settings.ts`, with its default in `DEFAULT_EFFECTS`), a name and a line in `EFFECT_LABELS`, and the layer that draws it
 asking for it: the menu, the stored settings and their checking follow from the key.
 
@@ -1229,7 +1354,8 @@ What a player chooses is kept in the browser by `game-settings.ts` (`loadSetting
 defaulted if missing or odd, each effect on its own, so settings stored before an effect was added keep what they had and have the new one off). A
 browser that has stored its settings before keeps what it stored, so a player who had the effects on sees them on until they turn them off: the defaults are for
 a browser that has stored nothing (or whose stored settings are cleared). A setting is
-a field of `GameSettings`: the cast mode, the `effects` and whether the `diagnostics` are shown. The debug view is not kept, as P never was.
+a field of `GameSettings`: the cast mode, the `effects`, the `clickRadius`, the windup switches and `movementKeys`, `castKeepsAttack`, the `attackMarkerSize`, whether
+the `diagnostics` are shown and the `maxFps`. The debug view is not kept, as P never was.
 The renderer is told by `WorldRenderer.effects`, which `game.ts` sets from the settings when the game begins and again each time a switch is turned.
 
 ### Hitbox debug view
@@ -1251,7 +1377,8 @@ the Swordsman's sheets, and the Capricorn, Soldier and Grenadier (ranged) are co
 as placeholders until they have art. So are the Hammer, a copy of the Swordsman's, and the Chain, a copy of the
 Trinketmaster's, and the Cloak, a copy of the Ninja's (each in a folder of its own, `res/champion/hammer`, `res/champion/chain` and
 `res/champion/cloak`, with the same file names as the sheets they were copied from, so art can be dropped over them). The Sage (ranged) is a copy of the Archer's and the
-Monk (melee) of the Swordsman's, in `res/champion/sage` and `res/champion/monk`, the same way. They are drawn a little bigger than their
+Monk (melee) of the Swordsman's, in `res/champion/sage` and `res/champion/monk`, the same way, and so are the Fire Mage (ranged, the Archer's) and Aurel (melee, the Swordsman's), in
+`res/champion/firemage` and `res/champion/aurel`, and the Ent (melee, the Swordsman's), in `res/champion/ent`. They are drawn a little bigger than their
 bodies and with no circle behind them. The name above every champion is in its team's colour, which is how
 a sprite shows the team. The work is split in three, so animations can be added as data:
 
@@ -1310,11 +1437,14 @@ icon is dropping a file of that name in the folder. An ability whose file has an
 `ui/ability-icon-urls.ts` finds the files (Vite's
 `import.meta.glob`, so a new file is picked up by the dev server), and `ui/ability-icon.ts` makes the element. An
 ability with no file, or whose file will not load, shows a dim "N/A" tile with the tooltip "Icon not available" in its place. The abilities that are new with the Sage and the Monk need
-their pictures: `pulse`, `vinebolt`, `rejuvenate`, `link`, `linkheal`, `flurry` and `guard`.
+their pictures: `pulse`, `vinebolt`, `rejuvenate`, `link`, `linkheal`, `flurry` and `guard`; and so do the Fire Mage's, Aurel's and the Ent's: `fireball`, `detonate`, `firetornado`, `scorch`, `rend`,
+`transfusion`, `bloodrush`, `rootburst`, `grove` and `spore`.
 
-**Ability tooltips** tell the numbers of an ability, found in the ability itself (`abilityNumbers`, from what its effects say they are made of): its **damage**, the **burn** a second, the **heal** and the
-**shield**, each worked out for the champion as it is and told with what it is made of, such as `60 + 20% of missing health + 40% Arcane`. Retuning an ability retunes its tooltip. A heal that a pulse
-repeats (the Medic's bot) is told for a second (`Heal 36/s`); the damage of a pulse is told as it is, for each.
+**Ability tooltips** tell the numbers of an ability, found in the ability itself (`abilityNumbers`, from what its effects say they are made of): its **damage**, the **burn** a second (and the **bleed**, and
+the **burn per stack** of one that burns more the more stacks its target carries), the **heal** and the
+**shield**, each worked out for the champion as it is and told with what it is made of, such as `60 + 20% of missing health + 40% Arcane`, or `40% of health lost in the last 3s`. Retuning an ability retunes its tooltip. A heal that a pulse
+repeats (the Medic's bot) is told for a second (`Heal 36/s`); the damage of a pulse is told as it is, for each. An effect written by hand, which none of the constructors made, can still be told, with
+`describedAs(effect, kind, amount)`.
 
 Stacks are drawn as pips under the body, by the pure function `layoutStackPips` (`render/stack-pips.ts`).
 There are two kinds, told apart by shape, colour and row, so two with similar colours can never
@@ -1330,7 +1460,7 @@ list for its kind.
 Per-unit stats live on a `Champion` (`packages/shared/src/champions.ts`): max
 HP, move speed, radius, attack damage, speed, range, windup (a share of the attack, below), and an ability kit in
 Q/W/E/R slot order, plus a description and passive text for champion select.
-Characters have no shield of their own. There are thirteen champions: Cursebearer, Archer, Swordsman, Capricorn, Soldier, Grenadier, Trinketmaster, Ninja, Hammer, Chain, Cloak, Sage, and Monk (all below).
+Characters have no shield of their own. There are sixteen champions: Cursebearer, Archer, Swordsman, Capricorn, Soldier, Grenadier, Trinketmaster, Ninja, Hammer, Chain, Cloak, Sage, Monk, Fire Mage, Aurel, and Ent (all below).
 Health and damage are whole numbers in the hundreds. To add a champion, add another
 `new Champion({...})` to the list in `champions.ts`; the select screen lists every
 champion in that map, four across. Arena size, tick rate, and network timing remain global
@@ -1389,7 +1519,7 @@ in `apply` so the auto that follows can go at once. Because an attack lock carri
 no-windup cast, auto, Hush, auto is a single click and a single key.
 
 Abilities are data (`abilities.ts`). Each `AbilityDef` has a targeting mode
-(`none`, `point`, `direction`, or `unit`), range, windup, backswing, cooldown,
+(`none`, `point`, `direction`, or `unit`), range, windup (a kind from `WINDUP_TICKS`: see "The windup of an ability", below), cooldown,
 and an `apply` list of composable effects, for example:
 
 ```ts
@@ -1436,11 +1566,24 @@ calling it every frame does not move the simulation ahead.
 The client resolves the slot to an ability
 ID and writes a `cast` order containing the click tick, the caster's origin, and
 the target (point clamped to range, direction quantized). The simulator checks
-the kit, cooldown, origin, and target on every peer, then starts a windup. A
-move order during windup cancels the cast without spending its cooldown. At
+the kit, cooldown, origin, and target on every peer, then starts a windup (a move order given during it does not cancel it: see "The windup of an
+ability", below). At
 launch the simulator calls `runEffects` with an `EffectSource` (provenance
 `id`, `rootId`, `ownerId`, `tick`, `at`, `aim`, `subject`). Auto-attacks follow
 the same path and run the champion's `onAttackHit` effects.
+
+**The windup of an ability.** `windUpTicks` is how long an ability takes to cast, and it is given by name from the list **`WINDUP_TICKS`** (in `abilities.ts`): an ability that winds up says
+`windUpTicks: WINDUP_TICKS.default` (15 ticks, a quarter of a second), and one that has no windup, and is cast the moment it is used, says `windUpTicks: 0`. To change how long they all take, change
+`default`; to give some abilities a windup of their own, add a name to the list (`heavy: 30`) and use it where those abilities are written. Back is the one cast that is not on the list: it is a
+channel of its own (`BACK_TICKS`).
+
+**There is no backswing.** A cast is over when it goes off, and the caster can act on the very next tick (the action in a frame has a `launchTick` and nothing after it; the page draws the cast bar over the
+windup alone).
+
+**Walking does not cancel an ability's windup.** A move order given while one winds up is kept: the caster stands for the rest of it, the ability goes off on time, and the walk begins on the tick after
+(`isCastingAbility`, and the walking step, which waits for a cast). The last order to walk is the one kept, and an order to attack is kept the same way (the caster goes after the target once the ability has
+gone off); another ability ordered in the windup is dropped, and not kept. What walking still cancels is **the windup of an auto attack**, which is spent on nothing, and **Back**, whose channel any order to
+walk, to attack or to cast ends. A stun, a fear and an `interrupt()` still cancel a windup, with its cooldown unspent. `tests/windup.test.ts`.
 
 **Cursebearer** is a ranged champion built around stacking a curse. Its auto attacks
 (the passive) add one `curse` marker to the target, up to five, lasting ten
@@ -1482,7 +1625,8 @@ attack checks and for the client's range ring and cooldown bar.
 
 **Swordsman** is a melee duelist whose stacks sit on himself. His autos add a sword stack
 (up to three, eight seconds, refreshed together), and each stack adds damage to his autos
-and to Slash. Q, Slash, cuts a 250 by 60 rectangle in front of him (`enemiesInLine`) and
+and to Slash. On his autos a stack is worth a base (`SWORD_DAMAGE_PER_STACK`) and so much more for each level he is (`SWORD_SCALING_PER_LEVEL`, read with `scaled`, which counts the level from 1), the way a
+stack of Hammer's plating is, so an auto grows with his level through its stacks as well as through his attack damage, and a level he gains is in his next auto (`tests/swordsman.test.ts`). Q, Slash, cuts a 250 by 60 rectangle in front of him (`enemiesInLine`) and
 leaves a trail of fire in exactly that rectangle that slows enemies and hastes allies (him and his teammates). W, Radiance, spends the stacks in
 a burst around him, with damage and haste per stack. E, Shackle, readies his next auto
 (for five seconds) to spend the stacks on its target: it roots them for 1.5 s, or stuns them for 1 s if
@@ -1549,7 +1693,8 @@ point, so it cannot kill. `heal(amount)` restores up to the maximum and does not
 already at 0 health, since a champion with none left is dead and a heal must not bring it back.
 `statBuff(stat, amount, ticks)` adds flat points of `attackDamage`, `attackSpeed`, `resistance`, `haste` or
 `arcane` for a while, as an item would. `resist(fraction, ticks)` is a status. Resistances add up to 90% and cut each hit before shields
-absorb what is left.
+absorb what is left. `lifesteal(fraction, ticks)` is a status too: the unit that has it is healed by that share of the damage it deals, as the hit lands (`Simulator.statusLifesteal`), from an auto or an
+ability and not from a burn's or a poison's pulse. The shares add up, to the whole of the damage at most, and add to the lifesteal of an item (`itemAftermath`).
 
 The bot has no timer. An entity definition may leave out `lifetimeTicks` (and `landAtAim`) if it has
 a `stayWhile`, which is then the only thing that ends it; `shield` takes a duration of `Infinity` for
@@ -1727,8 +1872,8 @@ damage and a stun. How long that is depends on how far the point is, in a straig
 at his feet to `DROP_MAX_TICKS` for the farthest he can aim, so a near drop is quick (`dropTicks`, given to the warning as its
 `lifetime` and to the jump as its `over`). It is read when it goes off, so an enemy can walk out of it.
 He goes over whatever is between (`through`), and a warning whose Hammer dies is called off (`stayWhile`).
-E, Rage, gives move speed, attack speed and damage reduction (`resist`) for five seconds, and each auto he lands adds
-0.4 s to what is left of it, never more than six seconds in all (`RAGE_MAX_TICKS`), so hitting slows its running
+E, Rage, gives move speed, attack speed and **lifesteal** (`RAGE_LIFESTEAL`: a share of the damage he really deals, after what the target resists, from his autos and from his abilities, comes back
+to him as health) for five seconds, and each auto he lands adds a little (`RAGE_AUTO_TICKS`) to what is left of it, never more than six seconds in all (`RAGE_MAX_TICKS`), so hitting slows its running
 down without making it last for ever. A bar under his health bar shows what is left of it, full at six seconds and
 running down in real time (below).
 
@@ -1739,7 +1884,7 @@ leaves on the enemy for those ten seconds. A marker is counted by its owner, so 
 and a second Chain has his own separately. A structure takes no markers, so it is left out by name (`firstStrike`): or
 every auto on a turret would heal him. Q, Hook, is a skillshot that hurts the first enemy it hits and drags it to him: a
 `dash` of the enemy's `toward` `besideOwner()`, so it cannot attack or cast until it lands, goes over whatever is between,
-and comes to rest touching him. W, Whirl, is a charge-up and then one blow. It has no windup and no backswing, so he can
+and comes to rest touching him. W, Whirl, is a charge-up and then one blow. It has no windup, so he can
 walk and cast while it charges, but he is disarmed for it and cannot attack (he still walks up to a target he was told to
 attack, and swings when it is over). For a second two circles are outlined round him (`visual: 'field'`: they do not fill in),
 held exactly on him (`attached`), so they are centred on him as he walks; when the second is up the blow lands, with a
@@ -1747,10 +1892,10 @@ flash (`visual: 'flash'`, hot at the edge and pale in the core), on whoever is i
 where he is then, so he can walk to put the ring on someone. Whoever is wholly
 inside the inner circle takes the plain hit; a body that reaches out of it at all, into the ring, is on the edge, the sweet
 spot, and takes a bigger hit, is slowed, and is first-struck, so one that touches both circles is hit as the edge. A charge that he
-dies in, or that a stun breaks, does not go off (`stayWhile`). E, Lunge, is a short dash the way it is aimed (a `direction` ability: it has no target) that gives
-attack speed for a few seconds and resets his auto timer. It has no windup, so it can be cast while Whirl charges.
+dies in, or that a stun breaks, does not go off (`stayWhile`). E, Lunge, is a short dash to a point (a `point` ability, with a line for the way it goes, and no `minRange`: it can be aimed anywhere from his feet out to its range, and he stops at the point)
+that gives attack speed for a few seconds and resets his auto timer. It has no windup, so it can be cast while Whirl charges.
 
-The engine got a few things for these. A status can have a **name**: `haste`, `resist` and `statBuff` take `{ named }`,
+The engine got a few things for these. A status can have a **name**: `haste`, `resist`, `statBuff` and `lifesteal` take `{ named }`,
 which makes the status the owner's under that name (`<owner>:<name>:...`) and not the cast's or attack's own, so giving
 it again from any cast or attack renews that one status. `prolong(name, ticks, longest)` makes every status the owner
 has given a unit under the name last `ticks` longer, though never past `longest` ticks from now, and does nothing for a
@@ -1821,14 +1966,14 @@ himself. Cast on a teammate it **links** them: `LINK_SHARE` of every hit they ta
 until it is cut, either of them dies, or the teammate gets **too far away**: the tick they are farther from him than `LINK_BREAK_RANGE` (body middle to body middle; more than a cast reaches, so a link
 made at the farthest is not broken as it is made) the link breaks, as he would cut it himself (the marker comes off, the entity ends, and Link starts its whole cooldown over). The entity sees to it, on its
 tick (`linkStretched`, `cutLink`), and it does not come back when they are close again. It also breaks **when his share of a hit would kill him**: the share is not taken, the teammate takes the whole of the hit, and
-the link ends with **the same heal as Link Heal** (`LINK_BREAK_EFFECTS`: the heal, then the cut, so Link starts its whole cooldown over) given to the teammate after the hit. It is worked out from his health as it is,
+the link ends with **the same heal as Link Heal** (`LINK_BREAK_EFFECTS`: the heal, then the cut, so Link starts its whole cooldown over) given to the teammate **and to Monk** after the hit. It is worked out from his health as it is,
 his resistance, his passive and his shields counted, so a share he lives through, with one health or with the help of a shield, is taken and the link stands. Cast on himself it heals him (`LINK_HEAL`, with `LINK_HEAL_SCALING`) and links no one.
 
 The link is a `LINK_KEY` marker of Monk's on the teammate, with no end, and a `link` entity on Monk (`visual: 'hidden'`: it is not drawn) that is only there to put the key on its recast, as the
-stick is for Stick. While it is out Q is **Link Heal** (`linkheal`), the recast: it heals the linked teammate (the same heal, `LINK_HEAL` with `LINK_HEAL_SCALING`) and **ends the link** (the marker comes off, the entity
+stick is for Stick. While it is out Q is **Link Heal** (`linkheal`), the recast: it heals **both of them**, Monk and the linked teammate, each the whole of the same heal (`LINK_HEAL` with `LINK_HEAL_SCALING`, not shared out between them), and **ends the link** (the marker comes off, the entity
 ends, and Link starts its whole cooldown over: Link Heal's own cooldown is Link's, `LINK_COOLDOWN_TICKS`, which is how long it is before the key can be used again). So the key is for **one of three things**: with
-no link, Link on a teammate links them and on himself heals him, and with one up, the recast heals the teammate and uses the link up. Link Heal is for the linked teammate and no one else: aimed at anyone else, himself
-too, it does nothing and is given back whole, so it is not a way to heal himself. **The teammate does not have to be pointed at**: Link Heal says `targetsLinked`, so the page casts it on the unit he has linked
+no link, Link on a teammate links them and on himself heals him, and with one up, the recast heals them both and uses the link up. Link Heal is for the linked teammate and no one else: aimed at anyone else, himself
+too, it does nothing and is given back whole: it is cast on the linked teammate, and heals him as it does them. **The teammate does not have to be pointed at**: Link Heal says `targetsLinked`, so the page casts it on the unit he has linked
 wherever the cursor is (on nothing, on another teammate, or on himself), and **Alt** does not change that (`ClientGameState.linkedUnit` finds the linked unit from the markers). Out of its reach he walks up to the
 teammate to heal them, as he does to cast anything at a unit.
 
@@ -1858,6 +2003,61 @@ to find who was linked (Monk's is `LINK_BREAK_EFFECTS`), then its markers of the
 itself (`stacks(key, self())`), and a duration of `Infinity` for one that has no end. `endNamed(name)` ends every status of that name that anyone gave a unit at once. Flurry's charges are bearer
 markers, and spending them is part of every champion's autos (`Champion.attackEffects`), since the teammate can be any champion: an auto with a charge slows its target and spends the
 charge, the last one also ends the attack speed (`endNamed`), and an auto at a target that is dodging it spends one and slows no one.
+
+**Fire Mage** is a ranged pyromancer who stacks burns on his foes and stuns them with a fireball. P: each of his abilities that hits an enemy puts **burn stacks** on it (`BURN_STACK_KEY`), up to
+`BURN_MAX_STACKS`, and lights it. The stacks are his own markers, which end together `BURN_STACK_TICKS` after the last (a new one renews them all), and the burn is one status of his on the enemy
+(named for the stacks, so it renews and is not added to), worked out afresh each time from how many stacks there will be: `BURN_DPS_PER_STACK` (with `BURN_SCALING`) a second **for each stack**. So
+the more stacks the more it burns, and the burn and the stacks end on the same tick (`ignite`). His autos put none on. Q, **Fireball**, is a line shot that blows up on the first enemy it hits: that
+enemy takes the shot's damage (`FIREBALL_DAMAGE`) and a stack, and then the **blast** (`FIREBALL_BLAST_RADIUS`, `FIREBALL_BLAST_DAMAGE`), which goes off where the shot was two ticks later (a hidden
+fuse, `fireball-blast`, so the stack the shot put on is there to be counted) and hurts and puts a stack on everyone in it. So the enemy hit **straight on takes two stacks**, and one caught only by the blast
+one. Every hit, the shot's and the blast's, **slows** what it hits (`FIREBALL_SLOW`), or **stuns** it instead (`FIREBALL_STUN_TICKS`) if that hit brings it to full stacks or it was there already. While the
+shot flies the key is **Detonate** (`detonate`, the recast, as Stick's is Recall), which sets the blast off where the shot is and takes the shot away: a blast with no shot before it is one stack for everyone
+in it, the enemy it would have hit too. A shot that hits nothing and is not set off **blows up at the end of its flight** the same way (its `onExpire`), or where it meets the edge of the arena if that
+comes first (`stopsAtWalls`), so the blast is always on the map. W, **Fire Tornado**, marks a circle at a point (`TORNADO_RADIUS`), which a
+tornado bursts out of when its warning runs out (`TORNADO_DELAY_TICKS`): every enemy inside then is hurt, given a stack and **knocked up** (`knockUp`, for `TORNADO_KNOCKUP_TICKS`), and one that
+walked out first is not. E, **Scorch**, sends a wave of fire along the ground (`SCORCH_RANGE`, `SCORCH_HALF_WIDTH`) through every enemy in its way, hurting each once as it reaches it
+(`SCORCH_DAMAGE`) and putting **one** stack on it. Behind it the ground burns: the wave lays a patch of fire every few ticks as it goes (its `onPulse`), close enough to overlap into one strip, and one where
+it starts. An enemy on the burning ground burns (`SCORCH_BURN`) while it stands there and for `SCORCH_BURN_TICKS` after, with **one burn for all the patches** (`burn`'s `named`), so it is not burnt twice where
+they overlap, and the ground puts no stacks on. It is tested in `tests/firemage.test.ts`.
+
+**Aurel** is a melee bloodletter who hits harder as he weakens, makes his prey bleed and runs it down. P: his autos do up to `LOW_HEALTH_BONUS` more the less health he has (all of it at none, half
+of it at half his health, none at full). Q, **Rend**, is a strike at an enemy close by (`REND_RANGE`; aimed at one farther off, he walks up to it first). It hurts it (`REND_DAMAGE`), makes it **bleed**
+(`bleed`: damage over time, one status of his that a Rend renews, for `BLEED_TICKS`), heals him a set amount (`REND_HEAL`, which grows with his level), gives him move
+speed for a moment (`REND_HASTE`, for `REND_HASTE_TICKS`) and **resets his auto**, so the next one is ready as soon as Rend has gone off. Against an enemy that **was bleeding
+already** it heals him a share of the health he is missing as well (`REND_MISSING_HEAL`), and the move speed is more (`REND_BLEEDING_HASTE`). W, **Transfusion**, takes every crowd control off him (`cleanse`) and heals him a
+share (`TRANSFUSION_SHARE`) of the **health he lost in the last `TRANSFUSION_WINDOW_TICKS`**. It is **cast through crowd control** (`unstoppable`): a stun, a knock-up, a fear or a silence does not stop it.
+While it is ready the page shows on his health bar what it would heal, as a paler stretch after his health (`healthBarPreview`). E, **Bloodrush**, dashes onto an enemy, landing beside it (`besideTarget`),
+and slows it (`BLOODRUSH_SLOW`). It reaches `BLOODRUSH_RANGE`, or `BLOODRUSH_BLEEDING_RANGE` to a **bleeding** enemy (`rangeAgainst`); aimed at one out of reach he walks up to it and dashes once it is in
+reach, as for any ability aimed at an enemy, and the ring drawn while it is aimed grows to the longer reach over a bleeding enemy. It is tested in `tests/aurel.test.ts`.
+
+**Ent** is a melee treant who roots what he strikes, grows groves that heal his allies, and bursts the spores he plants. P: the **first auto he lands on an enemy roots it** (`ENT_ROOT_TICKS`), and
+the enemy then carries an `ENT_ROOT_KEY` marker of his for `ENT_ROOT_COOLDOWN_TICKS`, during which his autos do not root it again (`entangle`): each enemy has a cooldown of its own, as each has for Chain's
+first strike, and a structure is passed over. Q, **Root Burst**, is a small circle at a point (`ROOTBURST_RADIUS`) that roots burst up out of after a short warning (`ROOTBURST_DELAY_TICKS`), hurting every enemy
+in it and slowing it a lot (`ROOTBURST_SLOW`). W, **Grove**, is a big circle (`GROVE_RADIUS`) that a grove grows out of after a long warning (`GROVE_DELAY_TICKS`): every ally in it then, him too, is healed
+(`GROVE_HEAL`), and every enemy in it is hurt and **rooted** (`GROVE_ROOT_TICKS`). Both hit whoever is inside as the warning runs out, so they can be stepped out of. E, **Spore**, is a strike at an enemy close
+by (`SPORE_RANGE`; aimed at one farther off he walks up to it first) that hurts it and **plants a spore** on it: damage over time (`spore`, a status kind of its own, `'spore'`, so that a poison of his items' is never
+taken for one), one of his on each enemy, for `SPORE_TICKS`. When Root Burst, Grove or Spore hits an enemy that carries his spore, the spore **bursts** (`burstSpore`): the enemy takes bonus damage
+(`SPORE_POP_DAMAGE`), he is **healed** a good deal (`SPORE_POP_HEAL`, which grows with his arcane and his most health), and the spore is gone. Spore plants a fresh one after it bursts the old, and its cooldown is a
+little shorter than a spore lasts, so Spore after Spore bursts each time. It is tested in `tests/ent.test.ts`.
+
+The engine got a few things for them, each usable by any champion:
+
+- **Burns and bleeds by name.** `burn(dps, ticks, to, { named })` makes the burn the owner's one status of that name, whatever cast or entity lights it, so the patches of one trail, or every ability of a
+  champion that feeds one burn, renew it instead of adding up. `bleed` and `spore` are the same damage over time under other status kinds (`'bleed'`, `'spore'`, pulsed with the burns), so what reads
+  them can tell them apart.
+  `onEach(selector, effects)` runs effects once for each unit a selector picks, with that unit as the subject (for a blast whose effect on each unit depends on that unit's stacks).
+- **Knock-ups.** `knockUp(ticks)` gives the status `'airborne'`, which holds a unit exactly as a stun does (it cannot walk, attack or cast, and its windup is cut short) and is told and drawn as being thrown
+  into the air.
+- **Cleanses.** `cleanse(to)` ends every crowd control status on the units (`CROWD_CONTROL_KINDS`: slow, root, stun, blind, silence, disarm, fear and airborne; a burn, bleed or poison is damage and stays),
+  from the next tick. `AbilityDef.unstoppable` lets an ability be cast through a stun, a knock-up, a fear or a silence (a root still stops one that moves), in the simulator and on the page alike.
+- **Health lost lately.** A champion with `ChampionDef.healthMemoryTicks` keeps in its frame the health it has lost, a tick at a time (`wounds`: what hits took off its health, not what its shields took),
+  and forgets what is older than that. It is in the frame because what a hit took cannot be worked out afterwards from the health alone, and so it comes through a snapshot and is taken back by a late
+  order like anything else. `healthLost(ticks)` reads it as an amount (`SimReader.healthLostSince`), so a heal is `linear(0, share, healthLost(ticks))`, and its tooltip says so. Any other champion keeps nothing.
+  `AbilityDef.healthBarPreview` makes the page draw, on the health bar of the champion you control, what the ability's heals would come to now (`healPreview` in ability-info.ts) while it is ready.
+- **Longer reach to some.** `AbilityDef.rangeAgainst: { status, range }` lets an ability aimed at a unit reach farther to one with that status on it, and `castRangeAgainst` is how the simulator and
+  the page both measure it.
+- **Gone means gone.** An entity that a cast or an attack has taken out of the world this tick (`removeEntities`: a fireball set off, a stick called back) does nothing more on that tick: it does not
+  get to hit, be picked up or go off before it goes. So a fireball set off on the very tick it would have hit blows up once.
 
 One key doing two things is the ability's `recast`. Stick names `recast: 'recall'`, and `recall` is an
 ability in full, with its own cooldown, that the key becomes while it can be cast. What can be cast
@@ -1921,7 +2121,8 @@ so every effect in a tick reads the same state. Cooldowns, windups, statuses
 (slow, shield), markers, effect-queued orders, and entities are all frame
 state. They roll back, replay, and travel in checkpoints like movement and
 health. Shield statuses, from the `shield` effect, absorb damage before health. Move speed is the
-champion's base times `1 + the sum of active haste` times `1 - the strongest slow`.
+champion's base plus what its items add, times the game's move speed multiplier (`walkingSpeed`, below), times `1 + the sum of active
+haste` times `1 - the strongest slow`.
 
 Stacks are markers, one per stack. `SimReader.markersOn` counts them as they stood
 before this tick's writes, so an ability can read the stacks it is about to pop and
@@ -1950,9 +2151,9 @@ ends right after a unit leaves.
 
 Death is worked out by the simulator, so every client predicts it and the server sends nothing. A
 champion left with no health dies on that tick: it stops, becomes a ghost, and respawns at its
-starting position with full health `GAME_RESPAWN_TICKS` later. Everything about it is in the
+starting position with full health later: the respawn time of the game, and more for each level above the first (`respawnTicksAt`). Everything about it is in the
 frames, so a rollback undoes a death that a late order saves, and a checkpoint carries a dead
-champion with it. The damage that took the last health decides the killer (`DeathRecord`), and
+champion with it. The damage that players did to it decides the killer and the assist (`DeathRecord`; see "Who is credited with a kill", above), and
 a champion that dealt it to itself has none.
 
 What cannot be taken back waits for the commit tick, after which no late order can arrive (the
@@ -1966,6 +2167,20 @@ The top right of the screen holds both. `ui/scoreboard.ts` orders the leaderboar
 first, ties in join order, the local player marked) and keeps the killfeed lines fresh for six
 seconds, five at a time; `ClientGameState` hands them to `game.ts`, which passes them to
 `ui/scoreboard-view.ts`, which redraws the elements only when what they show changes. Names are in their team's colour.
+A line says who killed whom and with whose help: `Ann + Cat defeated Bob` (the assist after the killer), `Tier 1 Turret defeated Bob` for a death no player had a hand in, and
+`Bob was defeated` for a champion that took its own last health. **A monster that dies has no line**: the feed is for players and the structures they bring down.
+The champion you control is told of what an assist paid it (`+<xp> xp`, and no gold) over the body, as it is for a kill (`ClientGameState.getKillRewards`, `Simulator.assistPaidFor`).
+
+### Back
+
+Every champion has **Back** (`BACK_ABILITY_ID`, key **B**): it **channels for `BACK_TICKS`** (3 seconds) and then takes the champion to its **spawn point**, where its shop
+is, to be healed and to buy. It is an ability in `abilities.ts` (a cast with a windup and nothing after it, whose effect is a `blink` to the caster's spawn) with `universal: true`, which
+makes it every champion's without being in anyone's list or on a key (`Champion.hasAbility`, which the server checks too, so no champion needs it listed). What ends it, with
+nothing spent and no teleport: **walking** and **going after someone** (`lockOnto`), **casting something else**, a **stun** or a **fear**, **taking damage** from anything (a hit that
+deals none, all of it resisted, does not: `Simulator.creditDamage`), and dying. A **silence does not stop it**. It has **no cooldown**, so one that was ended can be started again at
+once. A champion **carrying a flag cannot start it** (`Simulator.carriesFlag`), or it would take the flag home for nothing; the page says so. While it channels the champion
+shows the same casting bar as any windup. The page gives the order with `ClientGameState.createBackOrder`, which refuses what the simulator would drop (stunned, feared, a
+flag). `tests/back.test.ts`.
 
 Pending order messages are retried with exponential backoff. Silence does not
 undo a prediction: after the retry timeout the client requests a full state

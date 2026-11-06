@@ -6,12 +6,16 @@ import {
   alongAim,
   attackRangeBonus,
   besideOwner,
+  besideTarget,
+  bleed,
   blind,
   blink,
   burn,
   capCooldown,
+  cleanse,
   damage,
   dash,
+  describedAs,
   disarm,
   dodge,
   enemiesInBox,
@@ -21,13 +25,17 @@ import {
   fear,
   haste,
   heal,
+  healthLost,
   invisible,
   knockback,
+  knockUp,
+  lifesteal,
   linear,
   loseHealth,
   mark,
   markedUnits,
   missingHealth,
+  onEach,
   ownEntity,
   popMarkers,
   refundCooldown,
@@ -43,6 +51,7 @@ import {
   silence,
   slow,
   spawnEntity,
+  spore,
   stacks,
   startCooldown,
   stun,
@@ -50,6 +59,7 @@ import {
   targetUnit,
   towardTarget,
   when,
+  type Anchor,
   type DashDef,
   type Effect,
   type EffectSource,
@@ -60,7 +70,7 @@ import {
   type SimReader,
 } from './effects.js'
 import { distanceBetween } from './geometry.js'
-import type { CastTarget, Vector2 } from './index.js'
+import type { CastTarget, Status, Vector2 } from './index.js'
 
 // How an ability is drawn while it is aimed.
 export interface AbilityIndicator {
@@ -78,6 +88,13 @@ export interface AbilityIndicator {
   coneHalfAngle?: number
 }
 
+// How long abilities wind up for, by kind: the list to set to change how an ability feels to cast, with a name for each kind of windup the game has. An ability says which it has with
+// `windUpTicks: WINDUP_TICKS.default`; one with no windup says `windUpTicks: 0`. To give some abilities a windup of their own, add a kind here (`heavy: 30`) and use it where they are
+// written. These are in ticks (60 to a second).
+export const WINDUP_TICKS = {
+  default: 15,
+} as const satisfies Readonly<Record<string, number>>
+
 export interface AbilityDef {
   id: string
   // What the player sees it called, where its id (see `abilityName`) would not read well, such as "Shadow Step".
@@ -93,19 +110,29 @@ export interface AbilityDef {
   targetsAllies?: true
   // For one that is for allies: the page casts it on the unit the caster has linked to itself (`ChampionDef.damageLink`), wherever the cursor is, and never on the caster (the
   // self-cast key does not make it so). So it needs no one under the cursor, and a teammate does not have to be pointed at. What the cast does with whoever it is on
-  // is the ability's own (Link Heal heals the linked unit and ends the link).
+  // is the ability's own (Link Heal heals the linked unit, and the caster, and ends the link).
   targetsLinked?: true
   range: number
   // A point-targeted ability cannot be aimed nearer the caster than this. The client pushes the aim out
   // to it, and a cast aimed nearer is dropped like one aimed out of range.
   minRange?: number
+  // How many ticks it winds up for before it is cast: the caster is held to it (walking on is kept for after, an auto attack is not made), and the ability does what it does when it
+  // is over, and not before. A windup is given by name from `WINDUP_TICKS`, so that how long the abilities of a kind wind up for is told in one place. Nothing comes after it: the caster
+  // is free to act the moment the ability is cast. 0 is an ability with no windup, which is cast the moment it is used.
   windUpTicks: number
-  backswingTicks: number
   cooldownTicks: number
   // The ability needs the caster to be able to move, so a root or stun stops it from starting.
   movement?: boolean
   // Casting it does not make an invisible caster seen. Every other ability does, and so does an auto attack: whoever is invisible and strikes is no longer.
   keepsInvisibility?: true
+  // It is cast through crowd control: a stun, a knock-up, a fear or a silence, which stop any other ability from starting, do not stop this one (a root still stops one that needs
+  // to move). For a cleanse, which is for getting out of them.
+  unstoppable?: true
+  // For one aimed at a unit: it reaches farther to a unit that has a status of this kind on it (whoever put it there), this range in place of `range`. The simulator and the
+  // page both read it with `castRangeAgainst`.
+  rangeAgainst?: { status: Status['kind']; range: number }
+  // The page draws on the caster's health bar how much the heals this gives the caster would come to now, while it is ready to cast (see `healPreview` in ability-info.ts).
+  healthBarPreview?: true
   // How big its indicator is drawn while it is aimed. Without it the indicator only marks the aim.
   indicator?: AbilityIndicator
   // The ability can only be cast while the caster has (`out: true`) or has not (`out: false`) an
@@ -120,6 +147,8 @@ export interface AbilityDef {
   // two things: throw a stick, then call it back. It is an ability in full, with its own cooldown,
   // and it belongs to any champion that has this one.
   recast?: string
+  // Every champion has it, whatever its abilities are, and it is not on a key (see `BACK_ABILITY_ID`). A silence does not stop it either.
+  universal?: true
   // Applied through an auto attack. Casting this readies the caster's next auto instead of striking
   // anything itself: for `ticks` after the cast, the next auto that lands also runs `effects` on its
   // target (as their subject) and spends the readiness. Casting again refreshes it. The cast's own
@@ -162,6 +191,10 @@ export const withinCastRange = (from: Vector2, to: Vector2, range: number): bool
 export const beyondMinCastRange = (from: Vector2, to: Vector2, minRange = 0): boolean =>
   distanceBetween(from, to) >= minRange - RANGE_EPSILON
 
+// How far an ability aimed at a unit reaches to one with these statuses on it: farther, as its `rangeAgainst` says, to one with a status of that kind, and its own range otherwise.
+export const castRangeAgainst = (def: Pick<AbilityDef, 'range' | 'rangeAgainst'>, statuses: readonly Pick<Status, 'kind'>[]): number =>
+  def.rangeAgainst && statuses.some((status) => status.kind === def.rangeAgainst?.status) ? def.rangeAgainst.range : def.range
+
 // Whether an ability's `requires` holds, given a way to ask whether the caster has an entity of a
 // definition out. The simulator asks its frame and the client its own, so both judge alike.
 export const meetsRequirement = (
@@ -198,8 +231,7 @@ ability({
   description: 'Pops the target\'s curse stacks. Each stack adds damage, haste and cooldown refund.',
   targeting: 'unit',
   range: 280,
-  windUpTicks: 6,
-  backswingTicks: 4,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(10),
   apply: [
     damage(scaled(linear(75, 25, curseStacksOnTarget), { arcane: 0.4, level: .1 }), targetUnit()),
@@ -213,8 +245,7 @@ ability({
   description: 'Leaves a field that speeds up allies and slows enemies.',
   targeting: 'none',
   range: 0,
-  windUpTicks: 4,
-  backswingTicks: 4,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(14),
   apply: [
     spawnEntity({
@@ -259,8 +290,7 @@ ability({
   description: 'A shot that slows and adds curse stacks. At full stacks it pops them for bonus damage and haste.',
   targeting: 'direction',
   range: 520,
-  windUpTicks: 8,
-  backswingTicks: 4,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(5),
   indicator: { width: hexShot.radius * 2 },
   apply: [spawnEntity(hexShot)],
@@ -274,7 +304,6 @@ ability({
   targeting: 'point',
   range: 150,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(8),
   movement: true,
   indicator: { line: true },
@@ -286,7 +315,6 @@ ability({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(12),
   apply: [
     statBuff('attackSpeed', 0.4, seconds(4)),
@@ -309,8 +337,7 @@ ability({
   description: 'Lobs a canister that leaves a trap. Enemies it catches are rooted.',
   targeting: 'point',
   range: 450,
-  windUpTicks: 4,
-  backswingTicks: 4,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(14),
   // The trap it leaves.
   indicator: { radius: snareField.radius },
@@ -338,22 +365,21 @@ export const TSUNAMI_DAMAGE = 100
 export const TSUNAMI_SCALING = { arcane: 0.8 } satisfies Scaling
 const tsunamiWave = {
   id: 'tsunami-wave',
-  speed: 600,
+  speed: 500,
   box: { halfLength: 10, halfWidth: 45 },
   lifetimeTicks: seconds(0.8),
   pierce: true,
   color: '#4fa8ff',
   // The push is at most 140, and no farther than 50 past where the wave stops.
-  onHit: [damage(scaled(TSUNAMI_DAMAGE, TSUNAMI_SCALING)), knockback(140, 700, subject(), { pastEnd: 50 }), stun(TSUNAMI_STUN_TICKS)],
+  onHit: [damage(scaled(TSUNAMI_DAMAGE, TSUNAMI_SCALING)), knockback(120, 700, subject(), { pastEnd: 50 }), stun(TSUNAMI_STUN_TICKS)],
 } satisfies EntityDef
 ability({
   id: 'tsunami',
   description: 'A wave that damages, knocks back and stuns enemies.',
   targeting: 'direction',
-  range: 340,
-  windUpTicks: 5,
-  backswingTicks: 4,
-  cooldownTicks: seconds(9),
+  range: 320,
+  windUpTicks: WINDUP_TICKS.default,
+  cooldownTicks: seconds(14),
   indicator: { width: tsunamiWave.box.halfWidth * 2 },
   apply: [spawnEntity(tsunamiWave)],
 })
@@ -380,9 +406,8 @@ ability({
   description: 'Fires three bubbles. The first to hit a target does full damage, the rest half.',
   targeting: 'direction',
   range: 420,
-  windUpTicks: 4,
-  backswingTicks: 3,
-  cooldownTicks: seconds(8),
+  windUpTicks: WINDUP_TICKS.default,
+  cooldownTicks: seconds(10),
   indicator: { width: bubble.radius * 2 },
   apply: [
     spawnEntity(bubble, { volley: { count: 3, intervalTicks: 8 } }),
@@ -419,9 +444,8 @@ ability({
   description: 'Marks a circle that erupts after a short delay, damaging and slowing enemies in it.',
   targeting: 'point',
   range: 350,
-  windUpTicks: 4,
-  backswingTicks: 4,
-  cooldownTicks: seconds(9),
+  windUpTicks: WINDUP_TICKS.default,
+  cooldownTicks: seconds(11),
   indicator: { radius: SPOUT_RADIUS },
   apply: [spawnEntity(spoutWarning, { at: aimPoint() })],
 })
@@ -432,13 +456,12 @@ ability({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(18),
   apply: [
     loseHealth(100),
-    statBuff('attackSpeed', 0.5, seconds(5)),
-    haste(0.4, seconds(5)),
-    statBuff('resistance', 40, seconds(5)),
+    statBuff('attackSpeed', 0.5, seconds(6)),
+    haste(0.5, seconds(6)),
+    statBuff('resistance', 40, seconds(6)),
   ],
 })
 const soldierBolt = {
@@ -458,8 +481,7 @@ ability({
   description: 'A piercing bolt that slows. It hits harder the less health the enemy has.',
   targeting: 'direction',
   range: 300,
-  windUpTicks: 5,
-  backswingTicks: 3,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(7),
   indicator: { width: soldierBolt.radius * 2 },
   apply: [spawnEntity(soldierBolt)],
@@ -481,8 +503,7 @@ ability({
   description: 'Summons a bot with a shield. It heals you until the shield breaks.',
   targeting: 'none',
   range: 0,
-  windUpTicks: 3,
-  backswingTicks: 3,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(24),
   apply: [
     shield(200, Infinity, self(), { shared: 'medic' }),
@@ -498,6 +519,9 @@ export const SWORD_KEY = 'sword'
 export const SWORD_MAX_STACKS = 3
 export const SWORD_DURATION_TICKS = seconds(8)
 export const SWORD_DAMAGE_PER_STACK = 10
+// What a stack adds to an auto grows with his level: `SWORD_DAMAGE_PER_STACK`, and this many more for each level he is (the level counts from 1, as it does for every `scaled`
+// amount, so at level 1 a stack is the two added together). Slash reads the stacks with numbers of its own.
+export const SWORD_SCALING_PER_LEVEL = 1
 const swordStacks = stacks(SWORD_KEY, self())
 
 // Slash's length, in one place: how far it aims, how long the cut is, and how long the trail it
@@ -524,8 +548,7 @@ ability({
   description: 'Cuts a line, then leaves a trail that slows enemies and speeds up allies. Sword stacks add damage.',
   targeting: 'direction',
   range: SLASH_LENGTH,
-  windUpTicks: 10,
-  backswingTicks: 4,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(7),
   indicator: { width: slashTrail.box.halfWidth * 2 },
   apply: [
@@ -551,8 +574,7 @@ ability({
   description: 'Spends your sword stacks to blast nearby enemies and speed you up.',
   targeting: 'none',
   range: 0,
-  windUpTicks: 8,
-  backswingTicks: 2,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(12),
   apply: [
     damage(scaled(linear(50, 40, swordStacks), { arcane: 0.4, level: 4 }), enemiesInRadius(170)),
@@ -568,7 +590,6 @@ ability({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(10),
   // The auto reads the stacks as they were before it adds its own, so the stacks it spends are the
   // ones built up, and the one it adds stays.
@@ -632,8 +653,7 @@ ability({
   description: 'Lobs a grenade that hurts and knocks enemies back. Hitting one refunds some cooldown.',
   targeting: 'point',
   range: 350,
-  windUpTicks: 2,
-  backswingTicks: 1,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(6),
   indicator: { radius: GRENADE_RADIUS },
   apply: [spawnEntity(grenade)],
@@ -661,8 +681,7 @@ ability({
   description: 'Lobs a molotov that burns and slows enemies standing in the fire.',
   targeting: 'point',
   range: 350,
-  windUpTicks: 4,
-  backswingTicks: 4,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(10),
   indicator: { radius: molotovFire.radius },
   apply: [
@@ -707,8 +726,7 @@ ability({
   description: 'Lobs a flashbang. Enemies in the middle are stunned, those at the edge are blinded.',
   targeting: 'point',
   range: 320,
-  windUpTicks: 4,
-  backswingTicks: 3,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(12),
   // Two circles: the whole flash, and the core inside it that stuns.
   indicator: { radius: FLASH_RADIUS, innerRadius: FLASH_CORE_RADIUS },
@@ -774,8 +792,7 @@ ability({
   targeting: 'point',
   range: STICK_RANGE,
   minRange: STICK_MIN_RANGE,
-  windUpTicks: 4,
-  backswingTicks: 4,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(10),
   // Only one stick at a time. While it is out, this key calls it back instead.
   requires: { entity: 'stick', out: false },
@@ -799,7 +816,6 @@ ability({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(0.5),
   requires: { entity: 'stick', out: true },
   apply: [
@@ -815,7 +831,6 @@ ability({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(8),
   empowerAttack: { ticks: seconds(5), effects: [silence(seconds(1.5)),damage(scaled(HUSH_DAMAGE, { arcane: HUSH_ARCANE })), ...trickEffects] },
   apply: [resetAutoTimer()],
@@ -835,8 +850,7 @@ ability({
   description: 'Blinks you to your stick. With no stick out, it gives you the throw back instead.',
   targeting: 'none',
   range: 0,
-  windUpTicks: 3,
-  backswingTicks: 2,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(10),
   // A stick on the ground to go to, or else no stick anywhere and a throw to give back.
   requires: { entity: 'stick', out: true },
@@ -924,7 +938,6 @@ ability({
   targeting: 'point',
   range: SHADOW_STEP_RANGE,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: SHADOW_STEP_COOLDOWN_TICKS,
   movement: true,
   indicator: { line: true },
@@ -940,7 +953,6 @@ ability({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(1.75),
   movement: true,
   requires: { entity: 'shadow', out: true },
@@ -978,8 +990,7 @@ ability({
   description: 'A piercing shuriken that slows. With a shadow stack it hurts more and roots instead.',
   targeting: 'direction',
   range: 150,
-  windUpTicks: 4,
-  backswingTicks: 3,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(7),
   indicator: { width: shuriken.radius * 2 },
   apply: [
@@ -996,7 +1007,6 @@ ability({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(12),
   apply: [haste(0.4, seconds(1.5)), dodge(seconds(1.5))],
 })
@@ -1016,8 +1026,8 @@ export const PLATING_SCALING_PER_LEVEL = 1
 
 // Hammer's Slam: the hammer comes down on the ground in front of him, on a rectangle `SLAM_LENGTH` long from where he stands and as wide as the
 // indicator. It leaves a mark on the ground for an instant, in the same rectangle.
-const SLAM_LENGTH = 120
-const SLAM_HALF_WIDTH = 25
+const SLAM_LENGTH = 160
+const SLAM_HALF_WIDTH = 30
 export const SLAM_DAMAGE = 70
 export const SLAM_SCALING = { attackDamage: 0.7 } satisfies Scaling
 const slamCrater = {
@@ -1033,8 +1043,7 @@ ability({
   description: 'Smashes the ground in front of you, hurting and slowing enemies.',
   targeting: 'direction',
   range: SLAM_LENGTH,
-  windUpTicks: 14,
-  backswingTicks: 4,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(7),
   indicator: { width: SLAM_HALF_WIDTH * 2 },
   apply: [
@@ -1092,8 +1101,7 @@ ability({
   description: 'Leaps to a marked spot and slams down, stunning enemies where you land.',
   targeting: 'point',
   range: DROP_RANGE,
-  windUpTicks: 3,
-  backswingTicks: 3,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(12),
   movement: true,
   indicator: { radius: DROP_RADIUS },
@@ -1105,26 +1113,27 @@ ability({
   ],
 })
 
-// Hammer's Rage: move speed, attack speed and damage reduction for `RAGE_TICKS`. Each of its effects is the one status of the name `RAGE_KEY` (see `haste`),
+// Hammer's Rage: move speed, attack speed and lifesteal for `RAGE_TICKS`. Each of its effects is the one status of the name `RAGE_KEY` (see `haste`),
 // and each auto he lands makes them last `RAGE_AUTO_TICKS` longer (`prolong`, in champions.ts), up to `RAGE_MAX_TICKS` left. The page draws what is left of it as
-// a bar over him, full at `RAGE_MAX_TICKS` (the champion's `meter`).
+// a bar over him, full at `RAGE_MAX_TICKS` (the champion's `meter`). The lifesteal is the share of the damage he deals (autos and abilities) that comes back to him as health.
 export const RAGE_KEY = 'rage'
 export const RAGE_TICKS = seconds(5)
 export const RAGE_AUTO_TICKS = seconds(0.6)
 export const RAGE_MAX_TICKS = seconds(6)
 export const RAGE_HASTE = 0.3
 export const RAGE_ATTACK_SPEED = 0.5
+export const RAGE_LIFESTEAL = 0.2
 ability({
   id: 'rage',
-  description: 'Move and attack faster and take less damage. Your autos make it last longer.',
+  description: 'Move and attack faster and heal from the damage you deal. Your autos make it last longer.',
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(16),
   apply: [
     haste(RAGE_HASTE, RAGE_TICKS, self(), { named: RAGE_KEY }),
     statBuff('attackSpeed', RAGE_ATTACK_SPEED, RAGE_TICKS, self(), { named: RAGE_KEY }),
+    lifesteal(RAGE_LIFESTEAL, RAGE_TICKS, self(), { named: RAGE_KEY }),
   ],
 })
 
@@ -1136,7 +1145,7 @@ ability({
 export const FIRST_STRIKE_KEY = 'chained'
 export const FIRST_STRIKE_COOLDOWN_TICKS = seconds(10)
 export const FIRST_STRIKE_DAMAGE = 30
-export const FIRST_STRIKE_SCALING = { attackDamage: 0.3 } satisfies Scaling
+export const FIRST_STRIKE_SCALING = { attackDamage: 0.5 } satisfies Scaling
 export const FIRST_STRIKE_HEAL = 40
 export const FIRST_STRIKE_HEAL_SCALING = { maxHealth: .1}
 const firstStruck = stacks(FIRST_STRIKE_KEY, subject())
@@ -1170,6 +1179,7 @@ const hook = {
   onHit: [
     damage(scaled(HOOK_DAMAGE, HOOK_SCALING)),
     dash(HOOK_PULL_SPEED, Infinity, subject(), { toward: besideOwner(), through: true }),
+    stun(seconds(.3), subject()),
   ],
 } satisfies EntityDef
 ability({
@@ -1177,8 +1187,7 @@ ability({
   description: 'Throws out a chain that drags the first enemy it hits to you.',
   targeting: 'direction',
   range: HOOK_RANGE,
-  windUpTicks: 6,
-  backswingTicks: 4,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(12),
   indicator: { width: hook.radius * 2 },
   apply: [spawnEntity(hook)],
@@ -1187,7 +1196,7 @@ ability({
 // Chain's Whirl: a charge-up and then one blow. For `WHIRL_CHARGE_TICKS` two circles, the core and the whole, are outlined round him (they do not fill in); when the
 // charge is full the blow lands, with a flash, on whoever is inside them then, and not whoever was when it was started, so an enemy can get out. Whoever is wholly inside the
 // core takes the plain hit; whoever reaches the ring outside it, the sweet spot, even by touching it, takes the bigger one and is slowed, and that is a first strike.
-// The cast has no windup or backswing, so he can walk and cast while it charges, but he is disarmed for it and cannot attack. The circles are held exactly on him
+// The cast has no windup, so he can walk and cast while it charges, but he is disarmed for it and cannot attack. The circles are held exactly on him
 // (`attached`), so they are centred on him as he walks, and what they hit is what is inside them, so it is where they are drawn. A charge that he does not live to
 // finish, or that a stun breaks, does not go off.
 const WHIRL_CHARGE_TICKS = seconds(.8)
@@ -1233,7 +1242,7 @@ const whirlCharges = {
   lifetimeTicks: WHIRL_CHARGE_TICKS,
   attached: true,
   visual: 'field',
-  stayWhile: (sim, src) => sim.isAlive(src.ownerId) && !sim.statusesOn(src.ownerId).some((status) => status.kind === 'stun'),
+  stayWhile: (sim, src) => sim.isAlive(src.ownerId) && !sim.statusesOn(src.ownerId).some((status) => status.kind === 'stun' || status.kind === 'airborne'),
 } satisfies Partial<EntityDef>
 // The core is only outlined, in a paler colour than the edge, which is where the blow is worst.
 const whirlCoreWarning = {
@@ -1264,7 +1273,6 @@ ability({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(11),
   apply: [
     // Disarmed through the last tick before the blow lands (a status is over on the tick it ends on, and the blow comes a tick after the charge is full).
@@ -1274,21 +1282,21 @@ ability({
   ],
 })
 
-// Chain's Lunge: a short dash the way it is aimed, with no target, that quickens his attacks and readies his next auto at once. It has no windup, so it is cast
-// while Whirl charges.
+// Chain's Lunge: a short dash to a point, anywhere from where he stands out to its range (it has no minimum), that quickens his attacks and readies his next auto at
+// once. It has no windup, so it is cast while Whirl charges.
 const LUNGE_RANGE = 120
-const LUNGE_SPEED = 300
+const LUNGE_SPEED = 450
 export const LUNGE_ATTACK_SPEED = 0.4
 export const LUNGE_BUFF_TICKS = seconds(3)
 ability({
   id: 'lunge',
-  description: 'A short dash that speeds up your attacks and resets your auto. You can use it while Whirl charges.',
-  targeting: 'direction',
+  description: 'A short dash to the target point that speeds up your attacks and resets your auto. You can use it while Whirl charges.',
+  targeting: 'point',
   range: LUNGE_RANGE,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(9),
   movement: true,
+  indicator: { line: true },
   apply: [
     dash(LUNGE_SPEED, LUNGE_RANGE),
     statBuff('attackSpeed', LUNGE_ATTACK_SPEED, LUNGE_BUFF_TICKS),
@@ -1323,7 +1331,6 @@ ability({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(16),
   keepsInvisibility: true,
   apply: [
@@ -1361,8 +1368,7 @@ ability({
   description: 'Throws a fan of knives a short way, hurting every enemy in it.',
   targeting: 'direction',
   range: KNIVES_RANGE,
-  windUpTicks: 5,
-  backswingTicks: 4,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(6),
   indicator: { coneHalfAngle: KNIVES_HALF_ANGLE },
   apply: [
@@ -1395,7 +1401,6 @@ ability({
   targeting: 'unit',
   range: CUT_RANGE,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(11),
   movement: true,
   apply: [
@@ -1440,8 +1445,7 @@ ability({
   description: 'A pulse that heals allies, and hurts and knocks back enemies.',
   targeting: 'none',
   range: 0,
-  windUpTicks: 6,
-  backswingTicks: 4,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(16),
   apply: [
     heal(scaled(PULSE_HEAL, PULSE_HEAL_SCALING), alliesInRadius(PULSE_RADIUS)),
@@ -1473,8 +1477,7 @@ ability({
   description: 'A bolt that pierces enemies, hurting and rooting each one.',
   targeting: 'direction',
   range: VINE_RANGE,
-  windUpTicks: 6,
-  backswingTicks: 3,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(11),
   indicator: { width: vineBolt.radius * 2 },
   apply: [spawnEntity(vineBolt)],
@@ -1491,8 +1494,7 @@ ability({
   targeting: 'unit',
   targetsAllies: true,
   range: 450,
-  windUpTicks: 4,
-  backswingTicks: 3,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(14),
   apply: [heal(linear(scaled(REJUVENATE_HEAL, REJUVENATE_SCALING), REJUVENATE_MISSING, missingHealth()), targetUnit())],
 })
@@ -1512,14 +1514,14 @@ export const MONK_AUTO_REFUND_TICKS = seconds(1)
 // heal (the simulator sees to that, as the hit lands: see `ChampionDef.damageLink`).
 //
 // The key is cast on a unit while there is no link: on a teammate it links them, and on himself it heals him. With one up the key is Link Heal (`linkheal`, the recast), which heals the
-// linked teammate and ends the link (the heal uses the link up), and starts Link's whole cooldown over. It is for the teammate he has linked and no one else: aimed at anyone else it does
+// both of them (him and the linked teammate, each for the whole heal) and ends the link (the heal uses the link up), and starts Link's whole cooldown over. It is for the teammate he has linked and no one else: aimed at anyone else it does
 // nothing, and is given back whole. Its own cooldown is Link's, since that is how long it is before the key can be used again.
 export const LINK_KEY = 'linked'
-export const LINK_COOLDOWN_TICKS = seconds(14)
+export const LINK_COOLDOWN_TICKS = seconds(15)
 export const LINK_SHARE = 0.4
 // The heal and the shields grow with his arcane (see `scaled`), which is 10 at level 1 and grows by 4 a level: 2 for each point is about 8 more for each level he gains.
-export const LINK_HEAL = 160
-export const LINK_HEAL_SCALING = { arcane: 1.5 } satisfies Scaling
+export const LINK_HEAL = 100
+export const LINK_HEAL_SCALING = { arcane: .8 } satisfies Scaling
 // How far apart the two can get before the link breaks. More than Link reaches to be cast (so a link made at the farthest is not broken the moment it is made), and about what two
 // champions on one side of a fight are from one another and no more.
 export const LINK_BREAK_RANGE = 500
@@ -1545,9 +1547,9 @@ const cutLink: readonly Effect[] = [
   removeEntities('link'),
   startCooldown('link'),
 ]
-// How a link ends in a heal: the teammate is given the heal, then the link is cut. It is what Link Heal does, and it is what the link does when a share of a hit would kill Monk
-// (`ChampionDef.damageLink`'s `onBreak`), so the one gives what the other does.
-export const LINK_BREAK_EFFECTS: readonly Effect[] = [heal(linkHeal, linkedAlly), ...cutLink]
+// How a link ends in a heal: Monk and the teammate are each given the heal (the whole of it, not shared out), then the link is cut. It is what Link Heal does, and it is what the link does
+// when a share of a hit would kill Monk (`ChampionDef.damageLink`'s `onBreak`), so the one gives what the other does.
+export const LINK_BREAK_EFFECTS: readonly Effect[] = [heal(linkHeal, selfAndLinked), ...cutLink]
 const linkBond = {
   id: 'link',
   speed: 0,
@@ -1564,8 +1566,7 @@ ability({
   targeting: 'unit',
   targetsAllies: true,
   range: 450,
-  windUpTicks: 3,
-  backswingTicks: 3,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: LINK_COOLDOWN_TICKS,
   // Only one link at a time. While it is up, this key is Link Heal instead.
   requires: { entity: 'link', out: false },
@@ -1581,13 +1582,12 @@ ability({
 ability({
   id: 'linkheal',
   name: 'Link Heal',
-  description: 'Heals your linked teammate and ends the link.',
+  description: 'Heals you and your linked teammate and ends the link.',
   targeting: 'unit',
   targetsAllies: true,
   targetsLinked: true,
   range: 450,
-  windUpTicks: 3,
-  backswingTicks: 3,
+  windUpTicks: 0,
   cooldownTicks: LINK_COOLDOWN_TICKS,
   requires: { entity: 'link', out: true },
   apply: [
@@ -1617,8 +1617,7 @@ ability({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
-  cooldownTicks: seconds(12),
+  cooldownTicks: seconds(13),
   apply: [
     statBuff('attackSpeed', FLURRY_ATTACK_SPEED, FLURRY_TICKS, selfAndLinked, { named: FLURRY_KEY }),
     mark(FLURRY_KEY, FLURRY_TICKS, selfAndLinked, { count: FLURRY_AUTOS, cap: FLURRY_AUTOS, bearer: true }),
@@ -1643,7 +1642,6 @@ ability({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: seconds(14),
   apply: [
     when<SimContext>(
@@ -1660,6 +1658,475 @@ ability({
   ],
 })
 
+// ---------------------------------------------------------------------------- Fire Mage
+
+// Fire Mage's burn stacks: each of his abilities that hits an enemy puts stacks on it, up to `BURN_MAX_STACKS`, and lights it. The stacks are markers of his own that end together,
+// `BURN_STACK_TICKS` after the last one (a new one renews them all), and the burn is one status of his own on the enemy (named for the stacks), renewed with them and worked out afresh
+// each time from how many there will be: `BURN_DPS_PER_STACK` (and its scaling) a second for each. So the more stacks, the more it burns, and the burn ends with the stacks. His autos
+// put none on. A structure takes neither.
+export const BURN_STACK_KEY = 'ember'
+export const BURN_MAX_STACKS = 3
+export const BURN_STACK_TICKS = seconds(4)
+export const BURN_DPS_PER_STACK = 12
+export const BURN_SCALING = { arcane: 0.06 } satisfies Scaling
+const burnStacksOnHit = stacks(BURN_STACK_KEY, subject())
+// How many stacks the unit hit will carry once `count` more are put on it: the ones on it now are read before this tick's writes, so a hit that comes after another on the same
+// tick does not see the other's.
+const burnStacksAfter = (count: number) => (sim: SimReader, src: EffectSource): number => Math.min(BURN_MAX_STACKS, burnStacksOnHit(sim, src) + count)
+const burnPerStack = scaled(BURN_DPS_PER_STACK, BURN_SCALING)
+// Puts `count` stacks on the unit hit and lights it for as many as it will then carry. A tooltip tells it as what one stack burns for.
+const ignite = (count: number): Effect => {
+  const after = burnStacksAfter(count)
+  const effects: readonly Effect[] = [
+    mark(BURN_STACK_KEY, BURN_STACK_TICKS, subject(), { count, cap: BURN_MAX_STACKS }),
+    burn((sim, src) => burnPerStack(sim, src) * after(sim, src), BURN_STACK_TICKS, subject(), { named: BURN_STACK_KEY }),
+  ]
+  return describedAs<Effect>((sim, src) => runEffects(effects, sim, src), 'burnPerStack', burnPerStack)
+}
+
+// Fire Mage's Fireball: a shot that blows up on the first enemy it hits. That enemy takes the shot's damage and a stack, and then the blast, which goes off where the shot was a moment
+// later (its fuse is two ticks, so that the stack the shot put on is there to be counted) and hurts everyone caught in it and puts a stack on each. So the enemy hit straight on takes two
+// stacks and one caught only by the blast takes one. While it flies the key is Detonate, which sets the blast off where the shot is and takes the shot away: with no shot before it, the
+// blast is one stack for everyone, the enemy it would have hit too. Every hit, the shot's and the blast's, slows what it hits, or stuns it instead if that brings it to full stacks. A shot
+// that hits nothing and is not set off blows up at the end of its flight, the same way (or where it meets the edge of the arena, if that comes first).
+export const FIREBALL_RANGE = 560
+const FIREBALL_SPEED = 750
+export const FIREBALL_DAMAGE = 60
+export const FIREBALL_SCALING = { arcane: 0.5 } satisfies Scaling
+export const FIREBALL_BLAST_RADIUS = 85
+export const FIREBALL_BLAST_DAMAGE = 70
+export const FIREBALL_BLAST_SCALING = { arcane: 0.5 } satisfies Scaling
+export const FIREBALL_SLOW = 0.35
+export const FIREBALL_SLOW_TICKS = seconds(1.5)
+export const FIREBALL_STUN_TICKS = seconds(1)
+// What a hit of the fireball does to the enemy it hits, after its damage: `count` stacks, and a stun if that brings the enemy to full stacks (or it was there already), or else a slow.
+const scorchAndStagger = (count: number): readonly Effect[] => [
+  ignite(count),
+  when<SimContext>(
+    (sim, src) => burnStacksAfter(count)(sim, src) >= BURN_MAX_STACKS,
+    [stun(FIREBALL_STUN_TICKS)],
+    [slow(FIREBALL_SLOW, FIREBALL_SLOW_TICKS)],
+  ),
+]
+// The blast itself is only a flash; its damage is dealt by the fuse as it runs out.
+const fireballFlash: EntityDef = {
+  id: 'fireball-flash',
+  speed: 0,
+  radius: FIREBALL_BLAST_RADIUS,
+  lifetimeTicks: 12,
+  visual: 'flash',
+  color: '#ff7a2f',
+}
+// The blast's fuse, which is not drawn: it goes off as it runs out, on the second tick after it was lit (its lifetime is the shortest there is).
+const fireballBlast: EntityDef = {
+  id: 'fireball-blast',
+  speed: 0,
+  radius: FIREBALL_BLAST_RADIUS,
+  lifetimeTicks: 1,
+  visual: 'hidden',
+  onExpire: [
+    onEach(enemiesInRadius(FIREBALL_BLAST_RADIUS), [damage(scaled(FIREBALL_BLAST_DAMAGE, FIREBALL_BLAST_SCALING)), ...scorchAndStagger(1)]),
+    spawnEntity(fireballFlash),
+  ],
+}
+const fireball = {
+  id: 'fireball',
+  speed: FIREBALL_SPEED,
+  radius: 14,
+  lifetimeTicks: Math.round(FIREBALL_RANGE / FIREBALL_SPEED * GAME_TPS),
+  stopsAtWalls: true,
+  color: '#ff7a2f',
+  // A shot that hits ends there, and one that is set off is taken away, so neither of them gets to the end of its flight: only one that does blows up as it ends.
+  onHit: [damage(scaled(FIREBALL_DAMAGE, FIREBALL_SCALING)), ...scorchAndStagger(1), spawnEntity(fireballBlast)],
+  onExpire: [spawnEntity(fireballBlast)],
+} satisfies EntityDef
+ability({
+  id: 'fireball',
+  name: 'Fireball',
+  description: 'A fireball that explodes on the first enemy it hits, at the end of its path, or when you press again. Slows, or stuns at full burn stacks.',
+  targeting: 'direction',
+  range: FIREBALL_RANGE,
+  windUpTicks: WINDUP_TICKS.default,
+  cooldownTicks: seconds(8),
+  indicator: { width: fireball.radius * 2 },
+  // While the fireball flies, this key sets it off instead.
+  recast: 'detonate',
+  apply: [spawnEntity(fireball)],
+})
+ability({
+  id: 'detonate',
+  name: 'Detonate',
+  description: 'Explodes your fireball where it is.',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 0,
+  cooldownTicks: seconds(0.25),
+  requires: { entity: 'fireball', out: true },
+  apply: [
+    spawnEntity(fireballBlast, { at: ownEntity('fireball') }),
+    removeEntities('fireball'),
+  ],
+})
+
+// Fire Mage's Fire Tornado: a circle at a point, which a tornado bursts out of after a moment's warning. Every enemy inside then is thrown into the air (`knockUp`), hurt, and given a stack.
+// It hits whoever is inside as the warning runs out, and not whoever was when it was laid, so it can be walked out of.
+export const TORNADO_RANGE = 450
+export const TORNADO_RADIUS = 80
+export const TORNADO_DELAY_TICKS = seconds(0.6)
+export const TORNADO_DAMAGE = 70
+export const TORNADO_SCALING = { arcane: 0.6 } satisfies Scaling
+export const TORNADO_KNOCKUP_TICKS = seconds(0.75)
+// The tornado itself, for as long as it holds what it caught in the air; its damage is dealt by the warning as it runs out.
+const tornadoFunnel: EntityDef = {
+  id: 'firetornado-funnel',
+  speed: 0,
+  radius: TORNADO_RADIUS,
+  lifetimeTicks: TORNADO_KNOCKUP_TICKS,
+  visual: 'field',
+  color: '#ff9a3c',
+}
+const tornadoWarning: EntityDef = {
+  id: 'firetornado-warning',
+  speed: 0,
+  radius: TORNADO_RADIUS,
+  lifetimeTicks: TORNADO_DELAY_TICKS,
+  visual: 'telegraph',
+  color: '#ff6b4a',
+  onExpire: [
+    onEach(enemiesInRadius(TORNADO_RADIUS), [damage(scaled(TORNADO_DAMAGE, TORNADO_SCALING)), knockUp(TORNADO_KNOCKUP_TICKS), ignite(1)]),
+    spawnEntity(tornadoFunnel),
+  ],
+}
+ability({
+  id: 'firetornado',
+  name: 'Fire Tornado',
+  description: 'Marks a circle that erupts into a tornado after a short delay, knocking enemies up.',
+  targeting: 'point',
+  range: TORNADO_RANGE,
+  windUpTicks: WINDUP_TICKS.default,
+  cooldownTicks: seconds(12),
+  indicator: { radius: TORNADO_RADIUS },
+  apply: [spawnEntity(tornadoWarning, { at: aimPoint() })],
+})
+
+// Fire Mage's Scorch: a wave of fire that runs out along the ground from him, through every enemy in its way, hurting each as it reaches it and putting a stack on it (one: the wave
+// reaches each enemy once). Behind it the ground burns, a patch at a time as it goes (it lays one every `SCORCH_PATCH_EVERY_TICKS`, close enough that they overlap into one strip, and
+// one where it starts). An enemy standing on the burning ground burns while it does and for a little after, with one burn for all the patches (named `SCORCH_BURN_NAME`), so it is not
+// burnt twice where they overlap. The ground puts no stacks on.
+export const SCORCH_RANGE = 480
+const SCORCH_SPEED = 600
+export const SCORCH_HALF_WIDTH = 35
+export const SCORCH_DAMAGE = 100
+export const SCORCH_SCALING = { arcane: 0.7 } satisfies Scaling
+export const SCORCH_BURN = 25
+export const SCORCH_BURN_SCALING = { arcane: 0.2 } satisfies Scaling
+export const SCORCH_GROUND_TICKS = seconds(3)
+// How long the ground's burn goes on after an enemy steps off it.
+export const SCORCH_BURN_TICKS = seconds(1)
+const SCORCH_BURN_NAME = 'scorch'
+const SCORCH_PATCH_EVERY_TICKS = 5
+const scorchGround: EntityDef = {
+  id: 'scorch-ground',
+  speed: 0,
+  radius: SCORCH_HALF_WIDTH,
+  lifetimeTicks: SCORCH_GROUND_TICKS,
+  visual: 'field',
+  color: '#ff7a2f',
+  onTick: [burn(scaled(SCORCH_BURN, SCORCH_BURN_SCALING), SCORCH_BURN_TICKS, enemiesInRadius(SCORCH_HALF_WIDTH), { named: SCORCH_BURN_NAME })],
+}
+const scorchWave = {
+  id: 'scorch-wave',
+  speed: SCORCH_SPEED,
+  box: { halfLength: 12, halfWidth: SCORCH_HALF_WIDTH },
+  lifetimeTicks: Math.round(SCORCH_RANGE / SCORCH_SPEED * GAME_TPS),
+  pierce: true,
+  color: '#ff4f1f',
+  onHit: [damage(scaled(SCORCH_DAMAGE, SCORCH_SCALING)), ignite(1)],
+  pulseEveryTicks: SCORCH_PATCH_EVERY_TICKS,
+  onPulse: [spawnEntity(scorchGround)],
+} satisfies EntityDef
+ability({
+  id: 'scorch',
+  name: 'Scorch',
+  description: 'Sends a wave of fire along the ground that hurts the enemies it passes and leaves the ground burning.',
+  targeting: 'direction',
+  range: SCORCH_RANGE,
+  windUpTicks: WINDUP_TICKS.default,
+  cooldownTicks: seconds(11),
+  indicator: { width: SCORCH_HALF_WIDTH * 2 },
+  apply: [spawnEntity(scorchWave), spawnEntity(scorchGround)],
+})
+
+// ---------------------------------------------------------------------------- Aurel
+
+// Aurel's bleed: Rend makes what it hits bleed, which is damage over time (`bleed`) as one status of his own (named `BLEED_NAME`) that every Rend renews. A bleeding enemy is what the
+// rest of his kit feeds on: Rend heals him more and speeds him up more against one, and Bloodrush reaches farther to one. A bleed counts whoever put it on.
+const BLEED_NAME = 'rend'
+export const BLEED_DPS = 4
+export const BLEED_SCALING = { attackDamage: 0.04 } satisfies Scaling
+// A little longer than Rend's cooldown, so the next Rend can find the bleed the last one left.
+export const BLEED_TICKS = seconds(7)
+// Whether the unit a cast is aimed at is bleeding, as it stood before this tick's writes: so a Rend's own bleed does not count for itself.
+const targetBleeding = (sim: SimReader, src: EffectSource): boolean =>
+  src.aim?.mode === 'unit' && sim.statusesOn(src.aim.unitId).some((status) => status.kind === 'bleed')
+
+// Aurel's passive (in champions.ts): his autos do up to `LOW_HEALTH_BONUS` more the less health he has (all of it at none, half of it at half his health).
+export const LOW_HEALTH_BONUS = 0.4
+
+// Aurel's Rend: a strike at an enemy close by (`REND_RANGE`), which hurts it, makes it bleed, heals him a set amount, gives him move speed for a moment and resets his auto. It has no
+// windup, so it goes between autos, and the next auto is ready at once. Against an enemy that was bleeding already it heals him a share of the health he is missing as well, and the
+// speed is more (`REND_BLEEDING_HASTE` for `REND_HASTE`). Aimed at one farther off, he walks up to it and strikes once it is in reach, as for any ability aimed at an enemy.
+export const REND_RANGE = 160
+export const REND_DAMAGE = 50
+export const REND_SCALING = { attackDamage: 0.8 } satisfies Scaling
+export const REND_HEAL = 40
+export const REND_HEAL_SCALING = { level: 6 } satisfies Scaling
+export const REND_MISSING_HEAL = 0.12
+export const REND_HASTE = 0.2
+export const REND_BLEEDING_HASTE = 0.4
+export const REND_HASTE_TICKS = seconds(1.5)
+const rendHeal = scaled(REND_HEAL, REND_HEAL_SCALING)
+ability({
+  id: 'rend',
+  name: 'Rend',
+  description: 'Strikes a nearby enemy and makes it bleed, healing you and speeding you up. Heals and speeds you up more against a bleeding enemy.',
+  targeting: 'unit',
+  range: REND_RANGE,
+  windUpTicks: WINDUP_TICKS.default,
+  cooldownTicks: seconds(3.5),
+  apply: [
+    damage(scaled(REND_DAMAGE, REND_SCALING), targetUnit()),
+    when<SimContext>(
+      targetBleeding,
+      [heal(linear(rendHeal, REND_MISSING_HEAL, missingHealth(self())), self()), haste(REND_BLEEDING_HASTE, REND_HASTE_TICKS, self())],
+      [heal(rendHeal, self()), haste(REND_HASTE, REND_HASTE_TICKS, self())],
+    ),
+    bleed(scaled(BLEED_DPS, BLEED_SCALING), BLEED_TICKS, targetUnit(), { named: BLEED_NAME }),
+  ],
+})
+
+// Aurel's Transfusion: takes all crowd control off him (`cleanse`), and heals him a share of the health he has lost in the last `TRANSFUSION_WINDOW_TICKS`, which his frame remembers
+// for him (`ChampionDef.healthMemoryTicks`). It is cast through crowd control (`unstoppable`), which is what it is for, and while it is ready the page shows on his health bar what it
+// would heal.
+export const TRANSFUSION_WINDOW_TICKS = seconds(3)
+export const TRANSFUSION_SHARE = 0.4
+ability({
+  id: 'transfusion',
+  name: 'Transfusion',
+  description: 'Cleanses crowd control and heals you for part of the damage you just took.',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: 0,
+  cooldownTicks: seconds(16),
+  unstoppable: true,
+  healthBarPreview: true,
+  apply: [
+    cleanse(self()),
+    heal(linear(0, TRANSFUSION_SHARE, healthLost(TRANSFUSION_WINDOW_TICKS)), self()),
+  ],
+})
+
+// Aurel's Bloodrush: a dash onto an enemy, which ends beside it, and slows it. It reaches farther to an enemy that is bleeding (`rangeAgainst`). Aimed at one out of reach, he walks
+// up to it and dashes once it is in reach, as for any ability aimed at an enemy. The slow starts as he goes, so it is still on when he gets there.
+export const BLOODRUSH_RANGE = 240
+export const BLOODRUSH_BLEEDING_RANGE = 400
+const BLOODRUSH_SPEED = 1100
+export const BLOODRUSH_SLOW = 0.35
+export const BLOODRUSH_SLOW_TICKS = seconds(2)
+ability({
+  id: 'bloodrush',
+  name: 'Bloodrush',
+  description: 'Dashes to an enemy and slows it. Reaches farther to a bleeding enemy.',
+  targeting: 'unit',
+  range: BLOODRUSH_RANGE,
+  rangeAgainst: { status: 'bleed', range: BLOODRUSH_BLEEDING_RANGE },
+  windUpTicks: 0,
+  cooldownTicks: seconds(11),
+  movement: true,
+  apply: [
+    dash(BLOODRUSH_SPEED, Infinity, self(), { toward: besideTarget(), through: true }),
+    slow(BLOODRUSH_SLOW, BLOODRUSH_SLOW_TICKS, targetUnit()),
+  ],
+})
+
+// ---------------------------------------------------------------------------- Ent
+
+// The Ent's passive: the first auto he lands on an enemy roots it. The enemy then carries an `ENT_ROOT_KEY` marker of his own for `ENT_ROOT_COOLDOWN_TICKS`, and his autos do not root
+// it again until the marker is gone: so each enemy has a cooldown of its own (as each has for Chain's first strike), and another Ent's is separate. A structure takes no markers and no
+// roots, so it is passed over. (The effect is in his autos, in champions.ts.)
+export const ENT_ROOT_KEY = 'entangled'
+export const ENT_ROOT_TICKS = seconds(1)
+export const ENT_ROOT_COOLDOWN_TICKS = seconds(12)
+const entangledLately = stacks(ENT_ROOT_KEY, subject())
+export const entangle: Effect<SimContext> = when<SimContext>(
+  (sim, src) => src.subject !== null && sim.character(src.subject)?.structure !== true && entangledLately(sim, src) === 0,
+  [root(ENT_ROOT_TICKS), mark(ENT_ROOT_KEY, ENT_ROOT_COOLDOWN_TICKS, subject())],
+)
+
+// The Ent's spore: Spore plants it on the enemy it strikes, a damage over time (`spore`) that is one status of his on that enemy (named `SPORE_NAME`), so a new one takes the old one's place,
+// for `SPORE_TICKS`. When one of his abilities (Root Burst, Grove or Spore) hits an enemy that carries his spore, the spore **bursts**: the enemy takes bonus damage, he is healed a
+// good deal, and the spore is gone (from the next tick). Spore plants a fresh one after it bursts the old, so it is ready to burst again.
+const SPORE_NAME = 'spore'
+export const SPORE_TICKS = seconds(5)
+export const SPORE_DPS = 10
+export const SPORE_DPS_SCALING = { arcane: 0.10 } satisfies Scaling
+export const SPORE_POP_DAMAGE = 70
+export const SPORE_POP_SCALING = { arcane: 0.5 } satisfies Scaling
+export const SPORE_POP_HEAL = 70
+export const SPORE_POP_HEAL_SCALING = { arcane: 0.4, maxHealth: 0.02 } satisfies Scaling
+// The spore of his on the unit hit, if it carries one, as it stood before this tick's writes.
+const sporeOnSubject = (sim: SimReader, src: EffectSource) =>
+  src.subject === null ? undefined : sim.statusesOn(src.subject).find((status) => status.kind === 'spore' && status.ownerId === src.ownerId)
+// Takes his spore off the unit hit: it is over from the next tick.
+const endSpore: Effect<SimContext> = (sim, src) => {
+  const planted = sporeOnSubject(sim, src)
+  if (planted && src.subject !== null) sim.addStatus(src.subject, { ...planted, endTick: Math.min(planted.endTick, src.tick + 1) })
+}
+// Run for each enemy one of his abilities hits, as the subject.
+const burstSpore: Effect<SimContext> = when<SimContext>(
+  (sim, src) => sporeOnSubject(sim, src) !== undefined,
+  [damage(scaled(SPORE_POP_DAMAGE, SPORE_POP_SCALING)), heal(scaled(SPORE_POP_HEAL, SPORE_POP_HEAL_SCALING), self()), endSpore],
+)
+
+// The Ent's Root Burst: a small circle at a point, out of which roots burst up after a moment's warning, hurting and greatly slowing every enemy in it then (and bursting its spore).
+// It hits whoever is inside as the warning runs out, so it can be stepped out of, but the warning is short.
+export const ROOTBURST_RANGE = 450
+export const ROOTBURST_RADIUS = 60
+export const ROOTBURST_DELAY_TICKS = seconds(0.35)
+export const ROOTBURST_DAMAGE = 70
+export const ROOTBURST_SCALING = { arcane: 0.6 } satisfies Scaling
+export const ROOTBURST_SLOW = 0.6
+export const ROOTBURST_SLOW_TICKS = seconds(1.5)
+const rootburstRoots: EntityDef = {
+  id: 'rootburst-roots',
+  speed: 0,
+  radius: ROOTBURST_RADIUS,
+  lifetimeTicks: 18,
+  visual: 'flash',
+  color: '#8b5a2b',
+}
+const rootburstWarning: EntityDef = {
+  id: 'rootburst-warning',
+  speed: 0,
+  radius: ROOTBURST_RADIUS,
+  lifetimeTicks: ROOTBURST_DELAY_TICKS,
+  visual: 'telegraph',
+  color: '#a3c45a',
+  onExpire: [
+    onEach(enemiesInRadius(ROOTBURST_RADIUS), [
+      damage(scaled(ROOTBURST_DAMAGE, ROOTBURST_SCALING)),
+      slow(ROOTBURST_SLOW, ROOTBURST_SLOW_TICKS),
+      burstSpore,
+    ]),
+    spawnEntity(rootburstRoots),
+  ],
+}
+ability({
+  id: 'rootburst',
+  name: 'Root Burst',
+  description: 'Roots burst up from a small circle after a moment, hurting enemies and slowing them a lot.',
+  targeting: 'point',
+  range: ROOTBURST_RANGE,
+  windUpTicks: WINDUP_TICKS.default,
+  cooldownTicks: seconds(7),
+  indicator: { radius: ROOTBURST_RADIUS },
+  apply: [spawnEntity(rootburstWarning, { at: aimPoint() })],
+})
+
+// The Ent's Grove: a large circle at a point, which a grove grows out of after a long warning. Every ally in it then (him too) is healed, and every enemy in it is hurt and rooted (and has
+// its spore burst). Like Root Burst it hits whoever is inside as the warning runs out, and the warning is long, so it is for where a fight will be and not for where an enemy is.
+export const GROVE_RANGE = 500
+export const GROVE_RADIUS = 140
+export const GROVE_DELAY_TICKS = seconds(1)
+export const GROVE_HEAL = 60
+export const GROVE_HEAL_SCALING = { arcane: 0.5 } satisfies Scaling
+export const GROVE_DAMAGE = 80
+export const GROVE_SCALING = { arcane: 0.6 } satisfies Scaling
+export const GROVE_ROOT_TICKS = seconds(1.25)
+// The grove itself, for a moment once it has grown; what it does is done by the warning as it runs out.
+const grove: EntityDef = {
+  id: 'grove',
+  speed: 0,
+  radius: GROVE_RADIUS,
+  lifetimeTicks: seconds(1),
+  visual: 'field',
+  color: '#3e8e41',
+}
+const groveWarning: EntityDef = {
+  id: 'grove-warning',
+  speed: 0,
+  radius: GROVE_RADIUS,
+  lifetimeTicks: GROVE_DELAY_TICKS,
+  visual: 'telegraph',
+  color: '#6fcf6f',
+  onExpire: [
+    heal(scaled(GROVE_HEAL, GROVE_HEAL_SCALING), alliesInRadius(GROVE_RADIUS)),
+    onEach(enemiesInRadius(GROVE_RADIUS), [
+      damage(scaled(GROVE_DAMAGE, GROVE_SCALING)),
+      root(GROVE_ROOT_TICKS),
+      burstSpore,
+    ]),
+    spawnEntity(grove),
+  ],
+}
+ability({
+  id: 'grove',
+  name: 'Grove',
+  description: 'Marks a large circle that grows into a grove after a delay, healing allies and hurting and rooting enemies.',
+  targeting: 'point',
+  range: GROVE_RANGE,
+  windUpTicks: WINDUP_TICKS.default,
+  cooldownTicks: seconds(15),
+  indicator: { radius: GROVE_RADIUS },
+  apply: [spawnEntity(groveWarning, { at: aimPoint() })],
+})
+
+// The Ent's Spore: a strike at an enemy close by (`SPORE_RANGE`), which hurts it, bursts the spore it carries if it has one, and plants a fresh one. Aimed at one farther off, he walks up
+// to it and strikes once it is in reach, as for any ability aimed at an enemy.
+export const SPORE_RANGE = 110
+export const SPORE_DAMAGE = 50
+export const SPORE_SCALING = { arcane: 0.5 } satisfies Scaling
+ability({
+  id: 'spore',
+  name: 'Spore',
+  description: 'Strikes a nearby enemy and plants a spore that drains its health. Hitting a spored enemy with an ability bursts it for damage and a big heal.',
+  targeting: 'unit',
+  range: SPORE_RANGE,
+  windUpTicks: WINDUP_TICKS.default,
+  // A little shorter than a spore lasts, so the next Spore can burst the one the last planted.
+  cooldownTicks: seconds(4.5),
+  apply: [
+    damage(scaled(SPORE_DAMAGE, SPORE_SCALING), targetUnit()),
+    // The old spore bursts before the new one is planted: both are the same status, and the new one, written after, is the one that stays.
+    onEach(targetUnit(), [burstSpore]),
+    spore(scaled(SPORE_DPS, SPORE_DPS_SCALING), SPORE_TICKS, targetUnit(), { named: SPORE_NAME }),
+  ],
+})
+
+// ---------------------------------------------------------------------------- Back
+
+// Back, which every champion has: it channels for `BACK_TICKS`, and then takes the champion to its spawn, where its shop is. It is not one of its abilities and not on a
+// key (the page gives it B). Walking, going after someone, casting something else, a stun or a fear, and taking damage all end it, and it does nothing then. A champion
+// that carries a flag cannot start it, or it would take the flag home for free (see `Simulator.carriesFlag`).
+export const BACK_ABILITY_ID = 'back'
+export const BACK_TICKS = seconds(3)
+// Where the caster starts the game, and comes back to when it respawns.
+const ownSpawn: Anchor = (sim, src) => {
+  const at = sim.character(src.ownerId)?.initialPosition
+  return at && { ...at }
+}
+ability({
+  id: BACK_ABILITY_ID,
+  name: 'Back',
+  description: 'Channels, then takes you back to your spawn. Moving, casting or taking damage cancels it.',
+  targeting: 'none',
+  range: 0,
+  windUpTicks: BACK_TICKS,
+  cooldownTicks: 0,
+  universal: true,
+  apply: [blink(ownSpawn)],
+})
+
 // ---------------------------------------------------------------------------- Monsters
 
   // Monsters' abilities. A monster is a champion as far as the simulator goes, so its abilities are defined here like
@@ -1670,8 +2137,7 @@ ability({
   description: 'A heavy blow to everything around the caster.',
   targeting: 'none',
   range: 0,
-  windUpTicks: 14,
-  backswingTicks: 10,
+  windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(6),
   apply: [damage(60, enemiesInRadius(130))],
 })

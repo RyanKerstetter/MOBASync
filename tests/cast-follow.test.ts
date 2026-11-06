@@ -36,7 +36,6 @@ const poke = defineAbility({
   targeting: 'unit',
   range: 200,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: 5 * GAME_TPS,
   apply: [damage(POKE_DAMAGE, targetUnit())],
 })
@@ -45,7 +44,6 @@ const hex = defineAbility({
   targeting: 'unit',
   range: 260,
   windUpTicks: 12,
-  backswingTicks: 6,
   cooldownTicks: 5 * GAME_TPS,
   apply: [damage(HEX_DAMAGE, targetUnit())],
 })
@@ -56,7 +54,6 @@ const jolt = defineAbility({
   targeting: 'unit',
   range: 1000,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: 10 * GAME_TPS,
   apply: [stun(JOLT_TICKS, targetUnit())],
 })
@@ -66,7 +63,6 @@ const gag = defineAbility({
   targeting: 'unit',
   range: 1000,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: 10 * GAME_TPS,
   apply: [silence(2 * GAME_TPS, targetUnit())],
 })

@@ -1,6 +1,6 @@
 import { GAME_TPS } from './constants.js'
 import { describeItemEffects, itemEffectProblem, type CarriedEffect, type ItemEffect } from './item-effects.js'
-import type { ChampionStats } from './stats.js'
+import { walkingSpeed, type ChampionStats } from './stats.js'
 
 // Items: what a player buys with gold to make their champion stronger. A champion has eight slots, one for each kind of item, and carries at most one
 // item in each: to buy another of that kind, the one in the slot has to be sold first. What an item does is give its stats (flat amounts added
@@ -165,7 +165,8 @@ export function withItems(stats: ChampionStats, inventory: Inventory | undefined
     haste: stats.haste + (totals.haste ?? 0),
     arcane: stats.arcane + (totals.arcane ?? 0),
     attackRange: stats.attackRange + (totals.attackRange ?? 0),
-    moveSpeed: stats.moveSpeed + (totals.moveSpeed ?? 0),
+    // What the items add to how fast it walks is what they really add, with the game's move speed multiplier in it (`walkingSpeed`): the stats given already have it.
+    moveSpeed: stats.moveSpeed + walkingSpeed(0, totals.moveSpeed ?? 0),
   }
 }
 

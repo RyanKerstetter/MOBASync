@@ -61,7 +61,6 @@ defineAbility({
   targeting: 'none',
   range: 0,
   windUpTicks: 0,
-  backswingTicks: 0,
   cooldownTicks: 6000,
   apply: [loseHealth(WOUND)],
 })
@@ -98,6 +97,8 @@ const east: CastTarget = { mode: 'direction', dir: { x: 1, y: 0 } }
 const at = (unitId: number): CastTarget => ({ mode: 'unit', unitId })
 // The tick a cast ordered on `tick` goes off.
 const goesOff = (abilityId: string, tick: number): number => tick + (abilityDefs.get(abilityId)?.windUpTicks ?? 0)
+// By this tick a Vine Bolt cast on tick 10 has gone off, flown the couple of hundred units to the enemy, and mended it, with time to spare: where the autos begin.
+const MENDED = goesOff('vinebolt', 10) + 40
 
 // Sage is character 1, on team 1; each of the others is on a team of its own unless it says, so an enemy.
 type Other = { at: Vector2; who?: Champion; team?: number }
@@ -266,8 +267,8 @@ test('an auto on a mended enemy heals Sage and quickens her and uses up the mend
     return undefined
   }
 
-  simulator.addOrder(1, attack(40, 2))
-  const landed = nextHit(2, 40)
+  simulator.addOrder(1, attack(MENDED, 2))
+  const landed = nextHit(2, MENDED)
   assert.ok(landed, 'the auto on the mended enemy lands')
   assert.equal(landed.heal, passiveHeal, 'and heals her by what the passive says')
   const frame = simulator.at(landed.tick)
@@ -288,9 +289,9 @@ test('an auto on a mended enemy heals Sage and quickens her and uses up the mend
   unmended.addPlayer(2, 'p2', 'Two', plain, bag, 2)
   unmended.addPlayer(3, 'p3', 'Three', east_(250, 400), brute, 3)
   unmended.addOrder(3, attack(1, 1))
-  unmended.addOrder(1, attack(40, 2))
+  unmended.addOrder(1, attack(MENDED, 2))
   let landedAt: number | undefined
-  for (let tick = 41; tick <= 160 && landedAt === undefined; tick += 1) {
+  for (let tick = MENDED + 1; tick <= MENDED + 120 && landedAt === undefined; tick += 1) {
     if (hp(unmended.at(tick), 2) < bag.maxHp) landedAt = tick
   }
   assert.ok(landedAt, 'the auto lands')
@@ -329,9 +330,9 @@ test('an auto from a teammate of Sage on a mended enemy heals them and quickens 
   simulator.addOrder(3, cast(1, 't-sage-wound', none, STRIKER_AT))
   simulator.addOrder(4, attack(1, 1))
   simulator.addOrder(1, cast(10, 'vinebolt', east))
-  simulator.addOrder(3, attack(40, 2))
+  simulator.addOrder(3, attack(MENDED, 2))
 
-  const landed = hitAfter(simulator, 2, 39)
+  const landed = hitAfter(simulator, 2, MENDED - 1)
   assert.ok(landed, 'the teammate\'s auto lands')
   assert.equal(marks(simulator.at(landed - 1), 2, SAGE_KEY).length, 1, 'the enemy was mended')
   assert.ok(hp(simulator.at(landed - 1), 3) < striker.maxHp, 'and the teammate was hurt')
@@ -351,9 +352,9 @@ test('an auto from someone who is not on Sage\'s side leaves her mend alone, and
   const simulator = scene([{ at: east_(200) }, { at: STRIKER_AT, who: striker, team: 3 }])
   simulator.addOrder(3, cast(1, 't-sage-wound', none, STRIKER_AT))
   simulator.addOrder(1, cast(10, 'vinebolt', east))
-  simulator.addOrder(3, attack(40, 2))
+  simulator.addOrder(3, attack(MENDED, 2))
 
-  const landed = hitAfter(simulator, 2, 39)
+  const landed = hitAfter(simulator, 2, MENDED - 1)
   assert.ok(landed, 'the auto lands')
   assert.equal(marks(simulator.at(landed - 1), 2, SAGE_KEY).length, 1, 'the enemy was mended')
   assert.ok(hp(simulator.at(landed - 1), 3) < striker.maxHp, 'and the one who hit it was hurt')
@@ -368,9 +369,9 @@ test('each Sage\'s mend is its own, and one auto of a teammate uses up all of th
   simulator.addOrder(3, cast(1, 't-sage-wound', none, STRIKER_AT))
   simulator.addOrder(1, cast(10, 'vinebolt', east))
   simulator.addOrder(4, cast(10, 'vinebolt', east, second))
-  simulator.addOrder(3, attack(40, 2))
+  simulator.addOrder(3, attack(MENDED, 2))
 
-  const landed = hitAfter(simulator, 2, 39)
+  const landed = hitAfter(simulator, 2, MENDED - 1)
   assert.ok(landed, 'the auto lands')
   assert.deepEqual(marks(simulator.at(landed - 1), 2, SAGE_KEY).map((marker) => marker.ownerId).sort(), [1, 4], 'each of them has mended it')
   assert.equal(gained(simulator, 3, landed), passiveHeal * 2, 'it heals for both')
@@ -381,11 +382,11 @@ test('a mend a Sage left behind when she died can still be used by her team unti
   const simulator = scene([{ at: east_(200) }, { at: STRIKER_AT, who: striker, team: 1 }])
   simulator.addOrder(3, cast(1, 't-sage-wound', none, STRIKER_AT))
   simulator.addOrder(1, cast(10, 'vinebolt', east))
-  killAt(simulator, 1, 30)
-  simulator.addOrder(3, attack(40, 2))
+  killAt(simulator, 1, MENDED - 10)
+  simulator.addOrder(3, attack(MENDED, 2))
 
-  assert.equal(simulator.at(35).get(1)?.isDead(), true, 'she is dead')
-  const landed = hitAfter(simulator, 2, 39)
+  assert.equal(simulator.at(MENDED - 5).get(1)?.isDead(), true, 'she is dead')
+  const landed = hitAfter(simulator, 2, MENDED - 1)
   assert.ok(landed, 'the auto lands')
   assert.equal(marks(simulator.at(landed - 1), 2, SAGE_KEY).length, 1, 'her mend is still on the enemy')
   assert.equal(gained(simulator, 3, landed), passiveHeal, 'and it is worth what it was')

@@ -126,3 +126,5 @@ export function respawnText(secondsLeft: number): string {
 
 // What it says while the champion is dead and will not come back: in Core Destruction, its team's core is broken.
 export const OUT_TEXT = 'Out of the game: your core is down'
+// And in arena, where a champion that falls is out until the round is over, and back for the next.
+export const ROUND_OUT_TEXT = 'Out until the round is over'

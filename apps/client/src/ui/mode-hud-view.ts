@@ -1,11 +1,37 @@
 import { getTeam } from '../../../../packages/shared/src/index.ts'
 import { element } from './dom.ts'
-import { coreHint, coreReadout, flagHint, flagReadout, hillReadout, modeTitle, type CoreView, type FlagView, type ModeView, type TeamScore } from './mode-hud.ts'
+import {
+  arenaHint,
+  coreHint,
+  coreReadout,
+  flagHint,
+  flagReadout,
+  formatGameClock,
+  hillReadout,
+  modeTitle,
+  roundLabel,
+  type CoreView,
+  type FlagView,
+  type ModeView,
+  type TeamScore,
+} from './mode-hud.ts'
 
 const NEUTRAL_COLOR = '#c9d6e4'
 
 // What each kind of score is called, for the screen reader.
-const SCORE_NAME = { deathmatch: 'kills', koth: 'points', ctf: 'captures', core: 'cores' } as const
+const SCORE_NAME = { deathmatch: 'kills', koth: 'points', ctf: 'captures', core: 'cores', arena: 'rounds' } as const
+
+// A box for a round of arena: filled with the colour of the team that won it, outlined while it is the round being fought, and empty until then.
+function roundBox(round: { winner?: number }, index: number, current: number): HTMLElement {
+  const label = roundLabel(round, index, current)
+  const item = element('li', 'mode-round')
+  item.title = label
+  item.setAttribute('aria-label', label)
+  item.classList.toggle('is-won', round.winner !== undefined)
+  item.classList.toggle('is-current', index === current && round.winner === undefined)
+  if (round.winner !== undefined) item.style.setProperty('--team-color', getTeam(round.winner).color)
+  return item
+}
 
 function scoreChip(row: TeamScore, localTeam: number | undefined): HTMLElement {
   const team = getTeam(row.team)
@@ -45,11 +71,16 @@ function coreItem(core: CoreView): HTMLElement {
   return item
 }
 
-// The top middle: the mode, each team's score and, for the hill, its bar and, for the flags, where each
-// one is and who has it, and for the cores how each stands. Plain elements over the canvas, hidden until the first update, and rebuilt
+// The top middle: the mode and, beside it, how far into the game it is (a clock that counts up); each team's score and, for the hill, its bar and, for the flags, where each
+// one is and who has it, for the cores how each stands, and for arena a box for each round with who won it. Plain elements over the canvas, hidden until the first update, and rebuilt
 // only when what they say changes (the hill's bar moves every frame).
 export function createModeHudView(container: HTMLElement) {
   const title = element('div', 'mode-title')
+  // A timer to a screen reader, which does not read it out as it changes: it is there to be looked at.
+  const clock = element('time', 'mode-clock', formatGameClock(0))
+  clock.setAttribute('role', 'timer')
+  clock.setAttribute('aria-label', 'Game time')
+  const head = element('div', 'mode-head', title, clock)
   const scores = element('ul', 'mode-scores')
   const hillFill = element('div', 'mode-hill-fill')
   const hillText = element('div', 'mode-hill-text')
@@ -60,20 +91,27 @@ export function createModeHudView(container: HTMLElement) {
   hill.setAttribute('aria-valuemax', '100')
   const flags = element('ul', 'mode-flags')
   const coreRows = element('ul', 'mode-cores')
+  const rounds = element('ol', 'mode-rounds')
+  rounds.setAttribute('aria-label', 'Rounds')
   const hint = element('p', 'mode-hint')
-  const root = element('div', 'game-mode-hud', title, scores, hill, flags, coreRows, hint)
+  const root = element('div', 'game-mode-hud', head, scores, hill, flags, coreRows, rounds, hint)
   root.hidden = true
   container.appendChild(root)
   let shownScores = ''
   let shownFlags = ''
   let shownCores = ''
+  let shownRounds = ''
 
   return {
-    // `local` is the controlled champion, whose team is marked in the scores and who the hint is for.
-    update(view: ModeView, local?: { id: number; team: number }): void {
+    // `local` is the controlled champion, whose team is marked in the scores and who the hint is for. `gameSeconds` is how long the game has been going (see
+    // `ClientGameState.getGameSeconds`), for the clock.
+    update(view: ModeView, local?: { id: number; team: number }, gameSeconds = 0): void {
       root.hidden = false
       root.dataset.mode = view.kind
       title.textContent = modeTitle(view)
+      // It moves once a second, though this is asked every frame.
+      const time = formatGameClock(gameSeconds)
+      if (clock.textContent !== time) clock.textContent = time
       scores.setAttribute('aria-label', `Team ${SCORE_NAME[view.kind]}`)
 
       // In Core Destruction the cores say how it stands, and a team's score (how many cores it has broken) is only one or none.
@@ -112,7 +150,18 @@ export function createModeHudView(container: HTMLElement) {
         coreRows.replaceChildren(...coreViews.map(coreItem))
       }
 
-      const text = view.kind === 'ctf' ? flagHint(view.flags, local) : view.kind === 'core' ? coreHint(view.cores, local) : undefined
+      rounds.hidden = view.kind !== 'arena'
+      const roundViews = view.kind === 'arena' ? view.rounds : []
+      const current = view.kind === 'arena' ? view.current : -1
+      const roundsKey = JSON.stringify([roundViews, current])
+      if (roundsKey !== shownRounds) {
+        shownRounds = roundsKey
+        rounds.replaceChildren(...roundViews.map((round, index) => roundBox(round, index, current)))
+      }
+
+      const text = view.kind === 'ctf'
+        ? flagHint(view.flags, local)
+        : view.kind === 'core' ? coreHint(view.cores, local) : view.kind === 'arena' ? arenaHint(view) : undefined
       hint.hidden = text === undefined
       hint.textContent = text ?? ''
     },

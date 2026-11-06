@@ -13,7 +13,7 @@ import {
   shopTooltip,
   signedAmount,
 } from '../apps/client/src/ui/shop.ts'
-import { GAME_STARTING_GOLD, ITEM_SLOTS, ITEM_SELL_RATE, itemsForSlot, sellValue, type Inventory } from '../packages/shared/src/index.ts'
+import { GAME_STARTING_GOLD, ITEM_SLOTS, ITEM_SELL_RATE, itemsForSlot, sellValue, walkingSpeed, type Inventory } from '../packages/shared/src/index.ts'
 import { defineChampion, defineItem, economyClient } from './fixtures.ts'
 
 // What the shop and the item slots show, and what the page does to buy and sell. The items are the tests' own ("t-sh-"), so retuning the shop's
@@ -102,7 +102,7 @@ test('an item lists what it adds, a line for each, in the order stats are listed
   ])
   assert.deepEqual(itemStatLines(sword), [{ label: 'Attack damage', value: '+12' }, { label: 'Attack speed', value: '+0.15' }])
   assert.deepEqual(itemStatLines(bow), [{ label: 'Haste', value: '+10' }, { label: 'Attack range', value: '+100' }])
-  assert.deepEqual(itemStatLines(boots), [{ label: 'Move speed', value: '+20' }])
+  assert.deepEqual(itemStatLines(boots), [{ label: 'Move speed', value: signedAmount(Math.round(walkingSpeed(0, boots.stats.moveSpeed ?? 0))) }], 'a move speed is what it really adds, with the game\'s multiplier in it')
   assert.deepEqual(itemStatLines({ stats: {} }), [])
   assert.deepEqual(itemStatLines({ stats: { haste: 0 } }), [], 'a stat of nothing is not a line')
 })

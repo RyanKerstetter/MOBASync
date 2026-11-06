@@ -1,17 +1,27 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { CastControl, DEFAULT_CAST_MODE } from '../apps/client/src/cast-control.ts'
-import { CAST_MODE_LABELS, EFFECT_LABELS, menuFooter, menuTabs, type MenuItem, type MenuTab } from '../apps/client/src/game-menu.ts'
+import { CAST_MODE_LABELS, EFFECT_LABELS, frameRateLabel, menuFooter, menuTabs, type MenuItem, type MenuTab } from '../apps/client/src/game-menu.ts'
 import {
+  ATTACK_MARKER_SIZE_STEP,
   CLICK_RADIUS_STEP,
+  DEFAULT_ATTACK_MARKER_SIZE,
   DEFAULT_CLICK_RADIUS,
+  DEFAULT_MAX_FPS,
   DEFAULT_SETTINGS,
+  FRAME_RATE_OPTIONS,
   loadSettings,
+  MAX_ATTACK_MARKER_SIZE,
   MAX_CLICK_RADIUS,
+  MIN_ATTACK_MARKER_SIZE,
+  readAttackMarkerSize,
   readClickRadius,
+  readMaxFps,
   saveSettings,
+  UNCAPPED_FPS,
   type GameSettings,
 } from '../apps/client/src/game-settings.ts'
+import { GAME_TPS } from '../packages/shared/src/index.ts'
 import { DEFAULT_EFFECTS, EFFECT_KEYS, readEffects } from '../apps/client/src/render/effect-settings.ts'
 
 function fakeStorage(initial?: string) {
@@ -26,14 +36,38 @@ function fakeStorage(initial?: string) {
 
 // A menu made over a state the tests can see: what the game would hold, and what the menu has been asked to do to it.
 function harness(extra: { sprites?: { pickFolder: () => void; reset: () => void } } = {}) {
-  const state = { castMode: DEFAULT_CAST_MODE, clickRadius: DEFAULT_CLICK_RADIUS, effects: { ...DEFAULT_EFFECTS }, debugView: false, diagnostics: true }
+  const state = {
+    castMode: DEFAULT_CAST_MODE,
+    clickRadius: DEFAULT_CLICK_RADIUS,
+    walkKeepsAuto: false,
+    walkKeepsCast: true,
+    movementKeys: false,
+    castKeepsAttack: DEFAULT_SETTINGS.castKeepsAttack,
+    attackMarkerSize: DEFAULT_ATTACK_MARKER_SIZE,
+    effects: { ...DEFAULT_EFFECTS },
+    maxFps: DEFAULT_MAX_FPS,
+    debugView: false,
+    diagnostics: true,
+  }
   const tabs = menuTabs({
     getCastMode: () => state.castMode,
     setCastMode: (mode) => { state.castMode = mode },
     getClickRadius: () => state.clickRadius,
     setClickRadius: (radius) => { state.clickRadius = radius },
+    getWalkKeepsAuto: () => state.walkKeepsAuto,
+    setWalkKeepsAuto: (on) => { state.walkKeepsAuto = on },
+    getWalkKeepsCast: () => state.walkKeepsCast,
+    setWalkKeepsCast: (on) => { state.walkKeepsCast = on },
+    getMovementKeys: () => state.movementKeys,
+    setMovementKeys: (on) => { state.movementKeys = on },
+    getCastKeepsAttack: () => state.castKeepsAttack,
+    setCastKeepsAttack: (on) => { state.castKeepsAttack = on },
+    getAttackMarkerSize: () => state.attackMarkerSize,
+    setAttackMarkerSize: (size) => { state.attackMarkerSize = size },
     getEffect: (effect) => state.effects[effect],
     setEffect: (effect, on) => { state.effects[effect] = on },
+    getMaxFps: () => state.maxFps,
+    setMaxFps: (fps) => { state.maxFps = fps },
     getDebugView: () => state.debugView,
     setDebugView: (on) => { state.debugView = on },
     getDiagnostics: () => state.diagnostics,
@@ -70,12 +104,15 @@ test('Leave game is under the tabs, whichever is open, and runs what it was give
 
 // ---------------------------------------------------------------------------- graphics
 
-test('the Graphics tab has an Effects section with a switch for every effect there is, each named and with a line on what it shows', () => {
+// The Effects section of the Graphics tab, which is the switches: the frame rate is the section before it.
+const effectsOf = (tabs: readonly MenuTab[]): MenuTab => ({ ...tabOf(tabs, 'graphics'), sections: tabOf(tabs, 'graphics').sections.filter((section) => section.title === 'Effects') })
+
+test('the Graphics tab has a Frame rate section, an Effects section with a switch for every effect there is, each named and with a line on what it shows, and a Markers section', () => {
   const { tabs } = harness()
   const graphics = tabOf(tabs, 'graphics')
-  assert.deepEqual(graphics.sections.map((section) => section.title), ['Effects'])
-  const switches = toggles(graphics)
-  assert.equal(switches.length, itemsOf(graphics).length, 'every row is a switch')
+  assert.deepEqual(graphics.sections.map((section) => section.title), ['Frame rate', 'Effects', 'Markers'])
+  const switches = toggles(effectsOf(tabs))
+  assert.equal(switches.length, itemsOf(effectsOf(tabs)).length, 'every row of the effects is a switch')
   assert.deepEqual(switches.map((item) => item.label), EFFECT_KEYS.map((effect) => EFFECT_LABELS[effect].label), 'one for each, in the order of the effects')
   assert.equal(new Set(switches.map((item) => item.label)).size, switches.length, 'no two are called the same')
   for (const item of switches) assert.ok((item.description ?? '').length > 0, `${item.label} says what it does`)
@@ -84,7 +121,7 @@ test('the Graphics tab has an Effects section with a switch for every effect the
 
 test('a switch shows whether its effect is on, and turning it sets that effect alone', () => {
   const { state, tabs } = harness()
-  const switches = toggles(tabOf(tabs, 'graphics'))
+  const switches = toggles(effectsOf(tabs))
   EFFECT_KEYS.forEach((effect, index) => {
     const item = switches[index]
     assert.equal(item.get(), DEFAULT_EFFECTS[effect], `${effect} starts as the default`)
@@ -99,11 +136,117 @@ test('a switch shows whether its effect is on, and turning it sets that effect a
   })
 })
 
+// ---------------------------------------------------------------------------- the attack marker
+
+test('the attack marker size is a slider in the Markers section, from the marker\'s own size to the most, in percent, starting at the default', () => {
+  const { state, tabs } = harness()
+  const items = tabOf(tabs, 'graphics').sections.find((section) => section.title === 'Markers')?.items ?? []
+  assert.equal(items.length, 1, 'one row')
+  const size = items[0] as Slider
+  assert.equal(size.kind, 'slider')
+  assert.equal(size.label, 'Attack marker size')
+  assert.deepEqual([size.min, size.max, size.step, size.unit], [MIN_ATTACK_MARKER_SIZE, MAX_ATTACK_MARKER_SIZE, ATTACK_MARKER_SIZE_STEP, '%'])
+  assert.ok((size.description ?? '').length > 0 && (size.description ?? '').length < 100, 'a line on what it does')
+  assert.equal(size.get(), DEFAULT_ATTACK_MARKER_SIZE)
+  assert.equal(DEFAULT_SETTINGS.attackMarkerSize, DEFAULT_ATTACK_MARKER_SIZE)
+  assert.ok(DEFAULT_ATTACK_MARKER_SIZE >= size.min && DEFAULT_ATTACK_MARKER_SIZE <= size.max, 'the default is one the slider can show')
+  assert.equal((MAX_ATTACK_MARKER_SIZE - MIN_ATTACK_MARKER_SIZE) % ATTACK_MARKER_SIZE_STEP, 0, 'and the most is a step it can land on')
+  assert.ok(MAX_ATTACK_MARKER_SIZE > MIN_ATTACK_MARKER_SIZE, 'it can be made bigger')
+
+  size.set(MAX_ATTACK_MARKER_SIZE)
+  assert.equal(state.attackMarkerSize, MAX_ATTACK_MARKER_SIZE)
+  assert.equal(size.get(), MAX_ATTACK_MARKER_SIZE, 'and the menu shows it')
+})
+
+test('the attack marker size is kept whole and between the least and the most, and anything that is not a number is the default', () => {
+  assert.equal(readAttackMarkerSize(MIN_ATTACK_MARKER_SIZE), MIN_ATTACK_MARKER_SIZE)
+  assert.equal(readAttackMarkerSize(MAX_ATTACK_MARKER_SIZE), MAX_ATTACK_MARKER_SIZE)
+  assert.equal(readAttackMarkerSize(MIN_ATTACK_MARKER_SIZE + ATTACK_MARKER_SIZE_STEP + 0.4), MIN_ATTACK_MARKER_SIZE + ATTACK_MARKER_SIZE_STEP, 'rounded to whole percent')
+  assert.equal(readAttackMarkerSize(MIN_ATTACK_MARKER_SIZE - 1), MIN_ATTACK_MARKER_SIZE, 'not below the least')
+  assert.equal(readAttackMarkerSize(MAX_ATTACK_MARKER_SIZE + 500), MAX_ATTACK_MARKER_SIZE, 'nor above the most')
+  for (const odd of [undefined, null, '150', Number.NaN, Number.POSITIVE_INFINITY, [150], { size: 150 }]) {
+    assert.equal(readAttackMarkerSize(odd), DEFAULT_ATTACK_MARKER_SIZE, `${JSON.stringify(odd)} is not an answer`)
+  }
+  // Read alone: a damaged one costs only itself.
+  assert.deepEqual(loadSettings(fakeStorage('{"castMode":"quick","attackMarkerSize":"huge"}')), { ...DEFAULT_SETTINGS, castMode: 'quick' })
+})
+
+// ---------------------------------------------------------------------------- the frame rate
+
+const frameRateOf = (tabs: readonly MenuTab[]): Choice => {
+  const items = tabOf(tabs, 'graphics').sections.find((section) => section.title === 'Frame rate')?.items ?? []
+  assert.equal(items.length, 1, 'one row')
+  assert.equal(items[0].kind, 'choice')
+  return items[0] as Choice
+}
+
+test('the frame rate is a choice on the Graphics tab with a button for every rate there is, uncapped first, and a line on what it does', () => {
+  const { tabs } = harness()
+  const rate = frameRateOf(tabs)
+  assert.equal(rate.label, 'Frame rate limit')
+  assert.equal(rate.dropdown, true, 'a dropdown, since there are too many for a row of buttons')
+  assert.deepEqual(rate.options.map((option) => option.value), FRAME_RATE_OPTIONS.map(String), 'one button for each rate in the list, in its order')
+  assert.equal(rate.options[0].value, String(UNCAPPED_FPS), 'uncapped is first')
+  assert.equal(rate.options[0].label, 'Uncapped')
+  assert.equal(new Set(rate.options.map((option) => option.label)).size, rate.options.length, 'no two are called the same')
+  assert.ok((rate.description ?? '').length > 0 && (rate.description ?? '').length < 160, 'a line on what it does')
+})
+
+test('the list of frame rates has the usual ones, each a whole number above none, from the highest down, once each', () => {
+  for (const wanted of [30, 60, 90, 120, 144, 180]) assert.ok(FRAME_RATE_OPTIONS.includes(wanted), `${wanted} is offered`)
+  const capped = FRAME_RATE_OPTIONS.filter((fps) => fps !== UNCAPPED_FPS)
+  assert.ok(capped.every((fps) => Number.isInteger(fps) && fps > 0), 'every other is a whole number of frames')
+  assert.deepEqual([...capped].sort((left, right) => right - left), capped, 'highest first')
+  assert.equal(new Set(FRAME_RATE_OPTIONS).size, FRAME_RATE_OPTIONS.length, 'none twice')
+  assert.equal(FRAME_RATE_OPTIONS.filter((fps) => fps === UNCAPPED_FPS).length, 1, 'and one way to have no limit')
+  assert.deepEqual(capped.map(frameRateLabel), capped.map((fps) => `${fps} fps`))
+  assert.equal(frameRateLabel(UNCAPPED_FPS), 'Uncapped')
+})
+
+test('the frame rate starts uncapped, and choosing one sets it, and the menu shows it', () => {
+  assert.equal(DEFAULT_MAX_FPS, UNCAPPED_FPS, 'uncapped until a player chooses')
+  assert.equal(DEFAULT_SETTINGS.maxFps, UNCAPPED_FPS)
+  const { state, tabs } = harness()
+  const rate = frameRateOf(tabs)
+  assert.equal(rate.get(), String(UNCAPPED_FPS), 'the menu starts on uncapped')
+  for (const fps of FRAME_RATE_OPTIONS) {
+    rate.set(String(fps))
+    assert.equal(state.maxFps, fps, `${fps} was set, as a number and not as the text of one`)
+    assert.equal(rate.get(), String(fps), 'and the menu shows it')
+    assert.ok(rate.options.some((option) => option.value === rate.get()), 'as one of the buttons')
+  }
+})
+
+test('setting the frame rate changes nothing else in the menu', () => {
+  const { state, tabs } = harness()
+  const before = JSON.stringify({ ...state, maxFps: 0 })
+  frameRateOf(tabs).set('144')
+  assert.equal(JSON.stringify({ ...state, maxFps: 0 }), before)
+  assert.equal(state.maxFps, 144)
+})
+
+test('the frame rate is only about drawing: rates above the game\'s tick rate are offered, since the world is drawn between ticks', () => {
+  // The list is of frames a second drawn; the game ticks `GAME_TPS` a second whatever is chosen, and a rate over that only draws more often between ticks.
+  assert.ok(FRAME_RATE_OPTIONS.some((fps) => fps > GAME_TPS), 'a rate above the tick rate is offered')
+  assert.ok(FRAME_RATE_OPTIONS.includes(GAME_TPS), 'and so is one the same as it')
+  assert.ok(FRAME_RATE_OPTIONS.some((fps) => fps !== UNCAPPED_FPS && fps < GAME_TPS), 'and one below it')
+})
+
 // ---------------------------------------------------------------------------- controls
 
-test('the Controls tab has the casting and the targeting, in sections of their own', () => {
+test('the Controls tab has the casting, the moving and the targeting, in sections of their own', () => {
   const { tabs } = harness()
-  assert.deepEqual(tabOf(tabs, 'controls').sections.map((section) => section.title), ['Casting', 'Targeting'])
+  const controls = tabOf(tabs, 'controls')
+  assert.deepEqual(controls.sections.map((section) => section.title), ['Casting', 'Moving', 'Targeting'])
+  const sectionOf = (title: string): MenuTab => ({ ...controls, sections: controls.sections.filter((section) => section.title === title) })
+  assert.deepEqual(toggles(sectionOf('Casting')).map((toggle) => toggle.label), ['Keep attacking after casting'])
+  assert.deepEqual(toggles(sectionOf('Moving')).map((toggle) => toggle.label), ['WASD movement', 'Moving doesn\'t cancel attacks', 'Moving doesn\'t cancel abilities'])
+  assert.equal(DEFAULT_SETTINGS.movementKeys, false, 'WASD movement is off until it is turned on')
+  assert.equal(DEFAULT_SETTINGS.castKeepsAttack, true, 'and a cast keeps an attack from the start')
+  const switches = toggles(controls)
+  const before = switches.map((toggle) => toggle.get())
+  for (const toggle of switches) toggle.set(!toggle.get())
+  assert.deepEqual(switches.map((toggle) => toggle.get()), before.map((on) => !on), 'each switch changes what the game holds')
 })
 
 test('the cast mode is on the Controls tab as a choice of every mode, with the current one selected', () => {
@@ -191,7 +334,13 @@ test('settings are kept, and a missing, damaged or odd stored value is the defau
     castMode: 'quick',
     effects: { turretRanges: false, selfAttackRange: true, shopGlow: false },
     clickRadius: DEFAULT_CLICK_RADIUS + CLICK_RADIUS_STEP,
+    walkKeepsAuto: !DEFAULT_SETTINGS.walkKeepsAuto,
+    walkKeepsCast: !DEFAULT_SETTINGS.walkKeepsCast,
+    movementKeys: !DEFAULT_SETTINGS.movementKeys,
+    castKeepsAttack: !DEFAULT_SETTINGS.castKeepsAttack,
+    attackMarkerSize: DEFAULT_ATTACK_MARKER_SIZE + ATTACK_MARKER_SIZE_STEP,
     diagnostics: false,
+    maxFps: 144,
   }
   saveSettings(chosen, storage)
   assert.deepEqual(loadSettings(storage), chosen, 'what was saved comes back')
@@ -250,6 +399,21 @@ test('the click radius is kept whole and between none and the most, and anything
   const older = loadSettings(fakeStorage('{"castMode":"quick","clickRadius":"wide"}'))
   assert.deepEqual(older, { ...DEFAULT_SETTINGS, castMode: 'quick' })
   assert.equal(loadSettings(fakeStorage('{"clickRadius":0}')).clickRadius, 0, 'and none, which is falsy, is kept')
+})
+
+test('the frame rate is kept as one of the rates the menu has, and anything else is uncapped', () => {
+  for (const fps of FRAME_RATE_OPTIONS) assert.equal(readMaxFps(fps), fps, `${fps} is kept`)
+  assert.equal(readMaxFps(UNCAPPED_FPS), UNCAPPED_FPS, 'none is a choice, and is falsy')
+  // A number the menu does not have is not an answer, nor is anything that is not a number.
+  for (const odd of [undefined, null, '60', '144', Number.NaN, Number.POSITIVE_INFINITY, -60, 100, 59.9, 1000, [60], { fps: 60 }, true]) {
+    assert.equal(readMaxFps(odd), DEFAULT_MAX_FPS, `${JSON.stringify(odd)} is not an answer`)
+  }
+  // Read alone: a damaged one costs only itself, and a file from before there was a frame rate has none, so it is uncapped.
+  assert.deepEqual(loadSettings(fakeStorage('{"castMode":"quick","maxFps":"fast"}')), { ...DEFAULT_SETTINGS, castMode: 'quick' })
+  assert.deepEqual(loadSettings(fakeStorage('{"castMode":"quick"}')), { ...DEFAULT_SETTINGS, castMode: 'quick' })
+  assert.equal(loadSettings(fakeStorage('{"maxFps":30}')).maxFps, 30)
+  assert.equal(loadSettings(fakeStorage('{"maxFps":100}')).maxFps, UNCAPPED_FPS, 'a rate that is not on the list is uncapped')
+  assert.equal(loadSettings(fakeStorage('{"maxFps":0}')).maxFps, UNCAPPED_FPS)
 })
 
 test('storage that refuses to save does not stop the game', () => {

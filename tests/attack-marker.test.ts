@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ATTACK_MARKER_STYLE, chooseAttackMarkers, layoutAttackMarker } from '../apps/client/src/render/attack-marker.ts'
+import { MAX_ATTACK_MARKER_SIZE, MIN_ATTACK_MARKER_SIZE } from '../apps/client/src/game-settings.ts'
+import { ATTACK_MARKER_STYLE, attackMarkerLook, chooseAttackMarkers, layoutAttackMarker, type AttackMarkerShape } from '../apps/client/src/render/attack-marker.ts'
 
 test('an enemy under the mouse is marked as one a click would attack', () => {
   assert.deepEqual(
@@ -52,4 +53,24 @@ test('the marker keeps its distance from the body whatever the body\'s size', ()
 test('a lock reads as stronger than a hover: thicker, and a different colour', () => {
   assert.ok(ATTACK_MARKER_STYLE.locked.width > ATTACK_MARKER_STYLE.hover.width)
   assert.notEqual(ATTACK_MARKER_STYLE.locked.color, ATTACK_MARKER_STYLE.hover.color)
+})
+
+test('the lock can be drawn bigger: its gap, its ticks and its line all grow by the scale, and the hover stays its own size', () => {
+  const radius = 18
+  // The biggest the graphics menu allows, which is in percent of the marker's own size.
+  const scale = MAX_ATTACK_MARKER_SIZE / MIN_ATTACK_MARKER_SIZE
+  assert.ok(scale > 1)
+  const gap = (shape: AttackMarkerShape): number => Math.hypot(shape.ticks[0].to.x, shape.ticks[0].to.y) - radius
+  const length = (shape: AttackMarkerShape): number => Math.hypot(shape.ticks[0].from.x, shape.ticks[0].from.y) - Math.hypot(shape.ticks[0].to.x, shape.ticks[0].to.y)
+  const near = (actual: number, expected: number, what: string): void => assert.ok(Math.abs(actual - expected) < 1e-9, `${what}: ${actual} against ${expected}`)
+
+  const plain = attackMarkerLook('locked', radius)
+  assert.deepEqual(plain, { shape: layoutAttackMarker(radius), stroke: ATTACK_MARKER_STYLE.locked }, 'at its own size it is as it always was')
+  const big = attackMarkerLook('locked', radius, scale)
+  assert.equal(big.shape.ticks.length, plain.shape.ticks.length)
+  near(gap(big.shape), gap(plain.shape) * scale, 'the gap to the body')
+  near(length(big.shape), length(plain.shape) * scale, 'the ticks')
+  near(big.stroke.width, ATTACK_MARKER_STYLE.locked.width * scale, 'the line')
+  assert.equal(big.stroke.color, ATTACK_MARKER_STYLE.locked.color, 'in the same colour')
+  assert.deepEqual(attackMarkerLook('hover', radius, scale), { shape: layoutAttackMarker(radius), stroke: ATTACK_MARKER_STYLE.hover }, 'and the hover is left as it is')
 })

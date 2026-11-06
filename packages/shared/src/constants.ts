@@ -35,6 +35,8 @@ export const GAME_MONSTER_TEAM = GAME_MAX_PLAYERS + 1
 export const GAME_HILL_CAPTURE_TICKS = 10 * 60
 // A team that holds the hill with its bar full scores a point this often.
 export const GAME_HILL_POINT_TICKS = 60
+// Arena: how long a round that has been won waits before the next one begins, so the win can be seen. Then everyone is put back at their spawn.
+export const GAME_ARENA_ROUND_PAUSE_TICKS = 4 * 60
 // Capture the flag: a flag is touched by a champion whose body is within this distance of it, beyond
 // the champion's own radius. It is how close a champion must walk to pick up a flag, return one, or
 // turn one in at its base.
@@ -44,19 +46,29 @@ export const GAME_FLAG_RADIUS = 40
 // share every tick (0.75 leaves a quarter of it after one tick and a sixteenth after two). Lower is
 // softer and lets a walking character sink in further before it is stopped; 1 is a hard wall.
 export const GAME_COLLISION_STIFFNESS = 0.75
+// A structure cannot be shoved, so a body is pushed out of it by the push alone. When a wall or the edge of the arena holds the body in, that push goes nowhere, and a body that
+// is deeper in than this share of its own radius is put on the nearest place it can stand instead. Ordinary walking into a structure settles about a third of a step in, so this
+// is far deeper than that.
+export const GAME_STRUCTURE_EJECT_DEPTH = 0.5
 // How big one pixel of art is drawn, in world units: champions' sprites and, unless the map says
 // otherwise, the tiles of the map.
 export const GAME_ART_SCALE = 3
 export const GAME_TPS = 60
+// How much faster (or slower) than they are written everything walks: every champion's and every monster's move speed, and what an item adds to it, is multiplied by this, in
+// the one place a walking speed is worked out (`walkingSpeed`, in stats.ts). 1 leaves the game as it is written; 1.25 is a quarter faster. It is for tuning the feel of the
+// game without touching a champion, a monster or an item. Dashes, blinks, knockbacks and shots are not walking and have speeds of their own, so they do not change with it.
+export const GAME_MOVE_SPEED_MULTIPLIER = 1.12
 // A burning character takes its burn's damage on every tick that is a multiple of this, so twice a
 // second. Whole numbers of health only, so a burn lands in chunks rather than a fraction per tick.
 export const GAME_BURN_PULSE_TICKS = GAME_TPS / 2
-export const GAME_FPS = 60
 export const GAME_ORDER_WINDOW_TICKS = 12
 export const GAME_SNAPSHOT_HISTORY_TICKS = GAME_ORDER_WINDOW_TICKS + 2
 export const FINALIZE_LAG = GAME_ORDER_WINDOW_TICKS
 // How long a champion stays dead: it comes back this many ticks after the tick it died on.
 export const GAME_RESPAWN_TICKS = 3 * GAME_TPS
+// How much longer a champion stays dead for each level it has above the first (see `respawnTicksAt`): a level 1 champion is dead for the respawn time of the
+// game, a level 2 one this much longer, and so on.
+export const GAME_RESPAWN_TICKS_PER_LEVEL = 2 * GAME_TPS
 export const GAME_REMOTE_CATCHUP_MAX_SPEED_MULTIPLIER = 3
 export const GAME_REMOTE_CATCHUP_EASE_TICKS = 5
 // Remote champions are drawn this many ticks behind the round-trip delay, so orders

@@ -56,6 +56,7 @@ test('every mode names its score, and has a label, a default and a most for the 
     ['koth', 'points', 'Points to win'],
     ['ctf', 'captures', 'Captures to win'],
     ['core', 'cores', 'No limit'],
+    ['arena', 'rounds', 'Rounds to win'],
   ])
   // Core destruction ends when a team is out, so it has no limit to set (a most of 0); each of the others has one.
   for (const mode of GAME_MODES.filter((each) => each.id !== 'core')) assert.ok(mode.defaultLimit > 0 && mode.defaultLimit <= mode.maxLimit, mode.id)
@@ -134,7 +135,9 @@ test('losing items on death is off by default, and is a rule that is on or off',
 })
 
 test('a game of core destruction is given the rule when it is on, and no other game is, nor one with it off', () => {
-  const on = applyRulesChange(defaultRules(), { loseItemsOnDeath: true })
+  // With gold on, so the only rule a game is told of here is the one this is about: a new lobby is told it has no gold (see no-gold.test.ts).
+  const withGold = applyRulesChange(defaultRules(), { gold: true })
+  const on = applyRulesChange(withGold, { loseItemsOnDeath: true })
   assert.equal(modeRules(on, 'core').loseItemsOnDeath, true)
   for (const mode of ['deathmatch', 'koth', 'ctf'] as const) assert.equal('loseItemsOnDeath' in modeRules(on, mode), false, `not for ${mode}`)
   assert.equal('loseItemsOnDeath' in modeRules(defaultRules(), 'core'), false, 'off is not there, so what a game is by default is as it was')
@@ -144,7 +147,7 @@ test('a game of core destruction is given the rule when it is on, and no other g
     loseItemsOnDeath: true,
     respawnTicks: RESPAWN_SECONDS.default * GAME_TPS,
   })
-  assert.deepEqual(createModeSetup('core', [1, 2], CORES, modeRules(defaultRules(), 'core')), {
+  assert.deepEqual(createModeSetup('core', [1, 2], CORES, modeRules(withGold, 'core')), {
     kind: 'core',
     teams: [1, 2],
     respawnTicks: RESPAWN_SECONDS.default * GAME_TPS,
