@@ -245,12 +245,14 @@ test('a stat declared on the champion itself, and not in its base or growth, is 
   }
 })
 
-test('every champion in the game declares its own base and growth, and it grows in each stat, from no resistance, haste or arcane', () => {
+test('every champion in the game declares its own base and growth, and it grows in each stat, from no resistance or haste', () => {
   const roster = [...champions.values()].filter((each) => !each.id.startsWith('t-'))
   assert.ok(roster.length >= 8)
   for (const each of roster) {
     assert.ok(each.base instanceof StatBlock && each.growth instanceof StatBlock, `${each.name} has a base and a growth`)
-    assert.deepEqual([each.resistance, each.haste, each.arcane], [0, 0, 0], `${each.name} starts plain`)
+    assert.deepEqual([each.resistance, each.haste], [0, 0], `${each.name} starts plain`)
+    // Arcane is each champion's own to start with (a mage has some at level 1), and never less than none.
+    assert.ok(each.arcane >= 0, `${each.name} starts with no less than no arcane`)
     const first = each.statsAt(1)
     const last = each.statsAt(18)
     for (const key of ['maxHp', 'attackDamage', 'attackSpeed', 'resistance', 'haste', 'arcane'] as const) {
@@ -606,7 +608,7 @@ test('the page lists the stats of the champion\'s level, and the cooldowns it sh
 
 // ---------------------------------------------------------------------------- the abilities in the game
 
-test('the abilities in the game scale with what they say: Spout with arcane, Kunai with attack damage, Tsunami with health and arcane', () => {
+test('the abilities in the game scale with what they say: Spout with arcane, Kunai with attack damage, Tsunami with arcane', () => {
   // The caster of a real ability, with the stats named and an enemy 100 away with plenty of health, that the ability is cast at. Returns what it took.
   const hit = (abilityId: string, stats: Partial<StatValues>, target: object): number => {
     const caster = defineChampion({
@@ -648,5 +650,5 @@ test('the abilities in the game scale with what they say: Spout with arcane, Kun
   // Each says which stats it grows with, and the test above holds it to that; these are the ones the abilities are made to scale with.
   assert.ok((SPOUT_SCALING.arcane ?? 0) > 0, 'Spout grows with arcane')
   assert.ok((SHURIKEN_SCALING.attackDamage ?? 0) > 0, 'Kunai grows with attack damage')
-  assert.ok((TSUNAMI_SCALING.maxHealth ?? 0) > 0 && (TSUNAMI_SCALING.arcane ?? 0) > 0, 'Tsunami grows with health and arcane')
+  assert.ok((TSUNAMI_SCALING.arcane ?? 0) > 0, 'Tsunami grows with arcane')
 })

@@ -588,12 +588,12 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     id: 'soldier',
     name: 'Soldier',
     description: 'Shoots from range. Trades health for speed and brings a medic.',
-    base: { maxHp: 750, attackDamage: 55, attackSpeed: 1, resistance: 0, haste: 0, arcane: 10 },
-    growth: { maxHp: 60, attackDamage: 12, attackSpeed: 0.04, resistance: 5, haste: 4, arcane: 4 },
+    base: { maxHp: 750, attackDamage: 60, attackSpeed: 1, resistance: 0, haste: 0, arcane: 10 },
+    growth: { maxHp: 60, attackDamage: 12, attackSpeed: 0.04, resistance: 6, haste: 4, arcane: 4 },
     moveSpeed: 150,
     radius: 21,
     attackRange: 220,
-    attackWindup: 0.2,
+    attackWindup: 0.18,
     attackProjectile: { speed: 800, radius: 5, color: '#ffb347' },
     abilities: ['stim', 'bolt', 'medic'],
   }),
@@ -662,7 +662,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A hulking bruiser that toughens with every blow, leaps onto its prey and flies into a rage.',
     passive: `Auto attacks give a stack of resistance, up to ${PLATING_MAX_STACKS}. Stacks last ${PLATING_TICKS / GAME_TPS} seconds and every auto renews them.`,
     base: { maxHp: 1100, attackDamage: 70, attackSpeed: .9, resistance: 0, haste: 0, arcane: 10 },
-    growth: { maxHp: 90, attackDamage: 10, attackSpeed: 0.02, resistance: 8, haste: 4, arcane: 3 },
+    growth: { maxHp: 80, attackDamage: 9, attackSpeed: 0.02, resistance: 7, haste: 5, arcane: 3 },
     moveSpeed: 145,
     radius: 24,
     attackRange: 100,
@@ -778,7 +778,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     radius: 22,
     attackRange: 100,
     attackWindup: 0.22,
-    // Q strikes a nearby enemy and resets his auto, W cleanses and heals back what he just lost, E dashes onto an enemy.
+    // Q strikes a nearby enemy and makes it bleed, W cleanses and heals back what he just lost, E dashes onto an enemy.
     abilities: ['rend', 'transfusion', 'bloodrush'],
     onAttackHit: [damage(lowHealthAutoDamage)],
     // Transfusion heals a share of what he lost lately, so he remembers it for as long as it looks back.

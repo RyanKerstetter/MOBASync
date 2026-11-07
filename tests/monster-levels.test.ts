@@ -75,7 +75,8 @@ test('what a monster in the game pays more for each level is its own, with a def
   assert.equal(getMonster('wolf').xpGrowth, DEFAULT_MONSTER_XP_GROWTH, 'the wolf says none, so it has the default')
   for (const id of ['slime', 'golem', 'wolf']) {
     const { champion } = getMonster(id)
-    assert.ok(champion.growth.maxHp > 0 && champion.growth.attackDamage > 0, `${id} grows in health and damage`)
+    // Its damage may stay where it is (a slime's bump is the same at every level), but it never falls.
+    assert.ok(champion.growth.maxHp > 0 && champion.growth.attackDamage >= 0, `${id} grows in health, and does not lose damage`)
     assert.ok(champion.statsAt(3).maxHp > champion.statsAt(2).maxHp && champion.statsAt(2).maxHp > champion.statsAt(1).maxHp, `${id} is stronger a level at a time`)
   }
   assert.throws(() => defineMonster({ ...wolfDef('t-ml-bad-1'), xpGrowth: -1 }), /experience growth that is a whole number/)

@@ -13,7 +13,7 @@ import {
   WALL_SIDE_TILES,
   type TileGrid,
 } from '../apps/client/src/render/depth.ts'
-import { flattenLayers, parseTiledMap, readMapLayout, tileLayerCells, type Rect, type TileLayer } from '../packages/shared/src/index.ts'
+import { flattenLayers, GAME_ART_SCALE, mapWorldScale, parseTiledMap, readMapLayout, tileLayerCells, type Rect, type TileLayer } from '../packages/shared/src/index.ts'
 
 const layer = (name: string, value?: unknown): Pick<TileLayer, 'name' | 'properties'> => ({
   name,
@@ -32,12 +32,25 @@ test('a layer says it for itself with the y-sort property, which beats its name,
   assert.equal(isDepthSorted(layer('Floor Layer', 1)), false)
 })
 
+// A map can have more than one layer of wall art (the competitive map draws a path over one of its walls on a layer of its own): any sorted layer
+// besides the walls' own has to be art on the walls, every tile of it a wall's (`groupByDepth`, as the map is drawn), and not ground.
 test('the maps of the game have their walls sorted and nothing else', () => {
   for (const id of ['competetive', 'ffa_arena', 'map_small_tdm_koth']) {
     const map = parseTiledMap(JSON.parse(readFileSync(new URL(`../res/maps/${id}.tmj`, import.meta.url), 'utf-8')))
-    const tileLayers = flattenLayers(map.layers).map(({ layer: placed }) => placed).filter((placed): placed is TileLayer => placed.type === 'tilelayer')
-    assert.deepEqual(tileLayers.filter(isDepthSorted).map((sorted) => sorted.name), ['Wall Layer'], id)
-    assert.ok(tileLayers.some((ground) => ground.name === 'Floor Layer' && !isDepthSorted(ground)), `${id}'s floor is under everything`)
+    const { arenaRect, terrain } = readMapLayout(map)
+    const tileLayers = flattenLayers(map.layers).filter((placed): placed is typeof placed & { layer: TileLayer } => placed.layer.type === 'tilelayer')
+    const sorted = tileLayers.filter(({ layer }) => isDepthSorted(layer))
+    assert.ok(sorted.some(({ layer }) => layer.name === 'Wall Layer'), `${id}'s walls are sorted`)
+    for (const { layer, offsetx, offsety } of sorted) {
+      if (layer.name === 'Wall Layer') continue
+      const grid: TileGrid = {
+        tileWidth: map.tilewidth, tileHeight: map.tileheight, offsetX: offsetx, offsetY: offsety, arenaX: arenaRect.x, arenaY: arenaRect.y, scale: mapWorldScale(map, GAME_ART_SCALE),
+      }
+      const { cells } = tileLayerCells(layer, map)
+      const groups = groupByDepth(cells, grid, terrain.walls, { attachTiles: attachTiles(layer) })
+      assert.ok(cells.length > 0 && groups.every((group) => group.wall !== undefined), `${id}'s "${layer.name}" is art on its walls`)
+    }
+    assert.ok(tileLayers.some(({ layer }) => layer.name === 'Floor Layer' && !isDepthSorted(layer)), `${id}'s floor is under everything`)
   }
 })
 

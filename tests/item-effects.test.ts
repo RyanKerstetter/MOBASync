@@ -467,8 +467,8 @@ const SHIPPED: Readonly<Record<string, ItemEffectKind[]>> = {
   'life-staff': ['lifesteal'],
   'dark-staff': ['attackArcane'],
   'cursed-scythe': ['lifesteal'],
-  'cursed-tome': ['lifesteal'],
-  'holy-tome': ['abilityDamage'],
+  'cursed-tome': ['abilityDamage'],
+  'holy-tome': ['lifesteal'],
   'infused-dagger': ['attackSpeed', 'currentHealthDamage'],
   'poisoned-crossbow': ['poison'],
   'machine-gun': ['attackSpeed'],
@@ -487,7 +487,7 @@ test('each weapon has the effects it was given a note for, and a description tha
   }
   const lifesteal = (id: string): unknown => getItem(id)?.effects.find((effect) => effect.kind === 'lifesteal')
   for (const id of ['jambiya', 'scythe', 'cursed-scythe']) assert.equal((lifesteal(id) as { on: string }).on, 'attacks', id)
-  for (const id of ['life-staff', 'cursed-tome']) assert.equal((lifesteal(id) as { on: string }).on, 'abilities', id)
+  for (const id of ['life-staff', 'holy-tome']) assert.equal((lifesteal(id) as { on: string }).on, 'abilities', id)
 })
 
 test('only the weapons have effects, and every effect says its number in its description', () => {

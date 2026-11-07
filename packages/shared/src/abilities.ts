@@ -1873,8 +1873,8 @@ const targetBleeding = (sim: SimReader, src: EffectSource): boolean =>
 // Aurel's passive (in champions.ts): his autos do up to `LOW_HEALTH_BONUS` more the less health he has (all of it at none, half of it at half his health).
 export const LOW_HEALTH_BONUS = 0.4
 
-// Aurel's Rend: a strike at an enemy close by (`REND_RANGE`), which hurts it, makes it bleed, heals him a set amount, gives him move speed for a moment and resets his auto. It has no
-// windup, so it goes between autos, and the next auto is ready at once. Against an enemy that was bleeding already it heals him a share of the health he is missing as well, and the
+// Aurel's Rend: a strike at an enemy close by (`REND_RANGE`), which hurts it, makes it bleed, heals him a set amount and gives him move speed for a moment. It does not reset his
+// auto: the next one comes when it would have anyway. Against an enemy that was bleeding already it heals him a share of the health he is missing as well, and the
 // speed is more (`REND_BLEEDING_HASTE` for `REND_HASTE`). Aimed at one farther off, he walks up to it and strikes once it is in reach, as for any ability aimed at an enemy.
 export const REND_RANGE = 160
 export const REND_DAMAGE = 50

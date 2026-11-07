@@ -214,14 +214,14 @@ const autosOn = (game: Game, id: number, to: number) => hitsOn(game, id, to).fil
 const rendsOn = (game: Game, id: number, to: number) => hitsOn(game, id, to).filter(({ event }) => !isAuto(event))
 const hasteOf = (frame: GameTickSnapshot) => statusesOf(frame, 1, 'haste').find((status) => status.ownerId === 1)
 
-test('Rend strikes a nearby enemy, makes it bleed, heals Aurel, speeds him up and resets his auto; against a bleeding one it heals and speeds him up more', () => {
+test('Rend strikes a nearby enemy, makes it bleed, heals Aurel and speeds him up, and does not reset his auto; against a bleeding one it heals and speeds him up more', () => {
   const rend = abilityDefs.get('rend')
   assert.ok(rend)
   assert.equal(rend.targeting, 'unit', 'it is aimed at an enemy')
   assert.ok(TOUCHING <= REND_RANGE, 'which can stand close enough')
   assert.ok(REND_BLEEDING_HASTE > REND_HASTE)
-  // The auto that comes after Rend comes early only for the reset: without it, the next would come a whole attack after the last, which is longer than Rend and a windup take.
-  assert.ok(aurel.attackCooldownTicks > aurel.attackWindupTicks + rend.windUpTicks + 2, 'the reset is what makes the next auto come early')
+  // A whole attack is longer than Rend and a windup take, so a reset would bring the next auto early: that it does not come early is that there is none.
+  assert.ok(aurel.attackCooldownTicks > aurel.attackWindupTicks + rend.windUpTicks + 2, 'a reset would show')
 
   // Hurt first, so there is health to heal; then autos, and Rend the tick after one lands, between it and the next. He goes on attacking through Rend's windup, as the player's
   // controls can have it (`keepAttacking`).
@@ -247,14 +247,14 @@ test('Rend strikes a nearby enemy, makes it bleed, heals Aurel, speeds him up an
   assert.equal(bleeding.endTick - bleeding.startTick, BLEED_TICKS)
   assert.equal(bleeding.amount, Math.round((BLEED_DPS + (BLEED_SCALING.attackDamage ?? 0) * stats.attackDamage) * GAME_BURN_PULSE_TICKS / GAME_TPS))
 
-  // The auto is reset: the next one comes as soon as it can wind up after Rend, and not a whole attack after the last.
-  const next = game.firstTick(struck + 1, struck + aurel.attackCooldownTicks, (each) => autosOn(game, 2, each.tick).length > 1)
-  assert.ok(next, 'the next auto lands')
-  assert.ok(next - auto < aurel.attackCooldownTicks, `${next - auto} ticks after the last, short of ${aurel.attackCooldownTicks}`)
-
   // It bleeds a pulse at a time, as damage from Aurel.
   const pulses = game.events('damage', struck + GAME_BURN_PULSE_TICKS, (event) => event.ownerId === 1 && event.targetId === 2 && event.overTime === true)
   assert.ok(pulses.length > 0 && pulses.every(({ event }) => event.amount === bleeding.amount), 'it bleeds')
+
+  // The auto is not reset: the next one comes a whole attack after the last, as it would have without Rend, and not as soon as it could wind up after it.
+  const next = autosOn(game, 2, struck + aurel.attackCooldownTicks)[1]?.tick
+  assert.ok(next, 'the next auto lands')
+  assert.ok(next - auto >= aurel.attackCooldownTicks, `${next - auto} ticks after the last, no sooner than ${aurel.attackCooldownTicks}`)
 
   // The next Rend, as soon as it is back (the tick after an auto lands, so not in the middle of one), at an enemy bleeding (from his teammate, whatever is left of his own bleed).
   const ready = struck + rend.cooldownTicks

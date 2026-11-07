@@ -2023,7 +2023,7 @@ they overlap, and the ground puts no stacks on. It is tested in `tests/firemage.
 **Aurel** is a melee bloodletter who hits harder as he weakens, makes his prey bleed and runs it down. P: his autos do up to `LOW_HEALTH_BONUS` more the less health he has (all of it at none, half
 of it at half his health, none at full). Q, **Rend**, is a strike at an enemy close by (`REND_RANGE`; aimed at one farther off, he walks up to it first). It hurts it (`REND_DAMAGE`), makes it **bleed**
 (`bleed`: damage over time, one status of his that a Rend renews, for `BLEED_TICKS`), heals him a set amount (`REND_HEAL`, which grows with his level), gives him move
-speed for a moment (`REND_HASTE`, for `REND_HASTE_TICKS`) and **resets his auto**, so the next one is ready as soon as Rend has gone off. Against an enemy that **was bleeding
+speed for a moment (`REND_HASTE`, for `REND_HASTE_TICKS`). It does **not reset his auto**: the next one comes when it would have anyway. Against an enemy that **was bleeding
 already** it heals him a share of the health he is missing as well (`REND_MISSING_HEAL`), and the move speed is more (`REND_BLEEDING_HASTE`). W, **Transfusion**, takes every crowd control off him (`cleanse`) and heals him a
 share (`TRANSFUSION_SHARE`) of the **health he lost in the last `TRANSFUSION_WINDOW_TICKS`**. It is **cast through crowd control** (`unstoppable`): a stun, a knock-up, a fear or a silence does not stop it.
 While it is ready the page shows on his health bar what it would heal, as a paler stretch after his health (`healthBarPreview`). E, **Bloodrush**, dashes onto an enemy, landing beside it (`besideTarget`),
