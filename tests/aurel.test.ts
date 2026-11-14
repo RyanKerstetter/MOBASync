@@ -29,7 +29,9 @@ import {
   BLEED_SCALING,
   BLEED_TICKS,
   BLOODRUSH_BLEEDING_RANGE,
+  BLOODRUSH_DAMAGE,
   BLOODRUSH_RANGE,
+  BLOODRUSH_SCALING,
   BLOODRUSH_SLOW,
   LOW_HEALTH_BONUS,
   REND_BLEEDING_HASTE,
@@ -272,6 +274,31 @@ test('Rend strikes a nearby enemy, makes it bleed, heals Aurel and speeds him up
   assert.equal(hasteOf(game.at(struckAgain))?.amount, REND_BLEEDING_HASTE, 'and speeds him up more')
 })
 
+test('Aurel\'s autos set the bleed Rend left on their target back to its full length, as it was, and do not start one', () => {
+  const game = new Game([{ at: ahead(TOUCHING) }])
+  game.order(1, attack(1, 2))
+  const first = game.firstTick(1, 1 + aurel.attackCooldownTicks * 2, (frame) => autosOn(game, 2, frame.tick).length > 0)
+  assert.ok(first, 'an auto lands')
+  assert.equal(statusesOf(game.at(first), 2, 'bleed').length, 0, 'and does not make an enemy bleed that was not')
+
+  // Rend between that auto and the next, and he goes on attacking.
+  game.order(1, { ...cast(first + 1, 'rend', at(2)), keepAttacking: true } as CharacterOrder)
+  const struck = goesOff('rend', first + 1)
+  const planted = statusesOf(game.at(struck), 2, 'bleed')[0]
+  assert.ok(planted, 'Rend makes it bleed')
+  const landed = (after: number): number | undefined =>
+    game.firstTick(after + 1, after + aurel.attackCooldownTicks * 2, (frame) => autosOn(game, 2, frame.tick).some(({ tick }) => tick === frame.tick))
+  for (let auto = landed(struck), count = 0; count < 2; auto = landed(auto ?? Infinity), count += 1) {
+    assert.ok(auto, `auto ${count + 1} after Rend lands`)
+    assert.ok(auto > planted.startTick, 'while it bleeds, part of the way through')
+    const renewed = statusesOf(game.at(auto), 2, 'bleed')[0]
+    assert.ok(renewed, 'it still bleeds')
+    assert.equal(renewed.endTick, auto + BLEED_TICKS, `auto ${count + 1}: the whole of a bleed from then, and no more`)
+    assert.equal(renewed.amount, planted.amount, 'for the damage it had')
+    assert.equal(renewed.id, planted.id, 'and it is the same bleed')
+  }
+})
+
 test('Rend is for an enemy close by: aimed at one farther off, Aurel walks up to it and strikes once it is in reach', () => {
   const game = new Game([{ at: ahead(REND_RANGE * 2) }])
   game.order(1, cast(1, 'rend', at(2)))
@@ -416,6 +443,19 @@ test('Bloodrush reaches farther to a bleeding enemy, lands beside it and slows i
   assert.ok(landed)
   assert.ok(close(distance(where(game.at(landed), 1), where(game.at(landed), 2)), aurel.radius + R, 2), 'beside it')
   assert.ok(statusesOf(game.at(landed), 2, 'slow').some((each) => each.ownerId === 1 && each.amount === BLOODRUSH_SLOW), 'and it is slowed')
+})
+
+test('Bloodrush hurts the enemy it dashes to, and no one it passes on the way', () => {
+  // A second enemy stands on the line to the first, so he dashes through it.
+  const target = ahead(BLOODRUSH_RANGE - 20)
+  const game = new Game([{ at: target }, { at: ahead((BLOODRUSH_RANGE - 20) / 2) }])
+  game.order(1, cast(1, 'bloodrush', at(2)))
+  const landed = game.firstTick(2, 2 * GAME_TPS, (frame) => frame.get(1)?.isDashing() === false)
+  assert.ok(landed, 'he dashes and lands')
+  const hits = hitsOn(game, 2, landed)
+  assert.equal(hits.length, 1, 'one hit on the enemy he dashed to')
+  assert.ok(close(hits[0].event.amount, BLOODRUSH_DAMAGE + (BLOODRUSH_SCALING.attackDamage ?? 0) * stats.attackDamage), `${hits[0].event.amount}`)
+  assert.equal(hitsOn(game, 3, landed).length, 0, 'and none on the one he went through')
 })
 
 test('the page draws Bloodrush as reaching farther to a bleeding enemy, and tells that it bleeds', () => {

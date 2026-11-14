@@ -226,6 +226,10 @@ export const StatusSchema = z.object({
   // A haste that dies away: its amount is full when it starts and falls in a straight line to
   // nothing at endTick, instead of staying the same until it ends.
   fades: z.boolean().optional(),
+  // For a damage over time that feeds whoever put it on (the Ent's spore): the health its owner gets back on each of its pulses, and the health its owner gets back
+  // if the unit carrying it dies with it on. Absent, it gives back nothing.
+  pulseHeal: z.number().finite().positive().optional(),
+  deathHeal: z.number().finite().positive().optional(),
 })
 
 // Markers are inert tags that later effects can read, active in [startTick, endTick).
@@ -369,11 +373,14 @@ export const HillAreaSchema = z.object({
   ellipse: z.boolean(),
 })
 
-// How the game is played, for every mode, fixed for the whole game: how many ticks a champion stays dead
-// (the default if absent), and the score a team wins at (no limit if absent).
+// How the game is played, for every mode, fixed for the whole game: how many ticks a level 1 champion stays dead
+// (the default if absent) and how many more for each level above the first (the default if absent), the score a team wins
+// at (no limit if absent), and whether the map's turrets and cores are healing zones (see `HEALING_ZONE_TIERS`; absent, they are turrets).
 const RulesFields = {
   respawnTicks: z.number().int().positive().optional(),
+  respawnTicksPerLevel: z.number().int().nonnegative().optional(),
   scoreLimit: z.number().int().positive().optional(),
+  healingZones: z.literal(true).optional(),
 }
 
 // What a game of a mode is played on, fixed for the whole game: the hill, or where each team's flag is
@@ -630,6 +637,7 @@ export {
   subject,
   subjectWithin,
   targetUnit,
+  touchesStructures,
   towardTarget,
   when,
 } from './effects.js'
@@ -711,11 +719,14 @@ export {
   leadingTeam,
   limitRange,
   modeRules,
+  coreSlotsOf,
+  coreTeamsProblem,
   modeStartProblem,
   modeSupportProblem,
   NO_OBJECTIVES,
   objectiveScores,
   readRulesChange,
+  RESPAWN_PER_LEVEL_SECONDS,
   RESPAWN_SECONDS,
   teamCountProblem,
   startingMode,
@@ -757,8 +768,34 @@ export { aimAt, think } from './ai.js'
 export type { AiBody, AiDecision, AiOrder, AiOther, WalkDistance } from './ai.js'
 export { attackEvery, getCharacterChampion, getMonster, Monster, monsters } from './monsters.js'
 export type { AiAbilityRule, AiProfile, AiProfileDef, MonsterDef } from './monsters.js'
-export { chooseTurretTarget, CORE_TIER, getCore, getTurret, Turret, TURRET_TIERS, turretId, turrets, turretTiers } from './turrets.js'
-export type { TurretBody, TurretPrey, TurretTierDef } from './turrets.js'
+export {
+  chooseTurretTarget,
+  CORE_TIER,
+  getCore,
+  getCoreZone,
+  getHealingZone,
+  getStructureBody,
+  getTurret,
+  HEALING_ZONE_TIERS,
+  healingZoneId,
+  healingZones,
+  Turret,
+  TURRET_TIERS,
+  turretId,
+  turrets,
+  turretTiers,
+} from './turrets.js'
+export type { HealingZoneTierDef, TurretBody, TurretPrey, TurretTierDef } from './turrets.js'
+export {
+  HEALING_ZONE_PULSE_TICKS,
+  HEALING_ZONE_SHIELD_KEY,
+  healingZoneProblem,
+  strongestZone,
+  zoneHealPerPulse,
+  zoneHealsOn,
+  zoneReaches,
+} from './healing-zones.js'
+export type { HealingZoneDef } from './healing-zones.js'
 export { rampMultiplier, rampStacks, TURRET_RAMP, TURRET_RAMP_GRACE_TICKS, TURRET_RAMP_KEY } from './turret-ramp.js'
 export type { TurretRamp } from './turret-ramp.js'
 export { shieldedStructures, STRUCTURE_ARCANE_DAMAGE } from './structures.js'

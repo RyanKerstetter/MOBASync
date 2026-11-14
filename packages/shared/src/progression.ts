@@ -40,10 +40,10 @@ export function xpToReachLevel(level: number): number {
   return total
 }
 
-// How long a champion of this level stays dead, when the game's respawn time is `baseTicks` (what a level 1 champion waits): that, and `GAME_RESPAWN_TICKS_PER_LEVEL`
-// more for each level above the first. The one place that says how the wait scales with levels.
-export function respawnTicksAt(baseTicks: number, level: number): number {
-  return baseTicks + GAME_RESPAWN_TICKS_PER_LEVEL * (Math.max(1, Math.floor(level)) - 1)
+// How long a champion of this level stays dead, when the game's respawn time is `baseTicks` (what a level 1 champion waits): that, and `perLevelTicks` more for each level
+// above the first (the lobby sets both; a game that is not told waits `GAME_RESPAWN_TICKS_PER_LEVEL` a level). The one place that says how the wait scales with levels.
+export function respawnTicksAt(baseTicks: number, level: number, perLevelTicks: number = GAME_RESPAWN_TICKS_PER_LEVEL): number {
+  return baseTicks + Math.max(0, perLevelTicks) * (Math.max(1, Math.floor(level)) - 1)
 }
 
 // ---------------------------------------------------------------------------- credit for a kill
@@ -134,6 +134,8 @@ export function catchupXp(xp: number, level: number, topLevel: number): number {
 }
 // What killing a monster is worth when its entry in monsters.ts does not say (`MonsterDef.reward`).
 export const DEFAULT_MONSTER_REWARD: Readonly<Resources> = { gold: 25, xp: 25, shards: 0 }
+// The share of its own maximum health a player is healed by on killing a monster whose entry in monsters.ts does not say (`MonsterDef.healOnKill`): 0.1 is a tenth.
+export const DEFAULT_MONSTER_HEAL_ON_KILL = 0.1
 // What destroying a turret is worth when its tier in turrets.ts does not say (`TurretTierDef.reward`).
 export const DEFAULT_TURRET_REWARD: Readonly<Resources> = { gold: 100, xp: 50, shards: 0 }
 // What breaking a core is worth when its entry in turrets.ts does not say (`TurretTierDef.reward`, of a tier that is a `core`): nothing, as it is the end of the game for a team.

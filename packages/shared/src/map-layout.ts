@@ -42,8 +42,8 @@ import { flattenLayers, getProperty, mapWorldScale, type TiledMap, type TiledObj
 //   mode, and is left out of a game whose slot has no team (a map for two teams played by one has no turret for the second). A point
 //   for a tier the game does not have (yet) is left out, and said so in `warnings`, like a monster's.
 // - `core` points, each with the `team-name` of the slot of spawn points whose base it is the heart of, like a flag: slot 1 is where the
-//   biggest team starts, and so on. Core destruction is for two teams, so it uses the cores of slots 1 and 2, and a map that has both can
-//   be played in it (see modes.ts). A core is a turret (see turrets.ts), so it is solid and needs room for its size clear of the walls and the arena's edge, and a
+//   biggest team starts, and so on. Core destruction is for up to four teams, each using the core of the slot it starts at, so a map with the cores of
+//   slots 1 and 2 can be played in it by one or two teams, and one with the cores of the first three or four by that many (see modes.ts). A core is a turret (see turrets.ts), so it is solid and needs room for its size clear of the walls and the arena's edge, and a
 //   way to it from the spawn points. The core is in a game of that mode only: in the others its point is not used.
 // - any number of `bush` rectangles, which hide whoever stands in one from every team that has no one in it (see `Terrain.bushAt`). They stop
 //   nothing, and are only for what the page shows. A bush the arena does not reach is left out, and one that is not a plain rectangle refuses the map, like a wall.

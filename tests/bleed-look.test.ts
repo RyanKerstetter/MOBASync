@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { BLEED_DROP_MS, BLEED_DROPS, BLEED_PULSE_MS, BLEED_TINT, bleedTint, layoutBleedDrops } from '../apps/client/src/render/bleed-look.ts'
+import { BLEED_DROP_ALPHA, BLEED_DROP_MS, BLEED_DROPS, BLEED_PULSE_MS, BLEED_TINT, bleedTint, layoutBleedDrops } from '../apps/client/src/render/bleed-look.ts'
 import { GAME_MAX_CHAMPION_RADIUS } from '../packages/shared/src/index.ts'
 
 // How a bleeding body is drawn: drops that fall from it to its feet, and a red flush on the figure. The numbers are read from the module, so retuning the look does not break these.
@@ -15,7 +15,7 @@ test('a bleeding body sheds a set number of drops, each on the body and above it
     for (const drop of drops) {
       assert.ok(Math.abs(drop.x) <= R, `across the body: ${drop.x}`)
       assert.ok(drop.y >= -R && drop.y <= R, `from the body down to its feet: ${drop.y}`)
-      assert.ok(drop.alpha >= 0 && drop.alpha <= 1)
+      assert.ok(drop.alpha >= 0 && drop.alpha <= BLEED_DROP_ALPHA, 'never more solid than a drop is')
       assert.ok(drop.size > 0)
     }
   }
@@ -28,8 +28,8 @@ test('a drop falls as time goes on, and starts again from somewhere else once it
   const later = layoutBleedDrops(3, start + BLEED_DROP_MS * 0.5, R)[0]
   assert.ok(later.y > early.y, 'it falls')
   assert.equal(later.x, early.x, 'straight down')
-  assert.equal(early.alpha, 1, 'and shows as it falls')
-  assert.ok(layoutBleedDrops(3, start + BLEED_DROP_MS * 0.99, R)[0].alpha < 0.1, 'it fades as it lands')
+  assert.equal(early.alpha, BLEED_DROP_ALPHA, 'and shows as it falls')
+  assert.ok(layoutBleedDrops(3, start + BLEED_DROP_MS * 0.99, R)[0].alpha < 0.1 * BLEED_DROP_ALPHA, 'it fades as it lands')
   const next = [1, 2, 3, 4].map((fall) => layoutBleedDrops(3, start + BLEED_DROP_MS * (fall + 0.1), R)[0].x)
   assert.ok(new Set([early.x, ...next]).size > 1, 'and the next falls start from other places')
 })

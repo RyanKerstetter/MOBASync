@@ -33,6 +33,8 @@ export type CoreView = {
   status: 'protected' | 'open' | 'broken' | 'eliminated'
   // How many players of the team are alive.
   playersAlive: number
+  // Set when the base is guarded by healing zones and not by turrets (a lobby rule).
+  zones?: true
 }
 
 export type HillView = {
@@ -140,20 +142,21 @@ export function coreReadout(core: CoreView): { fraction: number; text: string } 
     case 'broken':
       return { fraction: 0, text: `Core broken · ${players}` }
     case 'protected':
-      return { fraction, text: 'Protected by turrets' }
+      return { fraction, text: core.zones ? 'Protected by healing zones' : 'Protected by turrets' }
     default:
       return { fraction, text: `${Math.ceil(core.hp)} / ${core.maxHp}` }
   }
 }
 
 // One line to tell the local player where the game stands, if there is anything to say: their own core is down, so they cannot
-// respawn, or the enemy's is, so the players of that team are what is left to take down.
+// respawn, or an enemy's is (with more than two teams, any of them), so the players of that team are what is left to take down.
 export function coreHint(cores: readonly CoreView[], local: { id: number; team: number } | undefined): string | undefined {
   if (!local) return undefined
   const own = cores.find((core) => core.team === local.team)
   if (own?.status === 'broken') return 'Your core is down: you cannot respawn. Keep your team alive.'
-  const enemy = cores.find((core) => core.team !== local.team)
-  if (enemy?.status === 'broken') return `${teamName(enemy.team)}'s core is down. Take down every one of their players to win.`
+  const down = cores.filter((core) => core.team !== local.team && core.status === 'broken').map((core) => teamName(core.team))
+  if (down.length === 1) return `${down[0]}'s core is down. Take down every one of their players to win.`
+  if (down.length > 1) return `The cores of ${down.slice(0, -1).join(', ')} and ${down[down.length - 1]} are down. Take down every player left on those teams to win.`
   return undefined
 }
 

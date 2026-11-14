@@ -59,6 +59,7 @@ import {
   SWORD_SCALING_PER_LEVEL,
   SHADOW_AUTO_BONUS,
   firstStrike,
+  refreshBleed,
 } from './abilities.js'
 import { GAME_TPS } from './constants.js'
 import {
@@ -758,7 +759,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A ranged pyromancer that stacks burns on its foes, then stuns them with a fireball.',
     passive: `Abilities add burn stacks, up to ${BURN_MAX_STACKS}. The more stacks, the more the burn hurts.`,
     base: { maxHp: 750, attackDamage: 45, attackSpeed: .85, resistance: 0, haste: 0, arcane: 35 },
-    growth: { maxHp: 55, attackDamage: 4, attackSpeed: 0.015, resistance: 2, haste: 8, arcane: 20 },
+    growth: { maxHp: 50, attackDamage: 4, attackSpeed: 0.01, resistance: 2, haste: 8, arcane: 20 },
     moveSpeed: 140,
     radius: 20,
     attackRange: 230,
@@ -771,7 +772,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     id: 'aurel',
     name: 'Aurel',
     description: 'A melee bloodletter that hits harder as it weakens, makes its prey bleed and runs it down.',
-    passive: 'Auto attacks hit harder the less health you have.',
+    passive: 'Auto attacks hit harder the less health you have, and renew your bleed.',
     base: { maxHp: 950, attackDamage: 65, attackSpeed: .9, resistance: 0, haste: 0, arcane: 5 },
     growth: { maxHp: 80, attackDamage: 13, attackSpeed: 0.02, resistance: 6, haste: 6, arcane: 2 },
     moveSpeed: 150,
@@ -780,7 +781,8 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     attackWindup: 0.22,
     // Q strikes a nearby enemy and makes it bleed, W cleanses and heals back what he just lost, E dashes onto an enemy.
     abilities: ['rend', 'transfusion', 'bloodrush'],
-    onAttackHit: [damage(lowHealthAutoDamage)],
+    // Each auto also sets the bleed Rend left on its target back to its full length.
+    onAttackHit: [damage(lowHealthAutoDamage), refreshBleed],
     // Transfusion heals a share of what he lost lately, so he remembers it for as long as it looks back.
     healthMemoryTicks: TRANSFUSION_WINDOW_TICKS,
   }),
@@ -790,7 +792,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A melee treant that roots what it strikes, grows groves that heal its allies, and bursts the spores it plants.',
     passive: `Your first auto attack on an enemy roots it. Each enemy can be rooted this way once every ${ENT_ROOT_COOLDOWN_TICKS / GAME_TPS} seconds.`,
     base: { maxHp: 1050, attackDamage: 62, attackSpeed: .8, resistance: 0, haste: 0, arcane: 20 },
-    growth: { maxHp: 85, attackDamage: 7, attackSpeed: 0.015, resistance: 6, haste: 6, arcane: 14 },
+    growth: { maxHp: 75, attackDamage: 4, attackSpeed: 0.01, resistance: 6, haste: 6, arcane: 14 },
     moveSpeed: 140,
     radius: 24,
     attackRange: 110,

@@ -16,7 +16,7 @@ export type TurretRing = {
 }
 
 // The ring of every turret that is standing: its middle, its reach as it is now, and its team's colour. A destroyed turret has none. The core of a
-// base is a turret, so it has one.
+// base is a turret, so it has one. A healing zone does not shoot, so it reaches nothing and has none (its zone is drawn instead: see healing-zone.ts).
 export function layoutTurretRings(characters: readonly RenderedCharacter[]): TurretRing[] {
   return characters
     .filter((character) => character.turret !== undefined && !character.dead && character.attackRange > 0)

@@ -115,11 +115,13 @@ export type RenderedMonster = {
 }
 
 // What a turret is, for drawing it and for what its team sees: its tier, whether it is the core of a base (the last turret, drawn as the heart of it), and how
-// far its team sees from it. How far it reaches is the character's `attackRange`, which the ring round it is drawn from.
+// far its team sees from it. How far it reaches is the character's `attackRange`, which the ring round it is drawn from. A healing zone is one too, which does not
+// shoot: `zone` is there for it, with how far the zone it heals in reaches from its middle (see healing-zones.ts).
 export type RenderedTurret = {
   tier: number
   core: boolean
   visionRange: number
+  zone?: { reach: number }
 }
 
 export type RenderedCharacter =
@@ -1045,6 +1047,7 @@ export class ClientGameState {
           maxHp: state?.getHealthState()?.maxHp ?? core?.champion.maxHp ?? 0,
           status,
           playersAlive: characters.filter((character) => character.team === team && frame.get(character.id)?.isDead() === false).length,
+          ...(core?.zone ? { zones: true as const } : {}),
         }
       })
       return { kind: 'core', scores: rankScores(setup.teams, pointsOf(objective.scores)), ...limit, cores: coreViews }
@@ -1163,6 +1166,11 @@ export class ClientGameState {
     return this.simulator.shopZones
   }
 
+  // Whether the game's turrets and cores are healing zones (a lobby rule): then the shops do not heal, and the zones are what is drawn as healing.
+  hasHealingZones(): boolean {
+    return this.simulator.hasHealingZones
+  }
+
   private recordConfirmedDeath(death: DeathRecord): void {
     const id = `${death.tick}:${death.victimId}`
     // A checkpoint can take the commit tick back, so a death may be confirmed a second time.
@@ -1242,7 +1250,16 @@ export class ClientGameState {
             },
           }
           : {}),
-        ...(character.turret ? { turret: { tier: character.turret.tier, core: character.turret.core, visionRange: character.turret.visionRange } } : {}),
+        ...(character.turret
+          ? {
+            turret: {
+              tier: character.turret.tier,
+              core: character.turret.core,
+              visionRange: character.turret.visionRange,
+              ...(character.turret.zone ? { zone: { reach: character.turret.zone.reach } } : {}),
+            },
+          }
+          : {}),
         ...(health?.deathTick !== undefined ? { deadForSeconds: Math.max(0, (this.estimateTick(now) - health.deathTick) / GAME_TPS) } : {}),
         ...(shielded.has(character.id) ? { invulnerable: true as const } : {}),
         champion: character.champion,

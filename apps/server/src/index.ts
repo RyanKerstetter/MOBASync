@@ -562,8 +562,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     return reply()
   }
 
-  // The leader sets the rules of the next game, until the game starts: how long a champion stays dead, and
-  // the score a team wins at in each mode.
+  // The leader sets the rules of the next game, until the game starts: how long a champion stays dead (and how much longer for each level), whether the
+  // turrets are healing zones, and the score a team wins at in each mode.
   if (isAction('rules')) {
     const { body, sessionId } = await leaderChange('The rules cannot be changed once the game is starting.')
     const read = readRulesChange(body)
@@ -573,6 +573,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     // What changed, as it is now: a box that was typed in and left as it was is not a change.
     const changed: LogFields = {}
     if (lobby.rules.respawnSeconds !== before.respawnSeconds) changed.respawnSeconds = lobby.rules.respawnSeconds
+    if (lobby.rules.respawnPerLevelSeconds !== before.respawnPerLevelSeconds) changed.respawnPerLevelSeconds = lobby.rules.respawnPerLevelSeconds
+    if (lobby.rules.healingZones !== before.healingZones) changed.healingZones = lobby.rules.healingZones
     if (lobby.rules.captureSeconds !== before.captureSeconds) changed.captureSeconds = lobby.rules.captureSeconds
     if (lobby.rules.loseItemsOnDeath !== before.loseItemsOnDeath) changed.loseItemsOnDeath = lobby.rules.loseItemsOnDeath
     if (lobby.rules.gold !== before.gold) changed.gold = lobby.rules.gold

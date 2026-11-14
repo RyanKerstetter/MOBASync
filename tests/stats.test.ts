@@ -443,7 +443,7 @@ test('haste shortens a cooldown that is put back on its whole, and what a refund
 const grower = champion({
   growth: { maxHp: 100, attackDamage: 10, attackSpeed: 1, resistance: 100, haste: 100, arcane: 100 },
 })
-// A monster worth a level, that dies to one auto.
+// A monster worth a level, that dies to one auto. It heals nobody, so what a level does to the health of whoever kills it is all that is seen.
 const feed = defineMonster({
   id: unique('t-st-feed'),
   name: 'Feed',
@@ -455,6 +455,7 @@ const feed = defineMonster({
   abilities: [],
   ai: { aggroRange: 0, deaggroRange: 300 },
   reward: { gold: 0, xp: xpToReachLevel(2), shards: 0 },
+  healOnKill: 0,
 })
 
 // The grower (1), a victim with plenty of health (2), and someone to hurt the grower (3). With `leveled` the grower first kills the feed (10), by tick

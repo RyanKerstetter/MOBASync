@@ -21,10 +21,12 @@ export const GAME_VIEW_HEIGHT = 9 * 120
 // What blocks sight, and how it is worked out, is the vision system's (see vision.ts).
 export const GAME_VISION_RANGE = 500
 // The most players one lobby can hold.
-export const GAME_MAX_PLAYERS = 8
+export const GAME_MAX_PLAYERS = 16
 // The most players one team can hold. With GAME_MAX_PLAYERS it decides how many spawn points a map
 // needs (see `spawnPointsNeeded`).
 export const GAME_MAX_TEAM_SIZE = 4
+// The most teams a game of Core Destruction can have. Each team needs a core at its base, so a map can play it with as many teams as it has cores, up to this.
+export const GAME_CORE_MAX_TEAMS = 4
 // The team every monster is on, one past the last a player can pick. Monsters are teammates of each other and
 // enemies of every player, so a blast from one never hurts another and any player can hurt any monster. It is
 // no team of the game: it has no score, no start places and no colour in the lobby.

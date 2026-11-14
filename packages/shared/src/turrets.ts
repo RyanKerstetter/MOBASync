@@ -1,6 +1,7 @@
 import { Champion, champions, type AttackProjectileDef, type ChampionDef } from './champions.js'
 import { GAME_VISION_RANGE } from './constants.js'
 import { distanceBetween } from './geometry.js'
+import { healingZoneProblem, type HealingZoneDef } from './healing-zones.js'
 import { DEFAULT_CORE_REWARD, DEFAULT_TURRET_REWARD, type Resources } from './progression.js'
 import { rampedShot, rampProblem, TURRET_RAMP, type TurretRamp } from './turret-ramp.js'
 import type { Vector2 } from './index.js'
@@ -26,6 +27,10 @@ import type { Vector2 } from './index.js'
 // turret's, from the same code: it shoots, ramps, is solid, is hurt by attacks only, is protected by the lower tiers of its team until they are down (structures.ts),
 // is seen from, and is destroyed for good. It differs only where the flag says: it pays nothing by default (`DEFAULT_CORE_REWARD`), it is called `Core`, a map
 // puts it down with a `core` point and not a `turret` point, and it is in the game only when the mode is Core Destruction.
+//
+// **Healing zones** (healing-zones.ts) are what the turrets and the core are when the lobby turns them on: the same class, built from their own table
+// (`HEALING_ZONE_TIERS`, below) and kept in a registry of their own (`healingZones`). A zone has health and a body like a turret, and is a structure in every way
+// but one: it does not shoot. It heals and shields its team instead (`zone`). The zone of the core tier is still the core.
 
 // What one tier of turret is made of. The stats are the champion's (see stats.ts); a turret never levels, so there is no growth.
 export interface TurretTierDef {
@@ -40,13 +45,26 @@ export interface TurretTierDef {
   reward?: Partial<Resources>
 }
 
+// What one tier of healing zone is made of: the health of its body and how it takes hits (it never attacks, so it has no damage or speed), its size, and what
+// it does for its team (see healing-zones.ts).
+export interface HealingZoneTierDef {
+  base: { maxHp: number; resistance?: number }
+  radius: number
+  visionRange?: number
+  core?: true
+  reward?: Partial<Resources>
+  zone: HealingZoneDef
+}
+
 export class Turret {
   readonly tier: number
-  // The id of its body, which is what a snapshot says it is: `turret-1` for tier 1.
+  // The id of its body, which is what a snapshot says it is: `turret-1` for tier 1, `zone-1` for a healing zone of tier 1.
   readonly id: string
-  // What it is called where something has to say what it is (the killfeed, a map that has no room for it): `Tier 1 Turret`, or `Core`. It has no
-  // name of its own to set, and none is drawn over it.
+  // What it is called where something has to say what it is (the killfeed, a map that has no room for it): `Tier 1 Turret`, `Tier 1 Healing Zone`, or `Core`.
+  // It has no name of its own to set, and none is drawn over it.
   readonly name: string
+  // What it does for its team, if it is a healing zone: it then does not shoot.
+  readonly zone: Readonly<HealingZoneDef> | undefined
   // Whether it is the core of a base: the last turret, whose fall decides Core Destruction.
   readonly core: boolean
   readonly champion: Champion
@@ -56,43 +74,63 @@ export class Turret {
   readonly ramp: Readonly<TurretRamp> | undefined
   readonly visionRange: number
 
-  constructor(tier: number, def: TurretTierDef) {
+  constructor(tier: number, def: TurretTierDef | HealingZoneTierDef) {
+    const isZone = 'zone' in def
     const fail = (problem: string): never => {
-      throw new Error(`Turret tier ${tier} ${problem}.`)
+      throw new Error(`${isZone ? 'Healing zone' : 'Turret'} tier ${tier} ${problem}.`)
     }
     if (!(Number.isInteger(tier) && tier > 0)) fail('needs a tier that is a whole number, 1 or more')
     const positive = (value: number, what: string): void => {
       if (!(Number.isFinite(value) && value > 0)) fail(`needs a ${what} that is more than 0`)
     }
     positive(def.radius, 'radius')
-    positive(def.attackRange, 'range')
     if (def.visionRange !== undefined) positive(def.visionRange, 'vision range')
-    if (!(Number.isFinite(def.attackWindup) && def.attackWindup >= 0 && def.attackWindup <= 1)) fail('needs a windup that is a share of the attack, from 0 to 1')
-    if (def.ramp) {
-      const problem = rampProblem(def.ramp)
-      if (problem) fail(problem)
-    }
-    this.ramp = def.ramp ? { ...def.ramp } : undefined
     this.tier = tier
-    this.id = turretId(tier)
-    if (champions.has(this.id)) fail('has the id of a champion')
     this.core = def.core === true
-    this.name = this.core ? 'Core' : `Tier ${tier} Turret`
     this.visionRange = def.visionRange ?? GAME_VISION_RANGE
-    this.champion = new Champion({
-      id: this.id,
-      name: this.name,
-      base: def.base,
-      // It stands where it is put.
-      moveSpeed: 0,
-      radius: def.radius,
-      attackRange: def.attackRange,
-      attackWindup: def.attackWindup,
-      ...(def.attackProjectile ? { attackProjectile: def.attackProjectile } : {}),
-      // What a shot does when it lands: its damage, ramped up by the shots at this target before it, if the tier ramps.
-      ...(def.ramp ? { onAttackHit: rampedShot(def.ramp, def.base.attackSpeed) } : {}),
-      abilities: [],
-    })
+    let body: Omit<ChampionDef, 'id' | 'name'>
+    if ('zone' in def) {
+      const problem = healingZoneProblem(def.zone)
+      if (problem) fail(problem)
+      this.zone = { ...def.zone }
+      this.ramp = undefined
+      this.id = healingZoneId(tier)
+      this.name = this.core ? 'Core' : `Tier ${tier} Healing Zone`
+      body = {
+        // It never attacks: no damage, and no reach, so nothing draws a range round it as round one that shoots.
+        base: { maxHp: def.base.maxHp, attackDamage: 0, attackSpeed: 1, ...(def.base.resistance !== undefined ? { resistance: def.base.resistance } : {}) },
+        moveSpeed: 0,
+        radius: def.radius,
+        attackRange: 0,
+        attackWindup: 0,
+        abilities: [],
+      }
+    } else {
+      positive(def.attackRange, 'range')
+      if (!(Number.isFinite(def.attackWindup) && def.attackWindup >= 0 && def.attackWindup <= 1)) fail('needs a windup that is a share of the attack, from 0 to 1')
+      if (def.ramp) {
+        const problem = rampProblem(def.ramp)
+        if (problem) fail(problem)
+      }
+      this.zone = undefined
+      this.ramp = def.ramp ? { ...def.ramp } : undefined
+      this.id = turretId(tier)
+      this.name = this.core ? 'Core' : `Tier ${tier} Turret`
+      body = {
+        base: def.base,
+        // It stands where it is put.
+        moveSpeed: 0,
+        radius: def.radius,
+        attackRange: def.attackRange,
+        attackWindup: def.attackWindup,
+        ...(def.attackProjectile ? { attackProjectile: def.attackProjectile } : {}),
+        // What a shot does when it lands: its damage, ramped up by the shots at this target before it, if the tier ramps.
+        ...(def.ramp ? { onAttackHit: rampedShot(def.ramp, def.base.attackSpeed) } : {}),
+        abilities: [],
+      }
+    }
+    if (champions.has(this.id)) fail('has the id of a champion')
+    this.champion = new Champion({ id: this.id, name: this.name, ...body })
     const unsaid = this.core ? DEFAULT_CORE_REWARD : DEFAULT_TURRET_REWARD
     this.reward = {
       gold: def.reward?.gold ?? unsaid.gold,
@@ -107,6 +145,9 @@ export class Turret {
 
 // The id of the body of a tier of turret.
 export const turretId = (tier: number): string => `turret-${tier}`
+
+// The id of the body of a tier of healing zone.
+export const healingZoneId = (tier: number): string => `zone-${tier}`
 
 // The tier of the core of the game: above every turret, so it is the last of a base to be hurt.
 export const CORE_TIER = 3
@@ -161,6 +202,62 @@ export const turrets: ReadonlyMap<string, Turret> = new Map(
     return [turret.id, turret]
   }),
 )
+
+// The healing zones every tier of turret (and the core) is when the lobby turns them on (see healing-zones.ts). Each is no bigger than the tower it stands in
+// for (its `radius`), so a map that has room for the tower has room for the zone. It never shoots; what it does is its `zone`:
+// - `reach`: how far the zone goes from its middle (a player whose middle is that near is in it), and how far out the page draws it;
+// - `healPerSecond`: the flat health a second it gives each player of its team in it;
+// - `shield`, `shieldEveryTicks` and `shieldTicks`: the shield it gives one, the moment it walks in and then every so often while it stays, and how long each lasts.
+// The core's is the heal of the base, as the shops do not heal while there are zones, so it heals the most. The health is what it takes to break one.
+const ZONE_SHIELD_EVERY_TICKS = 5 * 60
+const ZONE_SHIELD_TICKS = 10 * 60
+export const HEALING_ZONE_TIERS: Readonly<Record<number, HealingZoneTierDef>> = {
+  1: {
+    base: { maxHp: 3000, resistance: 25 },
+    radius: 30,
+    visionRange: 600,
+    zone: { reach: 150, healPerSecond: 50, shield: 75, shieldEveryTicks: ZONE_SHIELD_EVERY_TICKS, shieldTicks: ZONE_SHIELD_TICKS },
+    reward: { gold: 150, xp: 600 },
+  },
+  2: {
+    base: { maxHp: 4000, resistance: 50 },
+    radius: 30,
+    visionRange: 600,
+    zone: { reach: 150, healPerSecond: 100, shield: 125, shieldEveryTicks: ZONE_SHIELD_EVERY_TICKS, shieldTicks: ZONE_SHIELD_TICKS },
+    reward: { gold: 300, xp: 900 },
+  },
+  [CORE_TIER]: {
+    core: true,
+    base: { maxHp: 6000, resistance: 75 },
+    radius: 30,
+    visionRange: 600,
+    zone: { reach: 150, healPerSecond: 200, shield: 200, shieldEveryTicks: ZONE_SHIELD_EVERY_TICKS, shieldTicks: ZONE_SHIELD_TICKS },
+  },
+}
+
+// The healing zones in the game, by the id of their body (`zone-1`), in a registry of their own as the turrets are.
+export const healingZones: ReadonlyMap<string, Turret> = new Map(
+  Object.entries(HEALING_ZONE_TIERS).map(([tier, def]) => {
+    const zone = new Turret(Number(tier), def)
+    return [zone.id, zone]
+  }),
+)
+
+// The structure a body is, by its id: a turret (the core of a base too) or a healing zone. Nothing, for any other body.
+export function getStructureBody(id: string): Turret | undefined {
+  return turrets.get(id) ?? healingZones.get(id)
+}
+
+export function getHealingZone(tier: number): Turret {
+  const zone = healingZones.get(healingZoneId(tier))
+  if (!zone) throw new RangeError(`Unknown healing zone tier ${tier}.`)
+  return zone
+}
+
+// The core when the base is a healing zone: the zone of the core tier.
+export function getCoreZone(): Turret {
+  return getHealingZone(CORE_TIER)
+}
 
 export function getTurret(tier: number): Turret {
   const turret = turrets.get(turretId(tier))

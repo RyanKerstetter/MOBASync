@@ -8,8 +8,8 @@ export type SpawnSlots = readonly (readonly Vector2[])[]
 // How many spawn points slot 1, 2, 3 ... needs, counting from 1. The biggest team in a game takes
 // slot 1, the next biggest slot 2, and so on, so slot k is the kth biggest team. The k biggest teams
 // are each at least as big as the kth, so that one has at most GAME_MAX_PLAYERS / k players, and no
-// team is bigger than GAME_MAX_TEAM_SIZE. With eight players and teams of up to four that is 4, 4, 2,
-// 2, 1, 1, 1, 1: enough for every way eight players can split into teams, and no more than that.
+// team is bigger than GAME_MAX_TEAM_SIZE. With sixteen players and teams of up to four that is 4, 4, 4,
+// 4, 3, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1: enough for every way sixteen players can split into teams, and no more than that.
 export function spawnPointsNeeded(slot: number): number {
   return Math.min(GAME_MAX_TEAM_SIZE, Math.floor(GAME_MAX_PLAYERS / slot))
 }

@@ -1,6 +1,6 @@
 import type { AbilityDef } from './abilities.js'
 import { GAME_TPS } from './constants.js'
-import { describeEffect, SCALING_KEYS, type AmountInfo, type AnyEffect, type Scaling } from './effects.js'
+import { describeEffect, overTimeOwnerHeal, SCALING_KEYS, type AmountInfo, type AnyEffect, type Scaling } from './effects.js'
 
 // What an ability puts a number on that a player wants to read, found by looking through its effects (see "Descriptions" in effects.ts): the damage it deals, the
 // damage a second it burns (or bleeds) for, the health it gives back and the shield it gives. It is found in the ability itself, so it is the ability's own number, and retuning the
@@ -62,6 +62,15 @@ function collect(def: AbilityDef): AbilityNumber[] {
           if (told.has(key)) break
           told.add(key)
           numbers.push({ kind: info.kind, amount, ...(repeats ? { perSecond: true as const } : {}) })
+          // A damage over time that heals whoever put it on (the Ent's spore) tells that heal too, for a second.
+          const drain = overTimeOwnerHeal(effect)
+          if (drain) {
+            const drainKey = JSON.stringify(['heal', drain, true])
+            if (!told.has(drainKey)) {
+              told.add(drainKey)
+              numbers.push({ kind: 'heal', amount: drain, perSecond: true })
+            }
+          }
           break
         }
         case 'branch':

@@ -134,14 +134,14 @@ test('the server accepts every ability of every champion', () => {
 })
 
 // A game with the champion and an enemy, and the champion's cast of an ability at that enemy.
-function duelWithCast(champion: Champion, abilityId: string, tick: number, seq: number, simulator?: Simulator): Simulator {
+function duelWithCast(champion: Champion, abilityId: string, tick: number, seq: number, simulator?: Simulator, enemyAt?: Vector2): Simulator {
   const def = abilityDefs.get(abilityId)
   assert.ok(def)
   const [opponent] = champions.values()
   const duel = simulator ?? new Simulator()
   if (!simulator) {
     duel.addPlayer(1, 'player-1', 'Player 1', CASTER_AT, champion)
-    duel.addPlayer(2, 'player-2', 'Player 2', enemyWithin(def.range), opponent)
+    duel.addPlayer(2, 'player-2', 'Player 2', enemyAt ?? enemyWithin(def.range), opponent)
     // On the caster's team (the first), for an ability that is cast on a teammate.
     if (def.targetsAllies) duel.addPlayer(ALLY_ID, 'player-3', 'Player 3', ALLY_AT, opponent, 1)
   }
@@ -179,10 +179,22 @@ test('every ability launches and plays out without errors', () => {
         // It needs something out first, such as a stick on the ground: the champion has to put it there.
         const setup = putOut(champion, def.requires.entity)
         assert.ok(setup, `${champion.id} can get a ${def.requires.entity} out, for ${abilityId}`)
-        duel = duelWithCast(champion, setup.abilityId, 1, 1)
-        tick = setup.tick + 1
-        // A dash has to finish, and an ability its cooldown, before it can be cast.
-        while (duel.at(tick).get(1)?.isDashing() || duel.at(tick).get(1)?.getAbilityCooldown(abilityId).ready === false) tick += 1
+        const needed = def.requires.entity
+        const arrange = (enemyAt?: Vector2): { game: Simulator; at: number } => {
+          const game = duelWithCast(champion, setup.abilityId, 1, 1, undefined, enemyAt)
+          let at = setup.tick + 1
+          // A dash has to finish, and an ability its cooldown, before it can be cast.
+          while (game.at(at).get(1)?.isDashing() || game.at(at).get(1)?.getAbilityCooldown(abilityId).ready === false) at += 1
+          return { game, at }
+        }
+        let { game, at } = arrange()
+        // A recast that has to wait (a fireball's Detonate) can be too late for a shot that the enemy standing in front of it has stopped, so it is tried again with the
+        // enemy off to the side, out of the shot's way.
+        if (!game.at(at).getEntities().some((entity) => entity.ownerId === 1 && entity.defId === needed)) {
+          ({ game, at } = arrange({ x: CASTER_AT.x, y: CASTER_AT.y + 300 }))
+        }
+        duel = game
+        tick = at
         duelWithCast(champion, abilityId, tick, 2, duel)
       } else {
         duel = duelWithCast(champion, abilityId, tick, 1)

@@ -11,12 +11,16 @@ export type BleedDrop = {
   alpha: number
 }
 
-// How many drops fall at a time, and how long each takes to fall, in milliseconds. Each starts a share of that after the one before it.
-export const BLEED_DROPS = 4
-export const BLEED_DROP_MS = 750
+// How many drops fall at a time, and how long each takes to fall, in milliseconds. Each starts a share of that after the one before it. A drop is never more than
+// `BLEED_DROP_ALPHA` solid, and its round end is `BLEED_DROP_SIZE` of the body's radius across (2 world units at the least). These, with the tint and how fast it comes and goes,
+// are what make the look as strong as it is.
+export const BLEED_DROPS = 2
+export const BLEED_DROP_MS = 1000
+export const BLEED_DROP_ALPHA = 0.6
+export const BLEED_DROP_SIZE = 0.11
 // How long the figure takes to flush red and pale again, in milliseconds, and the red it flushes to at its reddest.
-export const BLEED_PULSE_MS = 900
-export const BLEED_TINT = { r: 255, g: 120, b: 120 }
+export const BLEED_PULSE_MS = 1400
+export const BLEED_TINT = { r: 255, g: 190, b: 190 }
 
 // The share of a fall after which a drop has landed, and fades.
 const LANDS_AT = 0.7
@@ -46,8 +50,8 @@ export function layoutBleedDrops(seed: number, timeMs: number, radius: number): 
     drops.push({
       x,
       y: from + (to - from) * falling * falling,
-      size: Math.max(2, radius * 0.14),
-      alpha: through < LANDS_AT ? 1 : (1 - through) / (1 - LANDS_AT),
+      size: Math.max(2, radius * BLEED_DROP_SIZE),
+      alpha: BLEED_DROP_ALPHA * (through < LANDS_AT ? 1 : (1 - through) / (1 - LANDS_AT)),
     })
   }
   return drops

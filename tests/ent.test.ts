@@ -13,7 +13,9 @@ import {
   GAME_MAX_CHAMPION_RADIUS,
   GAME_TPS,
   getChampion,
+  loseHealth,
   Simulator,
+  targetUnit,
   type CastTarget,
   type CharacterOrder,
   type GameEvent,
@@ -42,6 +44,8 @@ import {
   SPORE_DAMAGE,
   SPORE_DPS,
   SPORE_DPS_SCALING,
+  SPORE_HEAL_PER_SECOND,
+  SPORE_HEAL_PER_SECOND_SCALING,
   SPORE_POP_DAMAGE,
   SPORE_POP_HEAL,
   SPORE_POP_HEAL_SCALING,
@@ -50,6 +54,7 @@ import {
   SPORE_SCALING,
   SPORE_TICKS,
 } from '../packages/shared/src/abilities.ts'
+import { defineAbility } from './fixtures.ts'
 
 // The Ent's kit, played out in the simulator: the root his first auto on an enemy gives (once in a while for each), Root Burst's small circle that hurts and slows, Grove's big one that heals
 // allies and hurts and roots enemies, and Spore's strike that plants a spore, which his abilities burst for damage and a heal. The numbers come from the exported constants and his own
@@ -129,12 +134,33 @@ class Game {
 }
 
 const statusesOf = (frame: GameTickSnapshot, id: number, kind: string) => frame.get(id)?.getStatuses().filter((status) => status.kind === kind && status.ownerId === 1) ?? []
-// The Ent's hits (not a spore's pulses) on a unit, his abilities' alone (not his autos'), and his heals of a unit.
+// The Ent's hits (not a spore's pulses) on a unit, his abilities' alone (not his autos'), and his heals of a unit (not the little a spore gives him on each pulse: `pulseHealsOf`).
 const abilityHitsOn = (game: Game, id: number, to: number) =>
   game.events('damage', to, (event) => event.ownerId === 1 && event.targetId === id && !event.overTime && !event.id.startsWith('a:'))
-const healsOf = (game: Game, id: number, to: number) => game.events('heal', to, (event) => event.ownerId === 1 && event.unitId === id)
+const isPulseHeal = (event: { id: string }): boolean => event.id.includes(':pulse-heal:')
+const healsOf = (game: Game, id: number, to: number) => game.events('heal', to, (event) => event.ownerId === 1 && event.unitId === id && !isPulseHeal(event))
+const pulseHealsOf = (game: Game, to: number) => game.events('heal', to, (event) => event.ownerId === 1 && event.unitId === 1 && isPulseHeal(event))
+// All the health the Ent has got back by a tick, however it came (a heal event, or the burst of a spore whose carrier died, which is given as the death is).
+const healedBy = (game: Game, tick: number): number => game.at(tick).get(1)?.getHealthState()?.healed ?? 0
 const burstHit = worth(SPORE_POP_DAMAGE, SPORE_POP_SCALING)
 const burstHeal = Math.round(worth(SPORE_POP_HEAL, SPORE_POP_HEAL_SCALING))
+// What a spore gives the Ent back on each of its pulses.
+const pulseHeal = Math.round(worth(SPORE_HEAL_PER_SECOND, SPORE_HEAL_PER_SECOND_SCALING) * GAME_BURN_PULSE_TICKS / GAME_TPS)
+
+// An enemy that can bring the Ent down to his last point of health (so every heal he gets shows), and itself down to its last (so the next thing to hurt it kills it): health
+// costs, which never kill, aimed at him and at itself.
+defineAbility({ id: 't-ent-sap', targeting: 'unit', range: 5000, windUpTicks: 0, cooldownTicks: 60_000, apply: [loseHealth(1_000_000, targetUnit())] })
+defineAbility({ id: 't-ent-crumble', targeting: 'none', range: 0, windUpTicks: 0, cooldownTicks: 60_000, apply: [loseHealth(1_000_000)] })
+const crumbler = new Champion({
+  id: 't-ent-crumbler',
+  name: 'Test Crumbler',
+  base: { maxHp: 1_000_000, attackDamage: 1, attackSpeed: 1 },
+  moveSpeed: 140,
+  radius: R,
+  attackRange: 50,
+  attackWindup: 0,
+  abilities: ['t-ent-sap', 't-ent-crumble'],
+})
 
 // ---------------------------------------------------------------------------- Passive
 
@@ -264,6 +290,94 @@ test('an ability that hits an enemy with no spore bursts nothing', () => {
   const done = goesOff('rootburst', 1) + ROOTBURST_DELAY_TICKS + 5
   assert.equal(abilityHitsOn(game, 2, done).length, 1, 'its own hit, and no burst')
   assert.equal(healsOf(game, 1, done).length, 0)
+})
+
+// The enemy is the crumbler, at character 2: it saps the Ent to his last point on tick 1, so all he gets back from then on shows in his health.
+const sappedGame = (): Game => {
+  const game = new Game([{ at: ahead(TOUCHING), who: crumbler }])
+  game.order(2, cast(1, 't-ent-sap', at(1), ahead(TOUCHING)))
+  return game
+}
+
+test('a spore heals the Ent a little on each of its pulses while it lasts, far less over all of it than a burst, and does not burst when it runs out', () => {
+  const game = sappedGame()
+  game.order(1, cast(2, 'spore', at(2)))
+  const struck = goesOff('spore', 2)
+  const planted = statusesOf(game.at(struck), 2, 'spore')[0]
+  assert.ok(planted, 'a spore is planted')
+  const before = healedBy(game, struck)
+  const over = planted.endTick + GAME_BURN_PULSE_TICKS
+  const pulses = game.events('damage', over, (event) => event.ownerId === 1 && event.targetId === 2 && event.overTime === true)
+  const heals = pulseHealsOf(game, over)
+  assert.ok(pulseHeal > 0, 'it heals at all')
+  assert.ok(heals.length > 1 && heals.every(({ event }) => event.amount === pulseHeal), 'a little on each pulse')
+  assert.deepEqual(heals.map(({ tick }) => tick), pulses.map(({ tick }) => tick), 'on the pulses it drains, and no others')
+  assert.ok(pulseHeal * heals.length < burstHeal, 'and all of it is small next to a burst')
+  assert.equal(healsOf(game, 1, over).length, 0, 'it ran out without bursting')
+  assert.equal(abilityHitsOn(game, 2, over).length, 1, 'and did nothing more to the enemy than the strike that planted it')
+  assert.equal(healedBy(game, over) - before, pulseHeal * heals.length, 'all the Ent got back is the pulses')
+})
+
+test('a spore bursts when the enemy carrying it dies, healing the Ent as a burst does, once', () => {
+  // It is planted, the enemy crumbles to its last point, and the spore's next pulse kills it.
+  const game = sappedGame()
+  game.order(1, cast(2, 'spore', at(2)))
+  const struck = goesOff('spore', 2)
+  game.order(2, cast(struck + 1, 't-ent-crumble', { mode: 'none' }, ahead(TOUCHING)))
+  const died = game.firstTick(struck + 1, struck + 2 * GAME_BURN_PULSE_TICKS, (frame) => frame.get(2)?.isDead() === true)
+  assert.ok(died, 'the spore kills it')
+  const pulsed = pulseHealsOf(game, died).filter(({ tick }) => tick === died).length
+  assert.equal(healedBy(game, died) - healedBy(game, died - 1), burstHeal + pulseHeal * pulsed, 'the Ent gets the burst as it dies, besides the pulse that killed it')
+  assert.equal(healsOf(game, 1, died).length, 0, 'which no ability did')
+})
+
+test('a spore planted by the blow that kills, or burst by the blow that kills, does not burst again as the enemy dies', () => {
+  // The enemy is at its last point when Spore strikes it: the strike kills it, and the spore it would have planted has nothing to give.
+  const planted = sappedGame()
+  planted.order(2, cast(2, 't-ent-crumble', { mode: 'none' }, ahead(TOUCHING)))
+  planted.order(1, cast(3, 'spore', at(2)))
+  const struck = goesOff('spore', 3)
+  assert.equal(planted.at(struck).get(2)?.isDead(), true, 'the strike kills it')
+  assert.equal(healedBy(planted, struck) - healedBy(planted, struck - 1), 0, 'and the Ent gets nothing for a spore it had only just planted')
+
+  // A spore that the next Spore bursts as it kills: the burst's heal, and no second one for the death (nor for the fresh spore that strike plants).
+  const burst = sappedGame()
+  burst.order(1, cast(2, 'spore', at(2)))
+  const sporeAt = goesOff('spore', 2)
+  const cooldown = abilityDefs.get('spore')?.cooldownTicks ?? 0
+  const ready = burst.firstTick(sporeAt, sporeAt + cooldown + 1, (frame) => frame.get(1)?.getAbilityCooldown('spore').ready === true)
+  assert.ok(ready, 'Spore is ready again')
+  const strikes = goesOff('spore', ready + 2)
+  // It crumbles the tick before the strike lands, so no pulse can kill it first.
+  burst.order(2, cast(strikes - 1, 't-ent-crumble', { mode: 'none' }, ahead(TOUCHING)))
+  burst.order(1, cast(ready + 2, 'spore', at(2)))
+  assert.ok(statusesOf(burst.at(strikes - 1), 2, 'spore').length > 0, 'it still carries the first spore')
+  assert.equal(burst.at(strikes).get(2)?.isDead(), true, 'the strike kills it')
+  assert.ok(healsOf(burst, 1, strikes).some(({ tick }) => tick === strikes), 'bursting the spore it carried')
+  const given = burst.events('heal', strikes, (event) => event.unitId === 1).filter(({ tick }) => tick === strikes).reduce((sum, { event }) => sum + event.amount, 0)
+  assert.equal(healedBy(burst, strikes) - healedBy(burst, strikes - 1), given, 'the Ent gets what the heals of that tick gave, and nothing for the death')
+
+  // The same with Root Burst, which plants nothing after it: the spore it bursts is the one the enemy dies carrying. When its roots come up is found from a game played the
+  // same way without the crumbling, so the enemy can crumble the tick before.
+  const rootsUp = (game: Game, cast: number): number | undefined =>
+    game.firstTick(cast, cast + 3 * GAME_TPS, (frame) => statusesOf(frame, 2, 'slow').length > 0)
+  const plan = (game: Game): number => {
+    game.order(1, cast(2, 'spore', at(2)))
+    const cast2 = goesOff('spore', 2) + 1
+    game.order(1, cast(cast2, 'rootburst', point(ahead(TOUCHING))))
+    return cast2
+  }
+  const dry = sappedGame()
+  const landed = rootsUp(dry, plan(dry))
+  assert.ok(landed, 'the roots come up')
+  const rooted = sappedGame()
+  plan(rooted)
+  rooted.order(2, cast(landed - 1, 't-ent-crumble', { mode: 'none' }, ahead(TOUCHING)))
+  assert.ok(statusesOf(rooted.at(landed - 1), 2, 'spore').length > 0 && rooted.at(landed - 1).get(2)?.isDead() === false, 'it carries the spore at its last point')
+  assert.equal(rooted.at(landed).get(2)?.isDead(), true, 'the roots kill it')
+  const healedThen = rooted.events('heal', landed, (event) => event.unitId === 1).filter(({ tick }) => tick === landed).reduce((sum, { event }) => sum + event.amount, 0)
+  assert.ok(healsOf(rooted, 1, landed).some(({ tick, event }) => tick === landed && event.amount === burstHeal), 'bursting the spore')
+  assert.equal(healedBy(rooted, landed) - healedBy(rooted, landed - 1), healedThen, 'and nothing more for the death')
 })
 
 // ---------------------------------------------------------------------------- On the page

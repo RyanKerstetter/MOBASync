@@ -8,6 +8,7 @@ import {
   GAME_COLLISION_STIFFNESS,
   GAME_MONSTER_TEAM,
   GAME_RESPAWN_TICKS,
+  GAME_RESPAWN_TICKS_PER_LEVEL,
   GAME_SNAPSHOT_HISTORY_TICKS,
   GAME_STRUCTURE_EJECT_DEPTH,
   GAME_TPS,
@@ -21,6 +22,7 @@ import {
   mark,
   runEffects,
   self,
+  touchesStructures,
   type EffectSource,
   type GameEvent,
   type SimContext,
@@ -48,7 +50,8 @@ import { inOwnShop, mayShop, shopHealAmount, shopHealsOn, type ShopZone } from '
 import { hastedCooldownTicks, statMultiplier, walkingSpeed, withStatBuffs, type ChampionStats } from './stats.js'
 import { Terrain } from './terrain.js'
 import { shieldedStructures, type StructureRef } from './structures.js'
-import { chooseTurretTarget, turrets, type Turret, type TurretPrey } from './turrets.js'
+import { chooseTurretTarget, getStructureBody, type Turret, type TurretPrey } from './turrets.js'
+import { HEALING_ZONE_SHIELD_KEY, strongestZone, zoneHealPerPulse, zoneHealsOn, zoneReaches, type HealingZoneDef } from './healing-zones.js'
 import type {
   AiState,
   BuyOrder,
@@ -157,14 +160,21 @@ export class SimCharacter {
   }
 
   // What it is, if it is a turret: a structure the map puts on the ground, which shoots the enemy players in its range and does not move (see
-  // turrets.ts). The core of a base is one too, the last of them: its `core` says so.
+  // turrets.ts). The core of a base is one too, the last of them: its `core` says so. So is a healing zone, which heals and shields its team instead of
+  // shooting: its `zone` says so (see healing-zones.ts).
   get turret(): Turret | undefined {
-    const turret = turrets.get(this.champion.id)
+    const turret = getStructureBody(this.champion.id)
     return turret?.champion === this.champion ? turret : undefined
   }
 
-  // Whether it is a structure, a turret or a core, which is the same thing: it stands where it was put, shoots the enemy players in its range on its own,
-  // is solid, is hurt by attacks only and never by an ability, takes no status, and is destroyed for good (see structures.ts).
+  // What it does for its team, if it is a healing zone.
+  get zone(): Readonly<HealingZoneDef> | undefined {
+    return this.turret?.zone
+  }
+
+  // Whether it is a structure, a turret, a healing zone or a core, which is the same thing: it stands where it was put, does what it does on its own (a turret
+  // shoots the enemy players in its range, a zone heals its own), is solid, is hurt by attacks only and never by an ability, takes no status, and is destroyed for
+  // good (see structures.ts).
   get structure(): boolean {
     return this.turret !== undefined
   }
@@ -605,15 +615,25 @@ export class Simulator {
     return this.setup
   }
 
-  // How many ticks a dead champion stays dead, which the game's rules can set.
+  // How many ticks a dead level 1 champion stays dead, which the game's rules can set.
   get respawnTicks(): number {
     return this.setup.respawnTicks ?? GAME_RESPAWN_TICKS
+  }
+
+  // How many more ticks it stays dead for each level it has above the first, which the game's rules can set too.
+  get respawnTicksPerLevel(): number {
+    return this.setup.respawnTicksPerLevel ?? GAME_RESPAWN_TICKS_PER_LEVEL
+  }
+
+  // Whether the map's turrets and cores are healing zones in this game (see healing-zones.ts): then the shops do not heal, and the zones do.
+  get hasHealingZones(): boolean {
+    return this.setup.healingZones === true
   }
 
   // How long the character stays dead for, as a frame has it: the respawn time of the game, and more for each level it is above the first (`respawnTicksAt`). A monster's
   // is its own (`AiProfileDef.respawnTicks`), and a structure does not come back.
   respawnTicksFor(characterId: number, frame: GameTickSnapshot): number {
-    return respawnTicksAt(this.respawnTicks, levelOfState(frame.getCharacterState(characterId)))
+    return respawnTicksAt(this.respawnTicks, levelOfState(frame.getCharacterState(characterId)), this.respawnTicksPerLevel)
   }
 
   // With no terrain given, the game is on the plain arena with no walls, and with no mode it is team
@@ -683,7 +703,8 @@ export class Simulator {
   }
 
   // Puts a turret in the game where it stands for good, on a team: an enemy of every other team, monsters too. It is solid and does
-  // not move, and when it is destroyed it stays destroyed. The core of a base is put in the same way, as the turret of the core tier (`getCore`).
+  // not move, and when it is destroyed it stays destroyed. The core of a base is put in the same way, as the turret of the core tier (`getCore`), and so is a
+  // healing zone (`getHealingZone`, `getCoreZone`).
   addTurret(id: number, turret: Turret, position: Vector2, team: number): SimCharacter {
     return this.addCharacter(id, position, turret.champion, team)
   }
@@ -1069,7 +1090,7 @@ export class Simulator {
       // does not either: it is a player of a team that is running out of them. In arena no player comes back during a round: they all do when it is over (below).
       const wait = character.monster
         ? character.monster.ai.respawnTicks
-        : character.structure || this.setup.kind === 'arena' ? undefined : respawnTicksAt(this.respawnTicks, levelOfState(prior))
+        : character.structure || this.setup.kind === 'arena' ? undefined : respawnTicksAt(this.respawnTicks, levelOfState(prior), this.respawnTicksPerLevel)
       if (wait !== undefined && state.health?.deathTick !== undefined && tick === state.health.deathTick + wait) {
         const standing = (id: number): boolean => previous.getCharacterState(id)?.health?.deathTick === undefined
         // A monster comes back a level higher, in a game with an economy (the levels of the game are that).
@@ -1132,14 +1153,25 @@ export class Simulator {
             amount: status.amount,
             overTime: true,
           })
+          // One that feeds whoever put it on (the Ent's spore) gives them a little back on each pulse, if they are alive (a heal does nothing to the dead).
+          if (status.pulseHeal !== undefined && status.pulseHeal > 0 && this.characters.has(status.ownerId)) {
+            context.emitEvent({
+              type: 'heal',
+              id: `${status.id}:pulse-heal:t${tick}`,
+              rootId: status.rootId,
+              ownerId: status.ownerId,
+              unitId: status.ownerId,
+              amount: status.pulseHeal,
+            })
+          }
         }
       }
     }
 
     // A shop is a healing area: on its heal ticks, every living player standing in a shop of its own team gets a share of its maximum health back (see
     // `shopHealAmount`). It is a heal like any other (which a structure never takes, and which stops at the maximum), for the player itself, so it is
-    // worked out from where everyone stands on this tick, the same on every peer.
-    if (this.shops.length > 0 && shopHealsOn(tick)) {
+    // worked out from where everyone stands on this tick, the same on every peer. In a game with healing zones the shops do not heal: the zones do (below).
+    if (this.shops.length > 0 && !this.hasHealingZones && shopHealsOn(tick)) {
       for (const character of characters) {
         const state = states.get(character.id)
         if (!state || !state.health || character.isNpc || !isAlive(state) || state.health.hp >= state.health.maxHp) continue
@@ -1154,6 +1186,8 @@ export class Simulator {
         })
       }
     }
+
+    this.tendHealingZones(context, characters, states, tick)
 
     // What a dash touched on its way this tick, and whether it ended having touched no one.
     this.resolveDashes(context, characters, states, dashSteps, tick)
@@ -1352,10 +1386,67 @@ export class Simulator {
     return issued
   }
 
+  // What the healing zones do on a tick (see healing-zones.ts): every living player of a zone's team whose middle is in a standing zone of its team (in the one that heals
+  // the most, if it is in several) is healed the zone's flat amount on the pulse ticks, and is shielded if its shield timer is not running: the moment it walks in, and then
+  // every `shieldEveryTicks` after the last while it stays. The timer is a marker on the player (`HEALING_ZONE_SHIELD_KEY`), and the shield a status of one id for each
+  // player, so a new one takes the old one's place. It is all worked out from where everyone stands on this tick and written like any effect's, so every peer does the same.
+  private tendHealingZones(
+    context: TickContext,
+    characters: readonly SimCharacter[],
+    states: ReadonlyMap<number, GameFrameCharacter>,
+    tick: number,
+  ): void {
+    const zones: Array<{ id: number; team: number; at: Vector2; zone: HealingZoneDef }> = []
+    for (const character of characters) {
+      const zone = character.zone
+      const state = states.get(character.id)
+      if (zone && state && isAlive(state)) zones.push({ id: character.id, team: character.team, at: state.position, zone })
+    }
+    if (zones.length === 0) return
+    const heals = zoneHealsOn(tick)
+    for (const character of characters) {
+      const state = states.get(character.id)
+      if (character.isNpc || !state || !isAlive(state) || !state.health) continue
+      const tending = strongestZone(zones.filter((zone) => zone.team === character.team && zoneReaches(zone.at, zone.zone, state.position)))
+      if (!tending) continue
+      const amount = zoneHealPerPulse(tending.zone)
+      if (heals && amount > 0 && state.health.hp < state.health.maxHp) {
+        context.emitEvent({
+          type: 'heal',
+          id: `zone:heal:u${character.id}:t${tick}`,
+          rootId: `zone:heal:t${tick}`,
+          ownerId: tending.id,
+          unitId: character.id,
+          amount,
+        })
+      }
+      if (tending.zone.shield > 0 && !state.markers.some((marker) => marker.key === HEALING_ZONE_SHIELD_KEY)) {
+        const rootId = `zone:shield:u${character.id}:t${tick}`
+        context.addStatus(character.id, {
+          id: `zone:shield:u${character.id}`,
+          kind: 'shield',
+          rootId,
+          ownerId: tending.id,
+          startTick: tick,
+          endTick: tick + tending.zone.shieldTicks,
+          amount: tending.zone.shield,
+        })
+        context.addMarker(character.id, {
+          id: `zone:shield-timer:u${character.id}`,
+          key: HEALING_ZONE_SHIELD_KEY,
+          rootId,
+          ownerId: character.id,
+          startTick: tick,
+          endTick: tick + tending.zone.shieldEveryTicks,
+        })
+      }
+    }
+  }
+
   // Every turret that is alive shoots (see `chooseTurretTarget`), the core of a base too: the enemy player it is
   // shooting while they are alive and in its range, and else the nearest in its range. It gives the same kind of order a player does, an
   // attack, which makes the turret's attack lock do the shooting, and it drops its target the tick they leave its range, since it cannot
-  // go after them. A turret never targets a monster or another structure.
+  // go after them. A turret never targets a monster or another structure. A healing zone never shoots at all.
   private thinkTurrets(
     characters: readonly SimCharacter[],
     states: ReadonlyMap<number, GameFrameCharacter>,
@@ -1371,7 +1462,7 @@ export class Simulator {
     }
     for (const character of characters) {
       const state = states.get(character.id)
-      if (!character.structure || !state || !isAlive(state)) continue
+      if (!character.structure || character.zone || !state || !isAlive(state)) continue
       const target = chooseTurretTarget({
         team: character.team,
         position: state.position,
@@ -1536,6 +1627,8 @@ export class Simulator {
           || !areEnemies(character, enemy)
           || !isAlive(enemyState)
           || contact.hitIds.includes(enemy.id)
+          // A dash goes through a structure's reach as if it were not there: touching one is no hit, and does not set off what a hit does.
+          || (enemy.structure && !touchesStructures(contact.sourceId))
           || distanceToSegment(enemyState.position, from, state.position)
             > character.champion.radius + enemy.champion.radius
         ) continue
@@ -1967,6 +2060,8 @@ export class Simulator {
               || !areEnemies(owner, unit)
               || !isAlive(state)
               || entity.hitIds.includes(unit.id)
+              // An ability's shot or field goes through turrets, healing zones and cores: it is not stopped by one and does not hit one. Only an auto attack's shot can.
+              || (unit.structure && !touchesStructures(entity.id))
               // A chaser passes through everyone but its target, unless it pierces on the way home.
               || (def.homing && !def.pierce && unit.id !== entity.targetId)
             ) return []
@@ -2339,7 +2434,7 @@ export class Simulator {
       } else if (event.type === 'start-cooldown') {
         const state = states.get(event.unitId)
         const def = abilityDefs.get(event.abilityId)
-        if (state && def) state.cooldowns[event.abilityId] = tick + this.cooldownOf(def, event.unitId, state)
+        if (state && def) state.cooldowns[event.abilityId] = tick + (event.ticks ?? this.cooldownOf(def, event.unitId, state))
       } else if (event.type === 'refund-cooldown') {
         const state = states.get(event.unitId)
         const def = abilityDefs.get(event.abilityId)
@@ -2368,6 +2463,13 @@ export class Simulator {
       const lastHitId = killers.get(state.characterId)
       const credited = creditKill(hurtBy, (id) => this.characters.get(id)?.team, lastHitId)
       const killerId = credited.killerId ?? lastHitId
+      // What it carried that feeds whoever put it on as it dies (the Ent's spore bursts) gives them that now, if they are still standing. Not one put on it on this very tick
+      // (the blow that planted it killed it), and not one that has burst on this tick already: a burst takes what it had to give with it.
+      for (const status of state.statuses) {
+        if (status.deathHeal === undefined || status.startTick >= tick) continue
+        const owner = states.get(status.ownerId)
+        if (owner && !isStructure(status.ownerId)) healCharacter(owner, status.deathHeal)
+      }
       killCharacter(state, tick)
       delete state.credit
       // A champion that dies lets go of what it had linked to itself: its markers of the key it names come off every unit, so the link does not come back with it when it respawns.
@@ -2419,6 +2521,16 @@ export class Simulator {
       const killerState = states.get(death.killerId)
       if (!killer?.champion.resetsCooldownsOnKill || !killerState || !isAlive(killerState) || !this.characters.get(death.victimId)?.player) continue
       for (const abilityId of killer.champion.castableAbilities()) delete killerState.cooldowns[abilityId]
+    }
+    // A player who kills a monster is healed by a share of their own maximum health (`Monster.healOnKill`), on the tick of the kill and in the frame like what the kill pays, so a late
+    // order that undoes the kill takes the heal back. It is the player the death names, and the maximum is the one they have now, after any level the kill gave them. One who has died
+    // on the same tick, or is not a player, is healed by nothing.
+    for (const death of deaths) {
+      const monster = this.characters.get(death.victimId)?.monster
+      const killer = death.killerId === undefined ? undefined : this.characters.get(death.killerId)
+      const killerState = death.killerId === undefined ? undefined : states.get(death.killerId)
+      if (!monster || !killer || killer.isNpc || !killerState?.health) continue
+      healCharacter(killerState, Math.round(killerState.health.maxHp * monster.healOnKill))
     }
     // A blink lands after the tick's damage and pushes but before anything else can move the unit,
     // so the next frame has it at the point.

@@ -38,6 +38,7 @@ import {
   onEach,
   ownEntity,
   popMarkers,
+  prolong,
   refundCooldown,
   removeEntities,
   resetAutoTimer,
@@ -1666,9 +1667,9 @@ ability({
 // put none on. A structure takes neither.
 export const BURN_STACK_KEY = 'ember'
 export const BURN_MAX_STACKS = 3
-export const BURN_STACK_TICKS = seconds(4)
-export const BURN_DPS_PER_STACK = 12
-export const BURN_SCALING = { arcane: 0.06 } satisfies Scaling
+export const BURN_STACK_TICKS = seconds(6)
+export const BURN_DPS_PER_STACK = 10
+export const BURN_SCALING = { arcane: 0.05 } satisfies Scaling
 const burnStacksOnHit = stacks(BURN_STACK_KEY, subject())
 // How many stacks the unit hit will carry once `count` more are put on it: the ones on it now are read before this tick's writes, so a hit that comes after another on the same
 // tick does not see the other's.
@@ -1687,15 +1688,19 @@ const ignite = (count: number): Effect => {
 // Fire Mage's Fireball: a shot that blows up on the first enemy it hits. That enemy takes the shot's damage and a stack, and then the blast, which goes off where the shot was a moment
 // later (its fuse is two ticks, so that the stack the shot put on is there to be counted) and hurts everyone caught in it and puts a stack on each. So the enemy hit straight on takes two
 // stacks and one caught only by the blast takes one. While it flies the key is Detonate, which sets the blast off where the shot is and takes the shot away: with no shot before it, the
-// blast is one stack for everyone, the enemy it would have hit too. Every hit, the shot's and the blast's, slows what it hits, or stuns it instead if that brings it to full stacks. A shot
+// blast is one stack for everyone, the enemy it would have hit too. (Not at once: for `FIREBALL_DETONATE_DELAY_TICKS` after the shot leaves the key does nothing, so that pressing it twice in a row does not set the shot off.) Every hit, the shot's and the blast's, slows what it hits, or stuns it instead if that brings it to full stacks. A shot
 // that hits nothing and is not set off blows up at the end of its flight, the same way (or where it meets the edge of the arena, if that comes first).
 export const FIREBALL_RANGE = 560
-const FIREBALL_SPEED = 750
-export const FIREBALL_DAMAGE = 60
-export const FIREBALL_SCALING = { arcane: 0.5 } satisfies Scaling
+export const FIREBALL_SPEED = 750
+// How long after the fireball leaves the key stays the fireball's, and Detonate cannot be cast: so that pressing the key twice in a row, or mashing it, does not set the shot off the moment it
+// is thrown. It is put on Detonate as the shot goes (see the fireball's `apply`), for exactly this long whatever the Fire Mage's haste, since how fast a finger double-taps does not change with it.
+// It is the tuning knob: longer is more room to press twice, and less of the flight in which the shot can be set off (a shot is out for `FIREBALL_RANGE / FIREBALL_SPEED` seconds).
+export const FIREBALL_DETONATE_DELAY_TICKS = seconds(0.3)
+export const FIREBALL_DAMAGE = 50
+export const FIREBALL_SCALING = { arcane: 0.35 } satisfies Scaling
 export const FIREBALL_BLAST_RADIUS = 85
-export const FIREBALL_BLAST_DAMAGE = 70
-export const FIREBALL_BLAST_SCALING = { arcane: 0.5 } satisfies Scaling
+export const FIREBALL_BLAST_DAMAGE = 55
+export const FIREBALL_BLAST_SCALING = { arcane: 0.55 } satisfies Scaling
 export const FIREBALL_SLOW = 0.35
 export const FIREBALL_SLOW_TICKS = seconds(1.5)
 export const FIREBALL_STUN_TICKS = seconds(1)
@@ -1749,9 +1754,10 @@ ability({
   windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(8),
   indicator: { width: fireball.radius * 2 },
-  // While the fireball flies, this key sets it off instead.
+  // While the fireball flies, this key sets it off instead, once `FIREBALL_DETONATE_DELAY_TICKS` have gone: until then the key does nothing, so a second press on the heels of the first
+  // is not the shot going off the moment it leaves.
   recast: 'detonate',
-  apply: [spawnEntity(fireball)],
+  apply: [spawnEntity(fireball), startCooldown('detonate', self(), FIREBALL_DETONATE_DELAY_TICKS)],
 })
 ability({
   id: 'detonate',
@@ -1772,8 +1778,8 @@ ability({
 // It hits whoever is inside as the warning runs out, and not whoever was when it was laid, so it can be walked out of.
 export const TORNADO_RANGE = 450
 export const TORNADO_RADIUS = 80
-export const TORNADO_DELAY_TICKS = seconds(0.6)
-export const TORNADO_DAMAGE = 70
+export const TORNADO_DELAY_TICKS = seconds(0.8)
+export const TORNADO_DAMAGE = 60
 export const TORNADO_SCALING = { arcane: 0.6 } satisfies Scaling
 export const TORNADO_KNOCKUP_TICKS = seconds(0.75)
 // The tornado itself, for as long as it holds what it caught in the air; its damage is dealt by the warning as it runs out.
@@ -1816,9 +1822,9 @@ ability({
 export const SCORCH_RANGE = 480
 const SCORCH_SPEED = 600
 export const SCORCH_HALF_WIDTH = 35
-export const SCORCH_DAMAGE = 100
-export const SCORCH_SCALING = { arcane: 0.7 } satisfies Scaling
-export const SCORCH_BURN = 25
+export const SCORCH_DAMAGE = 70
+export const SCORCH_SCALING = { arcane: 0.5 } satisfies Scaling
+export const SCORCH_BURN = 20
 export const SCORCH_BURN_SCALING = { arcane: 0.2 } satisfies Scaling
 export const SCORCH_GROUND_TICKS = seconds(3)
 // How long the ground's burn goes on after an enemy steps off it.
@@ -1865,7 +1871,11 @@ const BLEED_NAME = 'rend'
 export const BLEED_DPS = 4
 export const BLEED_SCALING = { attackDamage: 0.04 } satisfies Scaling
 // A little longer than Rend's cooldown, so the next Rend can find the bleed the last one left.
-export const BLEED_TICKS = seconds(7)
+export const BLEED_TICKS = seconds(4)
+// Aurel's autos keep his bleed going: one that lands on an enemy bleeding from him sets the bleed back to the whole of `BLEED_TICKS` from then, as long as Rend first made it last
+// (its damage is left as it was). An enemy that is not bleeding from him is not made to: only Rend starts a bleed. (The effect is in his autos, in champions.ts.)
+export const refreshBleed: Effect<SimContext> = prolong(BLEED_NAME, BLEED_TICKS, BLEED_TICKS, subject())
+
 // Whether the unit a cast is aimed at is bleeding, as it stood before this tick's writes: so a Rend's own bleed does not count for itself.
 const targetBleeding = (sim: SimReader, src: EffectSource): boolean =>
   src.aim?.mode === 'unit' && sim.statusesOn(src.aim.unitId).some((status) => status.kind === 'bleed')
@@ -1926,17 +1936,20 @@ ability({
   ],
 })
 
-// Aurel's Bloodrush: a dash onto an enemy, which ends beside it, and slows it. It reaches farther to an enemy that is bleeding (`rangeAgainst`). Aimed at one out of reach, he walks
-// up to it and dashes once it is in reach, as for any ability aimed at an enemy. The slow starts as he goes, so it is still on when he gets there.
+// Aurel's Bloodrush: a dash onto an enemy, which ends beside it, and hurts and slows it. It reaches farther to an enemy that is bleeding (`rangeAgainst`). Aimed at one out of reach, he
+// walks up to it and dashes once it is in reach, as for any ability aimed at an enemy. The hit and the slow land on the enemy as he goes (so the slow is still on when he gets there), and
+// on that enemy alone: not on whoever he passes on the way.
 export const BLOODRUSH_RANGE = 240
 export const BLOODRUSH_BLEEDING_RANGE = 400
 const BLOODRUSH_SPEED = 1100
+export const BLOODRUSH_DAMAGE = 60
+export const BLOODRUSH_SCALING = { attackDamage: 0.6 } satisfies Scaling
 export const BLOODRUSH_SLOW = 0.35
 export const BLOODRUSH_SLOW_TICKS = seconds(2)
 ability({
   id: 'bloodrush',
   name: 'Bloodrush',
-  description: 'Dashes to an enemy and slows it. Reaches farther to a bleeding enemy.',
+  description: 'Dashes to an enemy, hurting and slowing it. Reaches farther to a bleeding enemy.',
   targeting: 'unit',
   range: BLOODRUSH_RANGE,
   rangeAgainst: { status: 'bleed', range: BLOODRUSH_BLEEDING_RANGE },
@@ -1945,6 +1958,7 @@ ability({
   movement: true,
   apply: [
     dash(BLOODRUSH_SPEED, Infinity, self(), { toward: besideTarget(), through: true }),
+    damage(scaled(BLOODRUSH_DAMAGE, BLOODRUSH_SCALING), targetUnit()),
     slow(BLOODRUSH_SLOW, BLOODRUSH_SLOW_TICKS, targetUnit()),
   ],
 })
@@ -1964,12 +1978,16 @@ export const entangle: Effect<SimContext> = when<SimContext>(
 )
 
 // The Ent's spore: Spore plants it on the enemy it strikes, a damage over time (`spore`) that is one status of his on that enemy (named `SPORE_NAME`), so a new one takes the old one's place,
-// for `SPORE_TICKS`. When one of his abilities (Root Burst, Grove or Spore) hits an enemy that carries his spore, the spore **bursts**: the enemy takes bonus damage, he is healed a
-// good deal, and the spore is gone (from the next tick). Spore plants a fresh one after it bursts the old, so it is ready to burst again.
+// for `SPORE_TICKS`. While it lasts it heals him a little on every pulse (`SPORE_HEAL_PER_SECOND`, small next to a burst). When one of his abilities (Root Burst, Grove or Spore) hits an
+// enemy that carries his spore, the spore **bursts**: the enemy takes bonus damage, he is healed a good deal, and the spore is gone (from the next tick). Spore plants a fresh one after it
+// bursts the old, so it is ready to burst again. It also bursts if the enemy carrying it dies (he is healed as by a burst, worked out when it was planted), unless it was planted or burst
+// on that same tick. A spore that runs out of time does not burst: it is just gone.
 const SPORE_NAME = 'spore'
 export const SPORE_TICKS = seconds(5)
 export const SPORE_DPS = 10
 export const SPORE_DPS_SCALING = { arcane: 0.10 } satisfies Scaling
+export const SPORE_HEAL_PER_SECOND = 4
+export const SPORE_HEAL_PER_SECOND_SCALING = { arcane: 0.04 } satisfies Scaling
 export const SPORE_POP_DAMAGE = 70
 export const SPORE_POP_SCALING = { arcane: 0.5 } satisfies Scaling
 export const SPORE_POP_HEAL = 70
@@ -1977,10 +1995,12 @@ export const SPORE_POP_HEAL_SCALING = { arcane: 0.4, maxHealth: 0.02 } satisfies
 // The spore of his on the unit hit, if it carries one, as it stood before this tick's writes.
 const sporeOnSubject = (sim: SimReader, src: EffectSource) =>
   src.subject === null ? undefined : sim.statusesOn(src.subject).find((status) => status.kind === 'spore' && status.ownerId === src.ownerId)
-// Takes his spore off the unit hit: it is over from the next tick.
+// Takes his spore off the unit hit: it is over from the next tick. It has burst, so it has nothing left to burst with if the unit dies on this tick.
 const endSpore: Effect<SimContext> = (sim, src) => {
   const planted = sporeOnSubject(sim, src)
-  if (planted && src.subject !== null) sim.addStatus(src.subject, { ...planted, endTick: Math.min(planted.endTick, src.tick + 1) })
+  if (!planted || src.subject === null) return
+  const { deathHeal: _spent, ...burst } = planted
+  sim.addStatus(src.subject, { ...burst, endTick: Math.min(planted.endTick, src.tick + 1) })
 }
 // Run for each enemy one of his abilities hits, as the subject.
 const burstSpore: Effect<SimContext> = when<SimContext>(
@@ -1991,7 +2011,7 @@ const burstSpore: Effect<SimContext> = when<SimContext>(
 // The Ent's Root Burst: a small circle at a point, out of which roots burst up after a moment's warning, hurting and greatly slowing every enemy in it then (and bursting its spore).
 // It hits whoever is inside as the warning runs out, so it can be stepped out of, but the warning is short.
 export const ROOTBURST_RANGE = 450
-export const ROOTBURST_RADIUS = 60
+export const ROOTBURST_RADIUS = 50
 export const ROOTBURST_DELAY_TICKS = seconds(0.35)
 export const ROOTBURST_DAMAGE = 70
 export const ROOTBURST_SCALING = { arcane: 0.6 } satisfies Scaling
@@ -2036,8 +2056,8 @@ ability({
 // The Ent's Grove: a large circle at a point, which a grove grows out of after a long warning. Every ally in it then (him too) is healed, and every enemy in it is hurt and rooted (and has
 // its spore burst). Like Root Burst it hits whoever is inside as the warning runs out, and the warning is long, so it is for where a fight will be and not for where an enemy is.
 export const GROVE_RANGE = 500
-export const GROVE_RADIUS = 140
-export const GROVE_DELAY_TICKS = seconds(1)
+export const GROVE_RADIUS = 120
+export const GROVE_DELAY_TICKS = seconds(2.0)
 export const GROVE_HEAL = 60
 export const GROVE_HEAL_SCALING = { arcane: 0.5 } satisfies Scaling
 export const GROVE_DAMAGE = 80
@@ -2089,7 +2109,7 @@ export const SPORE_SCALING = { arcane: 0.5 } satisfies Scaling
 ability({
   id: 'spore',
   name: 'Spore',
-  description: 'Strikes a nearby enemy and plants a spore that drains its health. Hitting a spored enemy with an ability bursts it for damage and a big heal.',
+  description: 'Strikes a nearby enemy and plants a spore that drains it to heal you. Hitting it with an ability, or the enemy dying, bursts it for a big heal.',
   targeting: 'unit',
   range: SPORE_RANGE,
   windUpTicks: WINDUP_TICKS.default,
@@ -2099,7 +2119,11 @@ ability({
     damage(scaled(SPORE_DAMAGE, SPORE_SCALING), targetUnit()),
     // The old spore bursts before the new one is planted: both are the same status, and the new one, written after, is the one that stays.
     onEach(targetUnit(), [burstSpore]),
-    spore(scaled(SPORE_DPS, SPORE_DPS_SCALING), SPORE_TICKS, targetUnit(), { named: SPORE_NAME }),
+    spore(scaled(SPORE_DPS, SPORE_DPS_SCALING), SPORE_TICKS, targetUnit(), {
+      named: SPORE_NAME,
+      ownerHealPerSecond: scaled(SPORE_HEAL_PER_SECOND, SPORE_HEAL_PER_SECOND_SCALING),
+      ownerHealOnDeath: scaled(SPORE_POP_HEAL, SPORE_POP_HEAL_SCALING),
+    }),
   ],
 })
 

@@ -30,9 +30,11 @@ import {
   FIREBALL_BLAST_RADIUS,
   FIREBALL_BLAST_SCALING,
   FIREBALL_DAMAGE,
+  FIREBALL_DETONATE_DELAY_TICKS,
   FIREBALL_RANGE,
   FIREBALL_SCALING,
   FIREBALL_SLOW,
+  FIREBALL_SPEED,
   FIREBALL_STUN_TICKS,
   SCORCH_BURN,
   SCORCH_BURN_SCALING,
@@ -135,6 +137,10 @@ const blastHit = FIREBALL_BLAST_DAMAGE + (FIREBALL_BLAST_SCALING.arcane ?? 0) * 
 
 // Where an enemy stands for a shot or a wave to reach it: half way along the shorter of the two.
 const REACH = Math.min(FIREBALL_RANGE, SCORCH_RANGE) / 2
+// Where an enemy stands for the fireball to still be flying when Detonate unlocks (`FIREBALL_DETONATE_DELAY_TICKS` after it leaves), and to hit only a few ticks after: the distance
+// it covers in the delay and those ticks, and what it takes for the two bodies to touch (the shot is not wider than the mage, so two of his is more than enough).
+const LATE_REACH = FIREBALL_SPEED * (FIREBALL_DETONATE_DELAY_TICKS + 5) / GAME_TPS + 2 * R
+assert.ok(LATE_REACH < FIREBALL_RANGE, 'there is room in the flight to be set off after the delay and hit after that')
 // Long enough for anything a cast leaves behind to have played out.
 const WHILE = 5 * GAME_TPS
 // Once nothing he sent out is left in the world, and the enemy carries stacks: all of a cast has played out on it.
@@ -197,8 +203,8 @@ test('a fireball that brings an enemy to full stacks stuns it instead of slowing
 })
 
 test('while the fireball flies its key is Detonate, which blows it up where it is, one stack for everyone caught, and takes it away', () => {
-  // Off the shot's path, its body clear of it, half way along the flight: the shot passes it by, and the blast reaches it from the path.
-  const reach = FIREBALL_RANGE / 2
+  // Off the shot's path, its body clear of it, half way along the flight (or farther, if Detonate is not ready by then): the shot passes it by, and the blast reaches it from the path.
+  const reach = Math.max(FIREBALL_RANGE / 2, LATE_REACH)
   const game = scene([ahead(reach, Math.max(FIREBALL_BLAST_RADIUS, 2 * R + 2))])
   const def = abilityDefs.get('fireball')
   assert.ok(def)
@@ -228,13 +234,89 @@ test('while the fireball flies its key is Detonate, which blows it up where it i
   assert.equal(frame.get(1)?.getAbilityCooldown('fireball').ready, false, 'still on its cooldown')
 })
 
+test('pressing the key again right after the throw does not set the fireball off: Detonate is not ready until a moment after it leaves', () => {
+  // An enemy far enough off for the shot to hit it after the delay, so a Detonate that did go off would show.
+  const game = scene([ahead(LATE_REACH)])
+  game.order(1, cast(1, 'fireball', east))
+  const launched = goesOff('fireball', 1)
+  // The key pressed again on the next tick, and again on the last tick before the delay is up: nothing happens either time.
+  game.order(1, cast(launched + 1, 'detonate', none, HOME))
+  game.order(1, cast(launched + FIREBALL_DETONATE_DELAY_TICKS - 1, 'detonate', none, HOME))
+
+  const out = (frame: GameTickSnapshot): boolean => frame.getEntities().some((entity) => entity.defId === 'fireball' && entity.ownerId === 1)
+  assert.equal(game.at(launched - 1).get(1)?.getAbilityCooldown('detonate').ready, true, 'before the throw it is not on cooldown')
+  assert.equal(game.at(launched).get(1)?.getAbilityCooldown('detonate').ticksRemaining, FIREBALL_DETONATE_DELAY_TICKS, 'the throw puts it on cooldown for the delay')
+  for (let tick = launched + 1; tick < launched + FIREBALL_DETONATE_DELAY_TICKS; tick += 1) {
+    const frame = game.at(tick)
+    assert.equal(out(frame), true, `the shot is still flying on tick ${tick}`)
+    assert.equal(frame.get(1)?.getAbilityCooldown('detonate').ready, false, `and Detonate is not ready on tick ${tick}`)
+  }
+  assert.equal(game.hitsOn(2, launched + FIREBALL_DETONATE_DELAY_TICKS).length, 0, 'no blast went off in the meantime')
+
+  // The shot flies on and plays out as if the key had not been pressed: it hits the enemy, and then the blast does.
+  const done = game.firstTick(launched + FIREBALL_DETONATE_DELAY_TICKS, launched + WHILE, settled(2))
+  assert.ok(done, 'it plays out')
+  const hits = game.hitsOn(2, done)
+  assert.equal(hits.length, 2, 'the shot and then the blast')
+  assert.ok(close(hits[0], fireballHit) && close(hits[1], blastHit), `${hits}`)
+  assert.equal(stacksOn(game.at(done), 2), 2)
+})
+
+test('Detonate is ready the tick the delay is up, and works then', () => {
+  const game = scene([ahead(LATE_REACH)])
+  game.order(1, cast(1, 'fireball', east))
+  const launched = goesOff('fireball', 1)
+  const ready = launched + FIREBALL_DETONATE_DELAY_TICKS
+  assert.equal(game.at(ready - 1).get(1)?.getAbilityCooldown('detonate').ready, false, 'a tick before')
+  assert.equal(game.at(ready).get(1)?.getAbilityCooldown('detonate').ready, true, 'and then')
+  assert.equal(game.hitsOn(2, ready).length, 0, 'with the shot still short of the enemy')
+  game.order(1, cast(ready + 1, 'detonate', none, game.at(ready).get(1)?.getPosition()))
+  const done = game.firstTick(ready, ready + WHILE, settled(2))
+  assert.ok(done, 'it plays out')
+  const hits = game.hitsOn(2, done)
+  assert.equal(hits.length, 1, 'a blast, and not the shot')
+  assert.ok(close(hits[0], blastHit))
+  assert.equal(game.at(done).getEntities().some((entity) => entity.defId === 'fireball'), false, 'and the shot is gone')
+})
+
+test('the delay is the same however much haste the mage has: it is about the player\'s finger, not the mage', () => {
+  const quick = new Champion({
+    id: 't-fire-quick',
+    name: 'Quick Mage',
+    base: { maxHp: 750, attackDamage: 45, attackSpeed: 0.85, haste: 400, arcane: 35 },
+    moveSpeed: 140,
+    radius: 20,
+    attackRange: 230,
+    attackWindup: 0.21,
+    abilities: ['fireball'],
+  })
+  const cooldowns = (champion: Champion): { detonate: number | undefined; fireball: number | undefined; launched: number } => {
+    const game = new Game()
+    game.simulator.addPlayer(1, 'p1', 'One', HOME, champion, 1)
+    game.order(1, cast(1, 'fireball', east))
+    const launched = goesOff('fireball', 1)
+    const frame = game.at(launched)
+    return {
+      detonate: frame.get(1)?.getAbilityCooldown('detonate').ticksRemaining,
+      fireball: frame.get(1)?.getAbilityCooldown('fireball').ticksRemaining,
+      launched,
+    }
+  }
+  const plain = cooldowns(mage)
+  const hasted = cooldowns(quick)
+  assert.equal(plain.detonate, FIREBALL_DETONATE_DELAY_TICKS)
+  assert.equal(hasted.detonate, FIREBALL_DETONATE_DELAY_TICKS, 'not shortened')
+  assert.ok((hasted.fireball ?? Infinity) < (plain.fireball ?? 0), 'though haste does shorten the fireball\'s own cooldown')
+})
+
 test('a fireball set off on the tick it would have hit blows up once, and the shot does not hit as well', () => {
-  const plain = scene([ahead(REACH)])
+  const plain = scene([ahead(LATE_REACH)])
   plain.order(1, cast(1, 'fireball', east))
   const hit = plain.firstTick(goesOff('fireball', 1), WHILE, (frame) => stacksOn(frame, 2) > 0)
   assert.ok(hit)
+  assert.ok(hit >= goesOff('fireball', 1) + FIREBALL_DETONATE_DELAY_TICKS, 'it would have hit after Detonate was ready')
 
-  const game = scene([ahead(REACH)])
+  const game = scene([ahead(LATE_REACH)])
   game.order(1, cast(1, 'fireball', east))
   const before = game.at(hit - 1).get(1)?.getPosition()
   game.order(1, cast(hit, 'detonate', none, before))

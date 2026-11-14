@@ -1,9 +1,11 @@
 import {
   GAME_ARENA_ROUND_PAUSE_TICKS,
+  GAME_CORE_MAX_TEAMS,
   GAME_FLAG_RADIUS,
   GAME_HILL_CAPTURE_TICKS,
   GAME_HILL_POINT_TICKS,
   GAME_RESPAWN_TICKS,
+  GAME_RESPAWN_TICKS_PER_LEVEL,
   GAME_TPS,
 } from './constants.js'
 import { distanceBetween } from './geometry.js'
@@ -23,10 +25,10 @@ import type { GameMode, HillArea, ModeSetup, ObjectiveState, Vector2 } from './i
 //   it up, and carry it to your own flag's base to score a point, as long as your flag is at home. A
 //   carrier that dies drops the flag where it fell, and it stays there until a champion of the flag's
 //   own team walks over it, which sends it back to its base, or an enemy picks it up again.
-// - core destruction: two teams, each with a core at its base, which is the last of its turrets (turrets.ts), guarded by the others. Break the enemy's core,
+// - core destruction: up to four teams (`GAME_CORE_MAX_TEAMS`), each with a core at its base, which is the last of its turrets (turrets.ts), guarded by the others. Break an enemy's core,
 //   and then every player on that team: a team whose core is broken cannot respawn, so the players it has left are all it has, and a
 //   team with its core broken and no player alive is eliminated. The last team that is not eliminated wins. There is no score limit: it
-//   ends when a team is out. A core, like a turret, is hurt by attacks only, and is protected until its team's turrets are down.
+//   ends when every team but one is out. A core, like a turret, is hurt by attacks only, and is protected until its team's turrets are down.
 //   It can also be played by one team alone, with nobody to beat: no team is ever the last standing, and the game ends only when its players have left.
 // - arena: two or more teams, played in rounds. Nobody comes back during a round: it is won by the last team with a player alive, and a team that wins enough
 //   rounds (the lobby's limit) wins the game. A round that has been won waits a few seconds, and then everyone is put back at their spawn at full health for the next.
@@ -38,7 +40,8 @@ import type { GameMode, HillArea, ModeSetup, ObjectiveState, Vector2 } from './i
 // core destruction (`LobbyRules.gold`): then a kill pays experience and nothing else, nobody starts with any, and there is no shop to spend it in, so the levels are
 // all that makes a champion stronger.
 //
-// How long a champion stays dead, and the score a team wins at, are the lobby leader's to set (`LobbyRules`).
+// How long a champion stays dead (at level 1, and how much longer for each level after), the score a team wins at, and whether the map's turrets and core are
+// healing zones instead, are the lobby leader's to set (`LobbyRules`).
 // They are part of what the game is played for (`ModeSetup`), so every peer respawns champions on the same
 // tick, and the server ends the game when a team reaches the limit (`winningTeam`).
 //
@@ -111,7 +114,7 @@ export const GAME_MODES: readonly GameModeDef[] = [
   {
     id: 'core',
     name: 'Core Destruction',
-    summary: 'Break the enemy core, then take down every player left on that team: with their core gone they cannot respawn. Takes one team, to play alone, or two.',
+    summary: 'Break an enemy core, then take down every player left on that team: with their core gone they cannot respawn. Takes one team, to play alone, or up to four.',
     scoreName: 'cores',
     economy: true,
     limitLabel: 'No limit',
@@ -163,7 +166,13 @@ export function modeHasEconomy(id: GameMode): boolean {
 // whole seconds, and for each mode the score a team wins at (0 is no limit). A limit is kept for every mode, so
 // switching from one to another and back remembers what was set for each.
 export type LobbyRules = {
+  // How long a level 1 champion stays dead.
   respawnSeconds: number
+  // How much longer it stays dead for each level above the first. Only a mode with levels (`economy`) has a use for it.
+  respawnPerLevelSeconds: number
+  // Whether the map's turrets and cores are healing zones (see `HEALING_ZONE_TIERS`): they heal and shield their team instead of shooting, and the shops do not heal.
+  // Every mode has the map's turrets, so every mode has a use for it. Off by default.
+  healingZones: boolean
   // Only king of the hill has a use for it.
   captureSeconds: number
   // Only core destruction has a use for it, the one mode with items: a champion that dies loses what it carries, but for what is in the slots it keeps
@@ -175,12 +184,16 @@ export type LobbyRules = {
 }
 
 export const RESPAWN_SECONDS = { min: 1, max: 60, default: GAME_RESPAWN_TICKS / GAME_TPS }
+// How much longer a champion stays dead for each level it has above the first. 0 is the same wait at every level.
+export const RESPAWN_PER_LEVEL_SECONDS = { min: 0, max: 30, default: GAME_RESPAWN_TICKS_PER_LEVEL / GAME_TPS }
 // How long a team with more players on the hill than any other takes to fill its bar, for king of the hill.
 export const CAPTURE_SECONDS = { min: 1, max: 120, default: GAME_HILL_CAPTURE_TICKS / GAME_TPS }
 
 export function defaultRules(): LobbyRules {
   return {
     respawnSeconds: RESPAWN_SECONDS.default,
+    respawnPerLevelSeconds: RESPAWN_PER_LEVEL_SECONDS.default,
+    healingZones: false,
     captureSeconds: CAPTURE_SECONDS.default,
     loseItemsOnDeath: false,
     gold: false,
@@ -191,6 +204,8 @@ export function defaultRules(): LobbyRules {
 // A change the leader asks for: any of the rules, the limits of any of the modes.
 export type RulesChange = {
   respawnSeconds?: number
+  respawnPerLevelSeconds?: number
+  healingZones?: boolean
   captureSeconds?: number
   loseItemsOnDeath?: boolean
   gold?: boolean
@@ -210,6 +225,16 @@ export function readRulesChange(raw: unknown): { change: RulesChange } | { probl
       return { problem: `Respawn time must be a whole number of seconds from ${RESPAWN_SECONDS.min} to ${RESPAWN_SECONDS.max}.` }
     }
     change.respawnSeconds = body.respawnSeconds
+  }
+  if (body.respawnPerLevelSeconds !== undefined) {
+    if (!isWhole(body.respawnPerLevelSeconds, RESPAWN_PER_LEVEL_SECONDS.min, RESPAWN_PER_LEVEL_SECONDS.max)) {
+      return { problem: `Respawn time per level must be a whole number of seconds from ${RESPAWN_PER_LEVEL_SECONDS.min} to ${RESPAWN_PER_LEVEL_SECONDS.max}.` }
+    }
+    change.respawnPerLevelSeconds = body.respawnPerLevelSeconds
+  }
+  if (body.healingZones !== undefined) {
+    if (typeof body.healingZones !== 'boolean') return { problem: 'Healing zones must be on or off.' }
+    change.healingZones = body.healingZones
   }
   if (body.captureSeconds !== undefined) {
     if (!isWhole(body.captureSeconds, CAPTURE_SECONDS.min, CAPTURE_SECONDS.max)) {
@@ -245,6 +270,8 @@ export function readRulesChange(raw: unknown): { change: RulesChange } | { probl
 export function applyRulesChange(rules: LobbyRules, change: RulesChange): LobbyRules {
   return {
     respawnSeconds: change.respawnSeconds ?? rules.respawnSeconds,
+    respawnPerLevelSeconds: change.respawnPerLevelSeconds ?? rules.respawnPerLevelSeconds,
+    healingZones: change.healingZones ?? rules.healingZones,
     captureSeconds: change.captureSeconds ?? rules.captureSeconds,
     loseItemsOnDeath: change.loseItemsOnDeath ?? rules.loseItemsOnDeath,
     gold: change.gold ?? rules.gold,
@@ -252,16 +279,27 @@ export function applyRulesChange(rules: LobbyRules, change: RulesChange): LobbyR
   }
 }
 
-// What the simulator is given of the rules for a game of this mode: how many ticks a champion stays dead, the
-// score to win at if there is one, for king of the hill how many ticks it takes to fill the bar, and for core destruction
+// What the simulator is given of the rules for a game of this mode: how many ticks a level 1 champion stays dead and how many more for each level, the
+// score to win at if there is one, whether the turrets and cores are healing zones, for king of the hill how many ticks it takes to fill the bar, and for core destruction
 // whether a death costs a champion its items, and whether there is no gold. A rule that is off is not there, as one that does not apply to the mode is not (gold is on
 // unless it says `noGold`, so a game that is not told is as it always was).
-export type ModeRules = { respawnTicks?: number; scoreLimit?: number; captureTicks?: number; loseItemsOnDeath?: true; noGold?: true }
+export type ModeRules = {
+  respawnTicks?: number
+  respawnTicksPerLevel?: number
+  scoreLimit?: number
+  healingZones?: true
+  captureTicks?: number
+  loseItemsOnDeath?: true
+  noGold?: true
+}
 
 export function modeRules(rules: LobbyRules, mode: GameMode): ModeRules {
   const limit = rules.scoreLimits[mode]
   return {
     respawnTicks: rules.respawnSeconds * GAME_TPS,
+    // Only a mode with levels has a use for it (a rules object from before there was a box for it waits as it always did).
+    ...(modeHasEconomy(mode) ? { respawnTicksPerLevel: (rules.respawnPerLevelSeconds ?? RESPAWN_PER_LEVEL_SECONDS.default) * GAME_TPS } : {}),
+    ...(rules.healingZones === true ? { healingZones: true as const } : {}),
     ...(limit > 0 ? { scoreLimit: limit } : {}),
     ...(mode === 'koth' ? { captureTicks: rules.captureSeconds * GAME_TPS } : {}),
     ...(mode === 'core' && rules.loseItemsOnDeath ? { loseItemsOnDeath: true as const } : {}),
@@ -288,8 +326,8 @@ export function teamCountProblem(mode: GameMode, teamCount: number): string | un
   if (mode === 'ctf' && teamCount !== 2) {
     return `Capture the Flag needs exactly 2 teams, and there ${teamCount === 1 ? 'is 1' : `are ${teamCount}`}.`
   }
-  if (mode === 'core' && (teamCount < 1 || teamCount > 2)) {
-    return `Core Destruction needs 1 or 2 teams, and there ${teamCount === 1 ? 'is 1' : `are ${teamCount}`}.`
+  if (mode === 'core' && (teamCount < 1 || teamCount > GAME_CORE_MAX_TEAMS)) {
+    return `Core Destruction needs from 1 to ${GAME_CORE_MAX_TEAMS} teams, and there ${teamCount === 1 ? 'is 1' : `are ${teamCount}`}.`
   }
   if (mode === 'arena' && teamCount < 2) {
     return `Arena needs at least 2 teams, and there ${teamCount === 1 ? 'is 1' : `are ${teamCount}`}.`
@@ -297,9 +335,25 @@ export function teamCountProblem(mode: GameMode, teamCount: number): string | un
   return undefined
 }
 
+// How many slots of a map, counting from the first with none skipped, have a core: the most teams it can play Core Destruction with.
+export function coreSlotsOf(cores: readonly (Vector2 | undefined)[] = []): number {
+  let slots = 0
+  while (cores[slots]) slots += 1
+  return slots
+}
+
+// Why a game of Core Destruction cannot have this many teams on a map with cores for this many, if it cannot: every team needs a core at its base, which is the core of the
+// slot it starts at. (A map with no core for its first two teams is not one for the mode at all: that is `modeSupportProblem`'s to say.) `name` is what the map is called,
+// where it is known.
+export function coreTeamsProblem(mode: GameMode, teamCount: number, coreSlots: number, name?: string): string | undefined {
+  if (mode !== 'core' || teamCount <= coreSlots) return undefined
+  const has = name ? `${name} has` : 'This map has'
+  return `${has} cores for only ${coreSlots} ${coreSlots === 1 ? 'team' : 'teams'}, and there ${teamCount === 1 ? 'is 1' : `are ${teamCount}`}: Core Destruction needs a core for each team.`
+}
+
 // Why a mode cannot be played on a map, if it cannot: king of the hill needs a hill, capture the flag a
-// flag for each of the first two teams, and core destruction a core for each of the first two teams. `name` is what the map is
-// called, where it is known.
+// flag for each of the first two teams, and core destruction a core for each of the first two teams (and, for more teams than that,
+// one for each, see `coreTeamsProblem`). `name` is what the map is called, where it is known.
 export function modeSupportProblem(
   mode: GameMode,
   map: { name?: string; hill: boolean; flags: boolean; cores: boolean },
@@ -324,12 +378,13 @@ export function modeStartProblem(mode: GameMode, teams: readonly number[], map: 
     cores: Boolean(map.cores?.[0] && map.cores?.[1]),
   })
     ?? teamCountProblem(mode, new Set(teams).size)
+    ?? coreTeamsProblem(mode, new Set(teams).size, coreSlotsOf(map.cores))
 }
 
 // What a game of this mode on this map is, for the teams in it. Each team's flag is at the base of the
 // slot it starts at, so the biggest team has the first flag, and the next biggest the second (the same
 // ranking `assignSpawns` starts them by). It throws what `modeStartProblem` would say. The rules, when given,
-// are part of it: with none a game has the default respawn time and no score limit.
+// are part of it: with none a game has the default respawn times, no score limit and turrets.
 export function createModeSetup(
   mode: GameMode,
   teams: readonly number[],
@@ -340,7 +395,9 @@ export function createModeSetup(
   if (problem) throw new RangeError(problem)
   const withRules = {
     ...(rules.respawnTicks !== undefined ? { respawnTicks: rules.respawnTicks } : {}),
+    ...(rules.respawnTicksPerLevel !== undefined ? { respawnTicksPerLevel: rules.respawnTicksPerLevel } : {}),
     ...(rules.scoreLimit !== undefined ? { scoreLimit: rules.scoreLimit } : {}),
+    ...(rules.healingZones ? { healingZones: true as const } : {}),
   }
   if (mode === 'koth') {
     return {

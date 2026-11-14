@@ -1,5 +1,6 @@
 import {
   champions,
+  coreSlotsOf,
   createModeSetup,
   DEFAULT_CHAMPION_ID,
   FALLBACK_GAME_MODE,
@@ -8,6 +9,8 @@ import {
   GameStatusSchema,
   getChampion,
   getCore,
+  getCoreZone,
+  getHealingZone,
   getItem,
   getMonster,
   isValidSteerDirection,
@@ -119,6 +122,7 @@ export class ServerGameState {
       hill: objectives.hill !== undefined,
       flags: Boolean(objectives.flags[0] && objectives.flags[1]),
       cores: Boolean(objectives.cores?.[0] && objectives.cores?.[1]),
+      coreSlots: coreSlotsOf(objectives.cores),
     })
   }
 
@@ -228,23 +232,24 @@ export class ServerGameState {
       this.simulator.addMonster(id, getMonster(camp.monster), camp.at)
     }
     // And its turrets, each on the team that starts at the slot it is for (the biggest team at slot 1, as for spawn points). A game with
-    // no team for a slot, a map for two teams played by one, has no turret there.
+    // no team for a slot, a map for two teams played by one, has no turret there. With healing zones on (a lobby rule), each is the healing zone of its tier instead.
+    const zones = setup.healingZones === true
     for (const post of this.turrets) {
       const team = slotTeams[post.slot - 1]
       if (team === undefined) continue
       const id = this.nextCharacterId
       this.nextCharacterId += 1
-      this.simulator.addTurret(id, getTurret(post.tier), post.at, team)
+      this.simulator.addTurret(id, zones ? getHealingZone(post.tier) : getTurret(post.tier), post.at, team)
     }
-    // And, in Core Destruction, the core of each of the (one or two) teams, at the base of the slot it starts at: the heart of the base its turrets guard. It is a
-    // turret too (the one of the core tier), put in the same way.
+    // And, in Core Destruction, the core of each of the (one to four) teams, at the base of the slot it starts at: the heart of the base its turrets guard. It is a
+    // turret too (the one of the core tier), put in the same way, or the healing zone of the core tier.
     if (this.mode === 'core') {
-      slotTeams.slice(0, 2).forEach((team, slot) => {
+      slotTeams.forEach((team, slot) => {
         const at = this.objectives.cores?.[slot]
         if (!at) return
         const id = this.nextCharacterId
         this.nextCharacterId += 1
-        this.simulator.addTurret(id, getCore(), at, team)
+        this.simulator.addTurret(id, zones ? getCoreZone() : getCore(), at, team)
       })
     }
     this.selections.clear()

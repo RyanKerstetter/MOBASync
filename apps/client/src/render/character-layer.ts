@@ -191,7 +191,9 @@ export class CharacterLayer {
     const base = this.spriteSets.get(character.champion.id)
     const loaded = base ? teamVariant(base, getTeam(character.team).color, this.paint) : undefined
     const shape = new Graphics()
-    if (!loaded && character.turret?.core) {
+    if (!loaded && character.turret?.zone) {
+      drawZoneBody(shape, character.champion.radius, getTeam(character.team).color, character.turret.core)
+    } else if (!loaded && character.turret?.core) {
       drawCoreBody(shape, character.champion.radius, getTeam(character.team).color)
     } else if (!loaded && character.turret) {
       drawTurretBody(shape, character.champion.radius, getTeam(character.team).color)
@@ -289,6 +291,25 @@ function drawCoreBody(shape: Graphics, radius: number, color: string): void {
     .stroke({ color: '#0b1220', width: 2, alpha: 0.7 })
     .circle(0, 0, radius * 0.16)
     .fill({ color: '#ffffff', alpha: 0.85 })
+}
+
+// A healing zone: no tower, but a flat well of dark stone edged in its team's colour, with a pale green cross on a disc of that colour, so it reads as a
+// place that heals and which side it is on. The core's is set in a diamond, as the keep is, so it reads as the heart of the base. Its zone is drawn on the ground
+// round it (see healing-zone.ts).
+function drawZoneBody(shape: Graphics, radius: number, color: string, core: boolean): void {
+  const diamond = (size: number): number[] => [0, -size, size, 0, 0, size, -size, 0]
+  if (core) shape.poly(diamond(radius)).fill({ color: '#2d3340' }).stroke({ color, width: 5 })
+  else shape.circle(0, 0, radius).fill({ color: '#2d3340' }).stroke({ color, width: 4 })
+  const disc = radius * (core ? 0.5 : 0.62)
+  const arm = disc * 0.62
+  const thick = disc * 0.34
+  shape
+    .circle(0, 0, disc)
+    .fill({ color })
+    .stroke({ color: '#0b1220', width: 2, alpha: 0.7 })
+    .rect(-thick / 2, -arm, thick, arm * 2)
+    .rect(-arm, -thick / 2, arm * 2, thick)
+    .fill({ color: '#d9ffe4', alpha: 0.95 })
 }
 
 // The barrier of a structure that is protected: a pale ring a little out from its body, with a fainter one outside it.

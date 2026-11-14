@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  GAME_MAX_PLAYERS,
   mapDisplayName,
   mapRoomText,
   modeSupportProblem,
@@ -51,15 +52,16 @@ test('a map is summed up for the lobby: its size, what it holds, and what it has
     hill: true,
     flags: true,
     cores: true,
+    coreSlots: 2,
     monsters: 2,
   })
   // Without a title it is named for its file, and a map with one flag has no flags for capture the flag.
   const bare = summarizeMap('duel_arena', {
     ...layout, title: undefined, description: undefined, hill: undefined, flags: [{ x: 1, y: 1 }], cores: [undefined, { x: 4, y: 4 }],
   } as unknown as MapLayout)
-  assert.deepEqual([bare.name, bare.description, bare.hill, bare.flags, bare.cores], ['Duel Arena', undefined, false, false, false])
+  assert.deepEqual([bare.name, bare.description, bare.hill, bare.flags, bare.cores, bare.coreSlots], ['Duel Arena', undefined, false, false, false, 0], 'a core in the second slot only is no core to start with')
   assert.deepEqual(unplayableMap('broken', 'It has no arena.'), {
-    id: 'broken', name: 'Broken', width: 0, height: 0, spawns: [], hill: false, flags: false, cores: false, monsters: 0, problem: 'It has no arena.',
+    id: 'broken', name: 'Broken', width: 0, height: 0, spawns: [], hill: false, flags: false, cores: false, coreSlots: 0, monsters: 0, problem: 'It has no arena.',
   })
 })
 
@@ -130,8 +132,10 @@ test('starting a game checks the map, then the mode, then the number of teams, t
 })
 
 test('the room a map has is described: any team setup, or how many teams and how big', () => {
-  assert.equal(mapRoomText([4, 4, 2, 2, 1, 1, 1, 1]), 'Any team setup.')
-  assert.equal(mapRoomText([5, 5, 3, 2, 2, 1, 1, 1, 1]), 'Any team setup.', 'more than it needs')
+  const needed = Array.from({ length: GAME_MAX_PLAYERS }, (_, slot) => spawnPointsNeeded(slot + 1))
+  assert.equal(mapRoomText(needed), 'Any team setup.')
+  assert.equal(mapRoomText([...needed.map((count) => count + 1), 1]), 'Any team setup.', 'more than it needs')
+  assert.match(mapRoomText(needed.slice(0, -1)), new RegExp(`^Up to ${GAME_MAX_PLAYERS - 1} teams`), 'one slot short is not any setup')
   assert.equal(mapRoomText([4, 4]), 'Up to 2 teams, with at most 4 and 4 players on the biggest and 2nd biggest teams.')
   assert.equal(mapRoomText([3, 3, 2]), 'Up to 3 teams, with at most 3, 3 and 2 players on the biggest, 2nd biggest and 3rd biggest teams.')
   assert.equal(mapRoomText([1]), 'Up to 1 team, with at most 1 player on the biggest team.')

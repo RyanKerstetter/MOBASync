@@ -14,7 +14,9 @@ import {
   CAPTURE_SECONDS,
   limitRange,
   mapRoomText,
+  modeHasEconomy,
   modeSupportProblem,
+  RESPAWN_PER_LEVEL_SECONDS,
   RESPAWN_SECONDS,
   startProblem,
   supportedModes,
@@ -58,6 +60,9 @@ const modeSummary = requiredElement<HTMLParagraphElement>('#mode-summary')
 const modeWarning = requiredElement<HTMLParagraphElement>('#mode-warning')
 const respawnRow = requiredElement<HTMLElement>('#rule-respawn-row')
 const respawnInput = requiredElement<HTMLInputElement>('#rule-respawn')
+const respawnLevelRow = requiredElement<HTMLElement>('#rule-respawn-level-row')
+const respawnLevelInput = requiredElement<HTMLInputElement>('#rule-respawn-level')
+const healingZonesInput = requiredElement<HTMLInputElement>('#rule-healing-zones')
 const captureRow = requiredElement<HTMLElement>('#rule-capture-row')
 const captureInput = requiredElement<HTMLInputElement>('#rule-capture')
 const goldRow = requiredElement<HTMLElement>('#rule-gold-row')
@@ -274,6 +279,9 @@ function renderTeamPicker(lobby: Lobby): void {
 respawnInput.min = String(RESPAWN_SECONDS.min)
 respawnInput.max = String(RESPAWN_SECONDS.max)
 respawnInput.step = '1'
+respawnLevelInput.min = String(RESPAWN_PER_LEVEL_SECONDS.min)
+respawnLevelInput.max = String(RESPAWN_PER_LEVEL_SECONDS.max)
+respawnLevelInput.step = '1'
 captureInput.min = String(CAPTURE_SECONDS.min)
 captureInput.max = String(CAPTURE_SECONDS.max)
 captureInput.step = '1'
@@ -295,6 +303,8 @@ for (const mode of GAME_MODES) {
   limitRows.set(mode.id, { row, input })
 }
 respawnInput.addEventListener('change', () => void changeRules({ respawnSeconds: respawnInput.valueAsNumber }))
+respawnLevelInput.addEventListener('change', () => void changeRules({ respawnPerLevelSeconds: respawnLevelInput.valueAsNumber }))
+healingZonesInput.addEventListener('change', () => void changeRules({ healingZones: healingZonesInput.checked }))
 captureInput.addEventListener('change', () => void changeRules({ captureSeconds: captureInput.valueAsNumber }))
 goldInput.addEventListener('change', () => void changeRules({ gold: goldInput.checked }))
 loseItemsInput.addEventListener('change', () => void changeRules({ loseItemsOnDeath: loseItemsInput.checked }))
@@ -305,7 +315,8 @@ function showNumber(input: HTMLInputElement, value: number, force: boolean): voi
   if (input.value !== String(value)) input.value = String(value)
 }
 
-// The leader's rules: how long a champion stays dead, how long the hill takes to capture (only for a game on
+// The leader's rules: how long a champion stays dead (and how much longer for each level, only for a mode with levels), whether the turrets and core are healing
+// zones, how long the hill takes to capture (only for a game on
 // the hill), whether there is gold and a shop and whether a death costs a champion its items (only for core destruction, the mode that has them: with no gold there are no
 // items to lose, so that one is put away), and the
 // limit of the mode that is selected. Everyone sees them; only the leader can change them, and only until the game starts.
@@ -315,6 +326,12 @@ function renderRules(lobby: Lobby, isLeader: boolean, force = false): void {
   respawnRow.hidden = lobby.mode === 'arena'
   respawnInput.disabled = !editable
   showNumber(respawnInput, lobby.rules.respawnSeconds, force)
+  // Only a mode with levels has anything to add for them.
+  respawnLevelRow.hidden = lobby.mode === 'arena' || !modeHasEconomy(lobby.mode)
+  respawnLevelInput.disabled = !editable
+  showNumber(respawnLevelInput, lobby.rules.respawnPerLevelSeconds, force)
+  healingZonesInput.disabled = !editable
+  if (force || !rulesChangePending) healingZonesInput.checked = lobby.rules.healingZones
   captureRow.hidden = lobby.mode !== 'koth'
   captureInput.disabled = !editable
   showNumber(captureInput, lobby.rules.captureSeconds, force)

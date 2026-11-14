@@ -1,7 +1,7 @@
 import { champions, Champion, type ChampionDef } from './champions.js'
 import { GAME_TPS } from './constants.js'
-import { DEFAULT_MONSTER_REWARD, DEFAULT_MONSTER_XP_GROWTH, type Resources } from './progression.js'
-import { turrets } from './turrets.js'
+import { DEFAULT_MONSTER_HEAL_ON_KILL, DEFAULT_MONSTER_REWARD, DEFAULT_MONSTER_XP_GROWTH, type Resources } from './progression.js'
+import { getStructureBody } from './turrets.js'
 
 // Monsters: characters the game plays itself. A monster is a champion (it has health, an attack, abilities and a
 // size, and the simulator treats it as one) plus an `AiProfile` that says how it behaves: when it notices a player,
@@ -76,6 +76,9 @@ export interface MonsterDef extends ChampionDef {
   // How much more experience it pays for each level it has above the first (it gains one each time it is killed, see `monsterLevelAfterKill`), a whole
   // number, 0 or more. Without it, `DEFAULT_MONSTER_XP_GROWTH`. Its gold and shards are the same at every level, and its stats grow by `growth`, as a champion's.
   xpGrowth?: number
+  // How much health the player who kills it is healed by, as a share of that player's maximum health (0 to 1): 0.1 is a tenth of it, 0 is none. Without it,
+  // `DEFAULT_MONSTER_HEAL_ON_KILL`. It is the same at every level of the monster, and heals nobody who is dead.
+  healOnKill?: number
 }
 
 export class Monster {
@@ -87,9 +90,11 @@ export class Monster {
   // What killing it pays at level 1, with the defaults put in, and how much more experience it pays for each level after (see `monsterXpAt`).
   readonly reward: Readonly<Resources>
   readonly xpGrowth: number
+  // The share of their own maximum health that killing it heals the killer by, with the default put in.
+  readonly healOnKill: number
 
   constructor(def: MonsterDef) {
-    const { ai, reward, xpGrowth, ...body } = def
+    const { ai, reward, xpGrowth, healOnKill, ...body } = def
     const fail = (problem: string): never => {
       throw new Error(`Monster "${def.id}" ${problem}.`)
     }
@@ -137,6 +142,8 @@ export class Monster {
     }
     this.xpGrowth = xpGrowth ?? DEFAULT_MONSTER_XP_GROWTH
     if (!(Number.isInteger(this.xpGrowth) && this.xpGrowth >= 0)) fail('needs an experience growth that is a whole number, 0 or more')
+    this.healOnKill = healOnKill ?? DEFAULT_MONSTER_HEAL_ON_KILL
+    if (!(Number.isFinite(this.healOnKill) && this.healOnKill >= 0 && this.healOnKill <= 1)) fail('needs a heal on kill from 0 to 1, a share of the killer\'s maximum health')
     this.ai = {
       aggroRange: ai.aggroRange,
       deaggroRange,
@@ -181,57 +188,44 @@ export const monsters: ReadonlyMap<string, Monster> = new Map([
     // Slower than every champion, so it can be walked away from.
     moveSpeed: 100,
     radius: 20,
-    // How near (middle to middle) it has to be to bump someone: a little past touching them.
     attackRange: 60,
-    // How much of each attack its hop takes before the bump lands: 0.35 s of its 1 s.
     attackWindup: 0.35,
     abilities: [],
     ai: {
-      // It notices no one, but goes after whoever hurts it.
       aggroRange: 0,
-      // Further than this from where it spawned, its deaggro bar fills for this long, and empties as fast while it is back
-      // inside. When it is full the monster ignores everyone and goes home, and the bar is shown under it.
       deaggroRange: 300,
       deaggroTicks: seconds(3),
       spawnOffsetTicks: seconds(10),
       returnSpeedMultiplier: RETURN_SPEED,
       respawnTicks: seconds(30),
     },
-    // What killing it pays the player who does: gold, which is the same every time, and experience, which is more for each level it has gained.
     reward: { gold: 20, xp: 60 },
     xpGrowth: 10,
+    // Killing it heals the killer by this share of their maximum health.
+    healOnKill: 0.15,
   }),
-  // The golem: a huge, slow lump of rock that holds the middle of the competitive map. It is hard to wear down and hits
-  // hard but seldom, so it is a fight to pick, and one to walk away from: it is slower than every champion, and gives up
-  // the chase well short of the slimes' pockets.
   new Monster({
     id: 'golem',
     name: 'Golem',
     description: 'A huge, slow rock monster that guards the middle of the map. It hits very hard, but seldom.',
-    // What each blow does, and how long after one starts until it can strike again.
     base: { maxHp: 1200, attackDamage: 30, attackSpeed: attackEvery(2.5) },
     growth: { maxHp: 200, attackDamage: 5 },
     moveSpeed: 90,
     radius: 48,
-    // How near (middle to middle) it has to be to strike: its arms reach well past its body.
     attackRange: 90,
-    // How much of each attack it takes to rise up and come down before the blow lands: 0.7 s of its 2.5 s.
     attackWindup: 0.28,
     abilities: [],
     ai: {
-      // It notices no one, but goes after whoever hurts it.
       aggroRange: 0,
-      // Further than this from where it spawned, its deaggro bar fills for this long, and empties as fast while it is back
-      // inside. When it is full the monster ignores everyone and goes home, and the bar is shown under it.
       deaggroRange: 400,
       deaggroTicks: seconds(3),
       spawnOffsetTicks: seconds(35),
       returnSpeedMultiplier: RETURN_SPEED,
       respawnTicks: seconds(60),
     },
-    // The big prize of the map: much more than a slime, and the only one that pays shards.
     reward: { gold: 50, xp: 150, shards: 1 },
     xpGrowth: 50,
+    healOnKill: 0.25,
   }),
   // A placeholder to build on, which no map has yet.
   new Monster({
@@ -260,9 +254,9 @@ export function getMonster(id: string): Monster {
   return monster
 }
 
-// The champion a character is: a player's, or the body of a monster or a turret (the core of a base is one).
+// The champion a character is: a player's, or the body of a monster or a structure (a turret, a healing zone, or the core of a base, which is one of them).
 export function getCharacterChampion(id: string): Champion {
-  const champion = champions.get(id) ?? monsters.get(id)?.champion ?? turrets.get(id)?.champion
+  const champion = champions.get(id) ?? monsters.get(id)?.champion ?? getStructureBody(id)?.champion
   if (!champion) throw new RangeError(`Unknown champion, monster or turret "${id}".`)
   return champion
 }

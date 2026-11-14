@@ -19,6 +19,14 @@ export const GAME_TEAMS: readonly TeamDef[] = [
   { id: 6, name: 'Orange', color: '#f28b3c' },
   { id: 7, name: 'Teal', color: '#3fc8c0' },
   { id: 8, name: 'Pink', color: '#ee7fb8' },
+  { id: 9, name: 'Lime', color: '#a3d63a' },
+  { id: 10, name: 'Indigo', color: '#5a5fd6' },
+  { id: 11, name: 'Brown', color: '#a56b3f' },
+  { id: 12, name: 'Maroon', color: '#9b2d49' },
+  { id: 13, name: 'Sky', color: '#8fd5f5' },
+  { id: 14, name: 'Magenta', color: '#d048b6' },
+  { id: 15, name: 'White', color: '#eeeeea' },
+  { id: 16, name: 'Charcoal', color: '#454c57' },
 ]
 
 // Whether this is one of the teams a player can pick.

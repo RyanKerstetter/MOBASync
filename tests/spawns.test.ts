@@ -8,10 +8,13 @@ import {
 } from '../packages/shared/src/index.ts'
 import { teamSizeArrangements, teamsOf, testSpawns } from './test-spawns.ts'
 
-test('the slots of spawn points need 4, 4, 2, 2, 1, 1, 1, 1 for eight players in teams of up to four', () => {
-  assert.equal(GAME_MAX_PLAYERS, 8)
-  assert.equal(GAME_MAX_TEAM_SIZE, 4)
-  assert.deepEqual(Array.from({ length: 8 }, (_, slot) => spawnPointsNeeded(slot + 1)), [4, 4, 2, 2, 1, 1, 1, 1])
+test('the slots of spawn points start at a full team, never need more as the teams get smaller, and end at one player', () => {
+  const needed = Array.from({ length: GAME_MAX_PLAYERS }, (_, slot) => spawnPointsNeeded(slot + 1))
+  assert.equal(needed[0], GAME_MAX_TEAM_SIZE)
+  assert.equal(needed[needed.length - 1], 1)
+  needed.forEach((count, index) => {
+    if (index > 0) assert.ok(count <= needed[index - 1], `slot ${index + 1} needs no more than slot ${index}`)
+  })
 })
 
 test('those are enough for every way the players can split into teams, and none could be one fewer', () => {

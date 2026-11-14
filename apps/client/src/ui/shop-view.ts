@@ -158,7 +158,10 @@ export function createShopView(container: HTMLElement, tooltip: ItemTooltipContr
       if (!root.hidden && (on === undefined || filter === on)) api.close()
       else api.open(on)
     },
+    // Closing a shop that is not open does nothing. The page closes it on every frame of a game with no gold, and the box that says what something is
+    // is shared with the HUD's abilities and slots, so hiding it then would take away the one over an ability as soon as it came up.
     close(): void {
+      if (root.hidden) return
       root.hidden = true
       tooltip.hide()
       say('', undefined, 0)

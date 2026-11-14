@@ -15,6 +15,7 @@ import {
   runEffects,
   self,
   spawnEntity,
+  startCooldown,
   statBuff,
   towardTarget,
   type SimContext,
@@ -185,6 +186,25 @@ test('a fear and an invisibility are statuses of their own kinds, the fearer\'s 
     assert.equal(written[0].status.ownerId, 7, 'it is the one who gave it that it is held by')
     assert.equal(written[0].status.endTick - written[0].status.startTick, 30)
   }
+})
+
+// ---------------------------------------------------------------------------- a cooldown of a set time
+
+test('a cooldown can be started for a set number of ticks, which the event carries, and the default is still the ability\'s own', () => {
+  const events: Array<Record<string, unknown>> = []
+  const sim = { emitEvent: (event: Record<string, unknown>) => events.push(event) } as unknown as SimContext
+  runEffects([startCooldown('t-cd-own'), startCooldown('t-cd-set', self(), 30)], sim, source({ ownerId: 7 }))
+  assert.equal(events.length, 2)
+  assert.deepEqual([events[0].type, events[0].abilityId, events[0].unitId], ['start-cooldown', 't-cd-own', 7])
+  assert.equal('ticks' in events[0], false, 'with no time given, the event says none: the ability\'s own, which haste shortens')
+  assert.deepEqual([events[1].type, events[1].abilityId, events[1].unitId, events[1].ticks], ['start-cooldown', 't-cd-set', 7, 30])
+})
+
+test('a cooldown of a set time has to be a whole number of ticks above 0', () => {
+  for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(() => startCooldown('t-cd-bad', self(), bad), /whole number of ticks above 0/, String(bad))
+  }
+  assert.doesNotThrow(() => startCooldown('t-cd-ok', self(), 1))
 })
 
 // ---------------------------------------------------------------------------- a cone

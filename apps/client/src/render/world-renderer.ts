@@ -7,6 +7,7 @@ import { CharacterLayer } from './character-layer.ts'
 import { EntityLayer } from './entity-layer.ts'
 import { FogLayer } from './fog-layer.ts'
 import { FloatingNumberLayer } from './floating-number-layer.ts'
+import { HealingZoneLayer } from './healing-zone.ts'
 import { DEFAULT_EFFECTS, type EffectSettings } from './effect-settings.ts'
 import { HitboxLayer } from './hitbox-layer.ts'
 import { IndicatorLayer } from './indicator-layer.ts'
@@ -73,6 +74,7 @@ export type WorldRendererOptions = {
 //
 //   map            the ground (`MapView`), except what stands up out of it (below)
 //   shop areas     the green tint over each shop, which is a healing area (`ShopAreaLayer`)
+//   healing zones  the area each healing zone heals in, in its team's colour, when the turrets are zones (`HealingZoneLayer`)
 //   objectives     the hill, and the flags' bases and flags on the ground (`ObjectiveLayer`)
 //   tower shadows  the soft dark patch on the ground under each tower and core, in sight (`TurretShadowLayer`)
 //   ground         telegraphs and fields, under the champions so they never hide them
@@ -102,6 +104,7 @@ export class WorldRenderer {
   private readonly links = new LinkLayer()
   private readonly objectives = new ObjectiveLayer()
   private readonly shopAreas = new ShopAreaLayer()
+  private readonly healingZones = new HealingZoneLayer()
   private readonly bushAreas = new BushAreaLayer()
   private readonly turretRanges = new TurretRangeLayer()
   private readonly turretShadows = new TurretShadowLayer()
@@ -117,6 +120,7 @@ export class WorldRenderer {
     this.scene.addChild(
       this.map.view,
       this.shopAreas.view,
+      this.healingZones.view,
       this.objectives.ground,
       this.turretShadows.view,
       this.entities.ground,
@@ -167,6 +171,7 @@ export class WorldRenderer {
     this.killRewards.update(frame.rewards ?? [], now)
     this.shopAreas.update(frame.shops ?? NO_SHOPS, this.effects.shopGlow)
     this.bushAreas.update(frame.bushes ?? NO_BUSHES)
+    this.healingZones.update(characters, now)
     this.characters.update(characters, localCharacterId, frame.localAttackCooldown, now, frame.unseen)
     this.entities.update(entities)
     this.links.update(characters, now, frame.unseen)

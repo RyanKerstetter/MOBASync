@@ -92,8 +92,8 @@ export type GameEvent =
   // Brings what is left of an ability's cooldown down to at most `ticks`. One with less left, or
   // already ready, is untouched.
   | { type: 'cap-cooldown'; id: string; rootId: string; ownerId: number; unitId: number; abilityId: string; ticks: number }
-  // Puts the ability on its full cooldown from now, whatever was left of it, or none.
-  | { type: 'start-cooldown'; id: string; rootId: string; ownerId: number; unitId: number; abilityId: string }
+  // Puts the ability on its full cooldown from now, whatever was left of it, or none. With `ticks`, on a cooldown of exactly that many ticks instead, which haste does not shorten.
+  | { type: 'start-cooldown'; id: string; rootId: string; ownerId: number; unitId: number; abilityId: string; ticks?: number }
 
 // The IDs of what an auto attack runs start with this, and so do those of what the attack leaves behind (a shot in the air), which are
 // made from them; an ability's start with 'c:'. It is how an effect knows whether its damage is an auto's, which is physical, or an
@@ -219,6 +219,13 @@ export function areEnemies(left: SimCharacter, right: SimCharacter): boolean {
   return left.team !== right.team
 }
 
+// Whether what a source does can touch a structure (a turret, a healing zone or a core): an auto attack can, and the shot and the hit it sets off, and nothing else. An ability goes
+// through them as if they were not there: its shot is not stopped by one, its blast, line, cone or box does not take one in, and a dash does not count one as hit. (Nothing an ability
+// does lands on one anyway: see `SimCharacter.structure`.) `sourceId` is the id of the effect's source, or of the entity or dash that is running it.
+export function touchesStructures(sourceId: string): boolean {
+  return sourceId.startsWith(ATTACK_SOURCE_PREFIX)
+}
+
 // Descriptions: what an effect or an amount can say about itself without being run. The constructors below that make a number a player would want to read
 // (`damage`, `burn`, `scaled`, `linear`) note what they were made from, and `describeEffect` and `describeAmount` give it back. The tooltips over the abilities are
 // told from it (see ability-info.ts), so a number that is retuned is retuned in its tooltip too, with nothing written twice. Whatever notes nothing is not described.
@@ -282,7 +289,7 @@ function statusFor(
   kind: Status['kind'],
   durationTicks: number,
   amount: number,
-  extra: Partial<Pick<Status, 'stat' | 'fades'>> = {},
+  extra: Partial<Pick<Status, 'stat' | 'fades' | 'pulseHeal' | 'deathHeal'>> = {},
 ): Status {
   return { id, kind, rootId: src.rootId, ownerId: src.ownerId, startTick: src.tick, endTick: src.tick + durationTicks, amount, ...extra }
 }
@@ -374,13 +381,17 @@ export const besideTarget = (gap = 0): Anchor => (sim, src) => {
 const isWanted = (owner: SimCharacter, unit: SimCharacter, wanted: 'enemies' | 'allies'): boolean =>
   areEnemies(owner, unit) === (wanted === 'enemies')
 
+// Whether a selector for this source picks the unit up: it is of the side the selector wants, and it is not a structure the source passes through (see `touchesStructures`).
+const isReached = (owner: SimCharacter, unit: SimCharacter, wanted: 'enemies' | 'allies', src: EffectSource): boolean =>
+  isWanted(owner, unit, wanted) && (!unit.structure || touchesStructures(src.id))
+
 const unitsInRadiusOf = (wanted: 'enemies' | 'allies') => (r: number, center: Anchor = castOrigin()): Selector => (sim, src) => {
   const at = center(sim, src)
   const owner = sim.character(src.ownerId)
   if (!at || !owner) return []
   return sim.unitsInRadius(at, r, src.tick).filter((unitId) => {
     const unit = sim.character(unitId)
-    return Boolean(unit && isWanted(owner, unit, wanted))
+    return Boolean(unit && isReached(owner, unit, wanted, src))
   })
 }
 
@@ -411,7 +422,7 @@ function unitsTouchingBox(
     const unit = sim.character(unitId)
     const position = sim.posAt(unitId, src.tick)
     if (!unit || !position) return false
-    if (!isWanted(owner, unit, wanted)) return false
+    if (!isReached(owner, unit, wanted, src)) return false
     return boxTouchesCircle(center, facing, box, position, unit.champion.radius)
   })
 }
@@ -435,7 +446,7 @@ export const enemiesInCone = (range: number, half: { cos: number; sin: number })
   return sim.unitsInRadius(src.at, range, src.tick).filter((unitId) => {
     const unit = sim.character(unitId)
     const position = sim.posAt(unitId, src.tick)
-    if (!unit || !position || !areEnemies(owner, unit)) return false
+    if (!unit || !position || !isReached(owner, unit, 'enemies', src)) return false
     const dx = position.x - src.at.x
     const dy = position.y - src.at.y
     const reach = unit.champion.radius
@@ -682,21 +693,47 @@ export const haste = (
 // stood then). Putting it on again from the same source refreshes it instead of adding a second one, so a fire that re-applies it every tick keeps it going for `durationTicks` after the
 // unit last stood in it; ones from different sources add together. `named` makes it the owner's status of that name (see `namedStatusId`), whatever cast or entity puts it on: the
 // patches of one trail, or every ability of a champion that feeds one burn, renew the one status instead of each adding its own.
+//
+// It can feed whoever put it on: `ownerHealPerSecond` is health given back to them while it lasts, on its pulses (whether or not the pulse got through a shield), and
+// `ownerHealOnDeath` is health given back to them once if the unit dies with it on. Both are worked out as it is put on, as for the owner itself (what they scale with is
+// the owner's), and neither is given to an owner that is dead.
 const overTime = (kind: 'burn' | 'bleed' | 'spore') => (
   damagePerSecond: Amount,
   durationTicks: number,
   to: Selector = subject(),
-  options: { named?: string } = {},
-): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => noted((sim, src) => {
-  const id = options.named === undefined ? `${src.id}:${kind}` : namedStatusId(src, options.named, kind)
-  for (const unitId of to(sim, src)) {
-    const perPulse = Math.max(0, Math.round(
-      resolveAmount(damagePerSecond, sim, { ...src, subject: unitId }) * GAME_BURN_PULSE_TICKS / GAME_TPS,
-    ))
-    if (perPulse === 0) continue
-    sim.addStatus(unitId, statusFor(src, id, kind, durationTicks, perPulse))
+  options: { named?: string; ownerHealPerSecond?: Amount; ownerHealOnDeath?: Amount } = {},
+): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => {
+  const effect = noted((sim: SimReader & Pick<SimWriter, 'addStatus'>, src: EffectSource) => {
+    const id = options.named === undefined ? `${src.id}:${kind}` : namedStatusId(src, options.named, kind)
+    const asOwner = { ...src, subject: src.ownerId }
+    const pulseHeal = options.ownerHealPerSecond === undefined
+      ? 0
+      : Math.max(0, Math.round(resolveAmount(options.ownerHealPerSecond, sim, asOwner) * GAME_BURN_PULSE_TICKS / GAME_TPS))
+    const deathHeal = options.ownerHealOnDeath === undefined ? 0 : resolveCount(options.ownerHealOnDeath, sim, asOwner)
+    for (const unitId of to(sim, src)) {
+      const perPulse = Math.max(0, Math.round(
+        resolveAmount(damagePerSecond, sim, { ...src, subject: unitId }) * GAME_BURN_PULSE_TICKS / GAME_TPS,
+      ))
+      if (perPulse === 0) continue
+      sim.addStatus(unitId, statusFor(src, id, kind, durationTicks, perPulse, {
+        ...(pulseHeal > 0 ? { pulseHeal } : {}),
+        ...(deathHeal > 0 ? { deathHeal } : {}),
+      }))
+    }
+  }, { kind, amount: describeAmount(damagePerSecond) })
+  // What it gives back a second, for a tooltip to tell (see `overTimeOwnerHeal`).
+  if (options.ownerHealPerSecond !== undefined) {
+    const heal = describeAmount(options.ownerHealPerSecond)
+    if (heal) ownerHeals.set(effect, heal)
   }
-}, { kind, amount: describeAmount(damagePerSecond) })
+  return effect
+}
+
+// The health a second a damage over time gives back to whoever put it on, if it gives any (`ownerHealPerSecond`), as it is made of.
+const ownerHeals = new WeakMap<object, AmountInfo>()
+export function overTimeOwnerHeal(effect: object): AmountInfo | undefined {
+  return ownerHeals.get(effect)
+}
 
 // Sets units alight (see `overTime`).
 export const burn = overTime('burn')
@@ -765,7 +802,7 @@ export function namedStatusTicksLeft(
   return statuses.reduce((left, status) => status.id.startsWith(prefix) ? Math.max(left, status.endTick - tick) : left, 0)
 }
 
-// Makes every status the owner has given a unit under this name (`named`, on `haste`, `resist` and `statBuff`) last `ticks` longer, though never longer than
+// Makes every status the owner has given a unit under this name (`named`, on `haste`, `resist`, `statBuff` and the damages over time) last `ticks` longer, though never longer than
 // `longest` ticks from now: a buff that grows as it is used, such as a rage that each auto feeds. A unit without the status is left as it is, so an
 // effect that feeds a rage does not start one. They all end together, as they began.
 export const prolong = (
@@ -1113,20 +1150,30 @@ export const capCooldown = (
 
 // Puts an ability on its full cooldown from now, even if it was ready or nearly so. For an ability
 // whose cooldown has been running while something else was in use in its place (a recast), which
-// should start over once that ends.
+// should start over once that ends. With `ticks` it is put on a cooldown of exactly that many ticks
+// instead, whatever its own is and however much haste the unit has: for a wait that is about the
+// player (a recast that must not be hit by accident the moment the cast before it lands) and not
+// about how fast the unit is.
 export const startCooldown = (
   abilityId: string,
   to: Selector = self(),
-): Effect<SimReader & Pick<SimWriter, 'emitEvent'>> => (sim, src) => {
-  for (const unitId of to(sim, src)) {
-    sim.emitEvent({
-      type: 'start-cooldown',
-      id: `${src.id}:start-cooldown:${abilityId}:u${unitId}`,
-      rootId: src.rootId,
-      ownerId: src.ownerId,
-      unitId,
-      abilityId,
-    })
+  ticks?: number,
+): Effect<SimReader & Pick<SimWriter, 'emitEvent'>> => {
+  if (ticks !== undefined && !(Number.isInteger(ticks) && ticks > 0)) {
+    throw new Error(`A cooldown started for a set time needs a whole number of ticks above 0, and "${abilityId}" was given ${ticks}.`)
+  }
+  return (sim, src) => {
+    for (const unitId of to(sim, src)) {
+      sim.emitEvent({
+        type: 'start-cooldown',
+        id: `${src.id}:start-cooldown:${abilityId}:u${unitId}`,
+        rootId: src.rootId,
+        ownerId: src.ownerId,
+        unitId,
+        abilityId,
+        ...(ticks !== undefined ? { ticks } : {}),
+      })
+    }
   }
 }
 

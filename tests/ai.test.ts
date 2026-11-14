@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   aimAt,
   getAbilityDef,
+  GAME_MAX_PLAYERS,
   GAME_MONSTER_TEAM,
   getTeam,
   isMonsterTeam,
@@ -407,10 +408,10 @@ test('a monster\'s choices are a function of what it was given: the same every t
 })
 
 test('monsters are on a team of their own that no player is on, drawn in its own colour', () => {
-  assert.equal(GAME_MONSTER_TEAM, 9)
-  assert.equal(isMonsterTeam(9), true)
-  assert.equal(isMonsterTeam(8), false)
-  assert.deepEqual([getTeam(9).name, getTeam(9).color === getTeam(1).color], ['Monsters', false])
+  assert.equal(GAME_MONSTER_TEAM, GAME_MAX_PLAYERS + 1, 'one past the last team a player can pick')
+  assert.equal(isMonsterTeam(GAME_MONSTER_TEAM), true)
+  assert.equal(isMonsterTeam(GAME_MAX_PLAYERS), false)
+  assert.deepEqual([getTeam(GAME_MONSTER_TEAM).name, getTeam(GAME_MONSTER_TEAM).color === getTeam(1).color], ['Monsters', false])
 })
 
 test('a monster\'s profile is checked, and filled in with defaults', () => {

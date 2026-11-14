@@ -1215,12 +1215,9 @@ button.hud-item:hover {
   right: 0.1rem;
   bottom: 0.2rem;
   left: 0.1rem;
-  overflow: hidden;
   font-size: 0.62rem;
+  line-height: 1.05;
   text-align: center;
-  text-overflow: ellipsis;
-  text-transform: capitalize;
-  white-space: nowrap;
 }
 
 /* An ability's picture, which fills the box it is in. The art is 16 px, so it is scaled up with hard

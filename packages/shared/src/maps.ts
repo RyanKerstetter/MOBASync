@@ -1,7 +1,7 @@
 import { GAME_MAX_PLAYERS } from './constants.js'
 import type { GameMode } from './index.js'
 import type { MapLayout } from './map-layout.js'
-import { GAME_MODES, modeSupportProblem, teamCountProblem } from './modes.js'
+import { coreSlotsOf, coreTeamsProblem, GAME_MODES, modeSupportProblem, teamCountProblem } from './modes.js'
 import { rankTeams, spawnPointsNeeded } from './spawns.js'
 import { getTeam } from './teams.js'
 
@@ -25,6 +25,8 @@ export type MapSummary = {
   hill: boolean
   flags: boolean
   cores: boolean
+  // How many slots, from the first with none skipped, have a core: the most teams it can play Core Destruction with (`cores` is whether that is two or more).
+  coreSlots: number
   // How many monsters it starts with.
   monsters: number
   // Why the map cannot be played on, if it cannot (what is wrong with its file). It is listed so the leader
@@ -32,8 +34,9 @@ export type MapSummary = {
   problem?: string
 }
 
-// Just what the checks below need of a map, which is less than a summary.
-export type MapCapabilities = Pick<MapSummary, 'name' | 'spawns' | 'hill' | 'flags' | 'cores' | 'problem'>
+// Just what the checks below need of a map, which is less than a summary. (A map that does not say how many cores it has is taken to have as many as `cores`
+// says: two, or none.)
+export type MapCapabilities = Pick<MapSummary, 'name' | 'spawns' | 'hill' | 'flags' | 'cores' | 'problem'> & Partial<Pick<MapSummary, 'coreSlots'>>
 
 // "Duel arena" for "duel_arena": a name for a map that does not give itself a title.
 export function mapDisplayName(id: string): string {
@@ -42,6 +45,7 @@ export function mapDisplayName(id: string): string {
 }
 
 export function summarizeMap(id: string, layout: MapLayout): MapSummary {
+  const coreSlots = coreSlotsOf(layout.cores)
   return {
     id,
     name: layout.title ?? mapDisplayName(id),
@@ -52,13 +56,14 @@ export function summarizeMap(id: string, layout: MapLayout): MapSummary {
     hill: layout.hill !== undefined,
     flags: Boolean(layout.flags[0] && layout.flags[1]),
     cores: Boolean(layout.cores[0] && layout.cores[1]),
+    coreSlots,
     monsters: layout.monsters.length,
   }
 }
 
 // A map whose file has something wrong with it: all of what is wrong, as `readMapLayout` says it.
 export function unplayableMap(id: string, problem: string): MapSummary {
-  return { id, name: mapDisplayName(id), width: 0, height: 0, spawns: [], hill: false, flags: false, cores: false, monsters: 0, problem }
+  return { id, name: mapDisplayName(id), width: 0, height: 0, spawns: [], hill: false, flags: false, cores: false, coreSlots: 0, monsters: 0, problem }
 }
 
 // The modes the map can be played in, which is every mode it has what it needs for.
@@ -97,13 +102,14 @@ export function startProblem(mode: GameMode, teams: readonly number[], map: MapC
   if (map.problem) return `${map.name} cannot be played on: ${map.problem}`
   return modeSupportProblem(mode, map)
     ?? teamCountProblem(mode, new Set(teams).size)
+    ?? coreTeamsProblem(mode, new Set(teams).size, map.coreSlots ?? (map.cores ? 2 : 0), map.name)
     ?? teamSetupProblem(teams, map.spawns, map.name)
 }
 
 const listed = (items: readonly string[]): string =>
   items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`
 
-// A line on what team setups the map takes, for the lobby: every way eight players can split into teams of up to
+// A line on what team setups the map takes, for the lobby: every way sixteen players can split into teams of up to
 // four, or how many teams and how many players on each.
 export function mapRoomText(spawns: readonly number[]): string {
   if (spawns.length === 0) return 'No room for any team.'

@@ -13,7 +13,7 @@ The client's game code is split by what it does:
 - `game.ts` runs one game: the connection to the server, the player's input, and each frame. It works out
   what to show from `ClientGameState` and hands it on; it draws nothing itself.
 - `render/` draws the world with PixiJS and knows nothing of the network or the simulation.
-  `WorldRenderer` stacks its layers in a fixed order (the map, the shops' healing areas, the hill and flags, the shadows under the towers, ground effects, the turrets' ranges, indicators,
+  `WorldRenderer` stacks its layers in a fixed order (the map, the shops' healing areas, the healing zones, the hill and flags, the shadows under the towers, ground effects, the turrets' ranges, indicators,
   the champions and the walls together, carried flags, shots, the darkness of what the team cannot see, the champions' names
   and bars, the damage and healing numbers and what a kill paid, debug), and each frame it is given a plain
   `WorldFrame` to draw. The ground is a
@@ -58,17 +58,18 @@ it reads `http://<host>/?lobby=ABC123` (`searchWithLobby` in `apps/client/src/lo
 is all it takes, and whoever opens it **joins that lobby** (as the name in the username box, which they can change in the lobby; a lobby that is gone, full or in a game says so on
 the entry page, with its code left in the join box). The address goes back to what it was when the player leaves the lobby, so it never names one they are not in. Whatever else is in the
 address (`?vision=`, the lag settings) stays and goes with it, so a link copied from a page opened with them carries them too. The **Copy** button next to the code copies the code alone. Usernames default to `Player`; if a name is already in use in a lobby, a number
-is appended. Lobbies hold up to eight players (`GAME_MAX_PLAYERS`, which is also the default);
-set the `LOBBY_MAX_PLAYERS` environment variable on the server to a whole number from 1 to 8 for
+is appended. Lobbies hold up to sixteen players (`GAME_MAX_PLAYERS`, which is also the default);
+set the `LOBBY_MAX_PLAYERS` environment variable on the server to a whole number from 1 to 16 for
 a smaller cap. Each player picks a team in the lobby from a row of coloured buttons (`GAME_TEAMS`: Red,
-Blue, Green, Gold, Purple, Orange, Teal and Pink, one for every player a full lobby holds). Someone who
+Blue, Green, Gold, Purple, Orange, Teal, Pink, Lime, Indigo, Brown, Maroon, Sky, Magenta, White and Charcoal, one for every player a full lobby holds). Someone who
 joins is put on the smaller of the first two teams, Red when they are level, so a lobby fills up as
 two even teams, and renaming keeps your team. Players on the same team are teammates and everyone
-else is an enemy, so if everyone picks a different team, a full lobby is an eight-way free for all.
+else is an enemy, so if everyone picks a different team, a full lobby is a sixteen-way free for all.
 Teams can be changed only in the lobby, not once champion select has opened. A team holds at most
 four players (`GAME_MAX_TEAM_SIZE`): the server turns a fifth away, and the button of a full team is off.
 The leader also picks the game mode from the **Game mode** drop-down (team deathmatch, king of the hill,
-capture the flag or core destruction, see "Game modes") and sets the **Game rules** under it: how long a champion stays dead, the
+capture the flag or core destruction, see "Game modes") and sets the **Game rules** under it: how long a champion stays dead (and, in a mode with levels,
+how much longer for each level), whether the map's turrets and cores are **healing zones** instead (see "Healing zones"), the
 score to win at (the box for the mode that is picked, and only that one), and for king of the hill how long
 the hill takes to capture. Everyone sees what is set, and it is fixed once champion select opens.
 The lobby leader starts the game for the whole lobby, which first opens champion
@@ -158,7 +159,8 @@ being aimed, since the click would cast it, or while dead.
 What is affecting a champion is written in small words above its name (`stunned`, `airborne`, `rooted`, `silenced`,
 `blinded`, `burning`, `bleeding`, `spored`, `slowed`, `hasted`, all that apply, the most disabling first; `render/status-labels.ts`), not
 drawn as a coloured ring around it. A knocked-up (`airborne`) body is also drawn up off the ground, rising and falling back over the knock-up (`RenderedCharacter.lift`, `AIRBORNE_LIFT`).
-A **bleeding** body sheds drops of blood that fall from it to its feet, a few at a time, and its figure flushes red and pales again (`render/bleed-look.ts`: `layoutBleedDrops`, `bleedTint`). A **spored**
+A **bleeding** body sheds drops of blood that fall from it to its feet, a couple at a time, and its figure flushes a pale red and back again (`render/bleed-look.ts`: `layoutBleedDrops`, `bleedTint`;
+how strong it looks is `BLEED_DROPS`, `BLEED_DROP_ALPHA`, `BLEED_DROP_SIZE`, `BLEED_TINT` and how slow `BLEED_DROP_MS` and `BLEED_PULSE_MS` make it). A **spored**
 body (one carrying an Ent's spore) puffs pale green spores that drift away from it and up (`render/spore-look.ts`: `layoutSpores`). A champion
 **going back** (channelling Back) has a ring round its feet whose bright arc goes round from the top as the channel runs, closing as it is taken home, over a glow that grows, and motes of light rising
 round it (`render/back-look.ts`: `layoutBack`, from `RenderedCharacter.backing`), so everyone who can see it knows it is going and how long it has left. Both are part of the body, so they are hidden
@@ -204,7 +206,7 @@ The server lists every map it has (`MapCatalog`, `apps/server/src/maps.ts`): eac
 `.json` that is a map (a tileset saved as `.json` is not listed). A map is only read again when its file changes,
 and the folder is looked at once a second at most, so a map saved in Tiled appears in every lobby's list. What the
 lobby is told of each (`MapSummary`, `packages/shared/src/maps.ts`) is: its name, a line about it, its size, how
-many players each team slot holds, whether it has a hill, and whether it has the flags for the first two teams.
+many players each team slot holds, whether it has a hill, whether it has the flags for the first two teams, and how many teams it has cores for (`coreSlots`).
 A map that cannot be played on is listed with what is wrong, but cannot be picked.
 
 - **Name and line:** give the map the properties `title` and `description` (text, on the map itself, in Tiled's
@@ -212,7 +214,7 @@ A map that cannot be played on is listed with what is wrong, but cannot be picke
 - **The leader picks the map** (`POST /api/lobbies/:code/map`, leader only, while the lobby is idle), and the lobby
   says what it is: its size, which team setups it takes, and which modes it has what they need for.
 - **Only modes the map supports can be picked.** King of the hill needs a hill, capture the flag needs a flag for
-  each of the first two teams, and core destruction needs a core for each of the first two (`modeSupportProblem`). The others are in the mode list but greyed, with "(not on
+  each of the first two teams, and core destruction needs a core for each of the first two, and for a game of more teams one for each (`modeSupportProblem`, `coreTeamsProblem`). The others are in the mode list but greyed, with "(not on
   this map)". Picking a map that lacks the selected mode puts the lobby back on team deathmatch and says so; the
   server turns a request for an unsupported mode away, with the reason.
 - **The teams have to fit the map** (`teamSetupProblem`). The biggest team starts at the map's first slot of spawn
@@ -278,13 +280,13 @@ A map that cannot be played on is listed with what is wrong, but cannot be picke
   box over its rectangle (`BushAreaLayer`, `render/bush-area.ts`: see-through, with a line round the edge, over the champions and under the
   fog); the art under it is up to you, and the debug view (P) outlines the shapes too.
 - **Spawn points:** point objects of class `spawn`, each with a whole-number property `team-name`, the
-  slot it is in (1 to 8), and a `spawn-number`, which of the slot's points it is (1, 2, 3 ... with none
+  slot it is in (1 to 16), and a `spawn-number`, which of the slot's points it is (1, 2, 3 ... with none
   missing). **How many slots, and how many points in each, is what the map allows**: a map has a slot for each
   team it can start, in order from 1 with none skipped, and as many points in each as the team of that rank
   can have players. A map of two slots of four takes two teams of up to four; one with 3, 3 and 2 takes three
-  teams, two of up to three and one of two. A map with 4, 4, 2, 2, 1, 1, 1, 1 points (`spawnPointsNeeded`) takes
-  every way eight players can split into teams of up to four (the k biggest teams are each at least as big as the
-  kth, so the kth has at most 8 / k players), which is what `ffa_arena` has. A map with no points, or that skips a
+  teams, two of up to three and one of two. A map with 4, 4, 4, 4, 3, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1 points (`spawnPointsNeeded`) takes
+  every way sixteen players can split into teams of up to four (the k biggest teams are each at least as big as the
+  kth, so the kth has at most 16 / k players). A map with no points, or that skips a
   slot, is refused. Points are measured from the arena's corner and must be inside it. Two slots can share a
   place when no game can use both points (a game that has a team of two in its fourth slot has no fifth team,
   so the fourth slot's second point and the fifth slot's only point can be the same), but check that first,
@@ -297,14 +299,15 @@ A map that cannot be played on is listed with what is wrong, but cannot be picke
   is fine, but king of the hill cannot be started on it: the leader is told why. The hill is not drawn
   by the map: the game draws it (and fills it as it is captured), so the art under it is up to you.
 - **Flags (capture the flag):** point objects of class `ctf-flag`, each with a whole-number `team-name`: the
-  slot of spawn points whose base the flag is at (1 to 8, once each). Slot 1 is where the biggest team in
+  slot of spawn points whose base the flag is at (1 to 16, once each). Slot 1 is where the biggest team in
   a game starts and slot 2 the next biggest (see `assignSpawns`), so the first flag is the biggest team's,
   and capture the flag, which is for two teams, uses the flags of slots 1 and 2. Like a spawn point, a flag
   needs room for a champion clear of the walls and the arena's edge, and a way to it from the spawn points.
   A map with fewer than two flags is fine, but capture the flag cannot be started on it.
-- **Cores (core destruction):** point objects of class `core`, each with a whole-number `team-name` (1 to 8, once each): the slot of
-  spawn points whose base it is the heart of, as for a flag. Core destruction is for two teams, so it uses the cores of slots 1
-  and 2, and a map with both can be played in it; a map with fewer is fine, but the mode cannot be started on it. A core is solid and needs
+- **Cores (core destruction):** point objects of class `core`, each with a whole-number `team-name` (1 to 16, once each): the slot of
+  spawn points whose base it is the heart of, as for a flag. Core destruction is for up to four teams (`GAME_CORE_MAX_TEAMS`), each using the
+  core of the slot it starts at: a map with the cores of slots 1 and 2 can be played in it by one or two teams, and one with the first three or four by that many (`coreSlotsOf`
+  counts the slots from the first, with none skipped). A game with more teams than the map has cores for is refused, with the reason, and a map with fewer than two cores is fine, but the mode cannot be started on it. A core is solid and needs
   room for its size (its tier's `radius`, in `turrets.ts`: a core is a turret) clear of the walls and the arena's edge, and a way to it from the spawn points. The
   core is in a game of that mode only: in the others its point is not used. Put it inside the base the turrets guard, and clear of the
   spawn points and the turrets (below).
@@ -315,7 +318,7 @@ A map that cannot be played on is listed with what is wrong, but cannot be picke
   need 28`). A point too close to a wall or the arena's edge says the nearest place that clears the walls and the edge (`about (60, -288)
   in the map's own pixels`), which may still be too near a spawn point or a turret: that is checked as well. A core is 20 map pixels across from its middle (its tier's `radius`, 60 world units at the default scale of 3), so it cannot sit
   against the arena's edge: its middle has to be at least 20 pixels in.
-- **Shops:** rectangles of class `shop`, each with a whole-number `team-name` (1 to 8): the slot of spawn points whose team shops there, as for a flag or a
+- **Shops:** rectangles of class `shop`, each with a whole-number `team-name` (1 to 16): the slot of spawn points whose team shops there, as for a flag or a
   core. A champion can buy and sell items only while its middle is in a shop of its team (see "Items and the shop"), and is healed there, so put one over each base, with the
   spawn points in it. The game draws it with a green tint. They must be plain rectangles, not turned, and at least partly in the arena. **A map with any shop needs one for every slot that has
   spawn points** (a second for the same team is fine): `Slot 2 has spawn points but no shop, so its team could never buy: give a shop the team-name 2.` A
@@ -326,11 +329,11 @@ A map that cannot be played on is listed with what is wrong, but cannot be picke
   monster's size clear of the walls and the arena's edge, and one with no `monster-type` is refused. A point naming
   a monster the game does not have yet is left out, and the server logs a warning saying which, when a game starts
   on the map, so a map can hold places for monsters that are still to come. A map with none has none, and every
-  mode has the map's monsters. A point can have a whole-number `team-name` (1 to 8) as well: the slot of spawn points whose side of the
+  mode has the map's monsters. A point can have a whole-number `team-name` (1 to 16) as well: the slot of spawn points whose side of the
   map it is on, as for a turret. The monster is in a game **only when a team starts at that slot** (the biggest team at slot 1, the next at
   slot 2, see `assignSpawns`), so a map for two teams played by one has the monsters of the first side alone. A point with no `team-name` is in
   every game, and one with a `team-name` that is not a slot is refused.
-- **Turrets:** point objects of class `turret`, each with a whole-number `team-name` (1 to 8) and a whole-number
+- **Turrets:** point objects of class `turret`, each with a whole-number `team-name` (1 to 16) and a whole-number
   `turret-tier` (see "Turrets"). Like a flag, the `team-name` is the slot of spawn points the turret belongs to: the
   biggest team in a game is at slot 1, so the turrets of slot 1 are its, and every other team is their enemy. A
   game with no team at a slot has no turrets for it. A point needs room for its tier's size clear of the walls and
@@ -511,8 +514,8 @@ the team's colour over each group.
 A new lobby starts on the default map (`competetive`) in the default mode, **Core Destruction** (`DEFAULT_GAME_MODE`), when that map can be
 played in it, which `startingMode` works out; if not (a map with no cores, or none that can be played on) it starts in team deathmatch. Team
 deathmatch is also `FALLBACK_GAME_MODE`: what a lobby is put back on when its leader picks a map that cannot be played in the mode it had, and
-what a game is when it is given no mode. (Core Destruction takes one team or two, so a lobby of one player can start it and play alone; a lobby with
-three teams says so and cannot start until it is down to two or another mode is picked.)
+what a game is when it is given no mode. (Core Destruction takes one team up to four, so a lobby of one player can start it and play alone; a lobby with
+more teams than the mode takes, or than the map has cores for, says so and cannot start until it has fewer or another mode is picked.)
 
 The lobby leader picks the mode (`GAME_MODES` in `packages/shared/src/modes.ts`) and the server keeps it on
 the lobby (`POST /api/lobbies/:code/mode`, leader only, while the lobby is idle). Starting a game checks that the
@@ -551,13 +554,13 @@ leaves out the two side panels of the HUD (the level and stats, and the items an
   where it was, and it stays there until a living champion of the flag's own team walks over it, which sends
   it back to its base, or an enemy picks it up again. A flag does not go home by itself, and only a champion of
   its own team returns it.
-- **Core Destruction:** for two teams, or one to play alone. Each team has a **core** at its base (see "Cores", below), on the map's core of the slot the
-  team starts at, guarded by its turrets. Break the enemy core, and that team **cannot respawn**: a player who dies stays dead, and
+- **Core Destruction:** for up to four teams (`GAME_CORE_MAX_TEAMS`), or one to play alone. Each team has a **core** at its base (see "Cores", below), on the map's core of the slot the
+  team starts at, guarded by its turrets. Break an enemy core, and that team **cannot respawn**: a player who dies stays dead, and
   one who was already waiting to come back does not. Take down every player left on it and it is out, and the last team that is not
-  out wins. There is no score limit, and no box for one in the lobby: the game ends when a team is. A team is *out* when its core is
+  out wins. There is no score limit, and no box for one in the lobby: the game ends when every team but one is out. A team is *out* when its core is
   broken and none of its players is alive; a team whose core stands is never out, however many of its players are dead, since they
-  come back. (Should the last players of the two teams go down on the same tick, no one has won and the game goes on with no one in
-  it until the leader ends it.) The score each team shows is how many cores of the other team it has broken, 1 or 0.
+  come back. (Should the last players of the teams still in go down on the same tick, no one has won and the game goes on with no one in
+  it until the leader ends it.) The score each team shows is how many cores of the other teams it has broken (with four teams, up to three).
   **Played alone** (one team, of one player or more), there is no other team: the game has only that team's core and turrets, no one is ever the
   last team standing (`winningTeam` is `undefined` for a setup of one team), and the game ends only when its players have all gone back to the
   lobby or left (`closeIfEmpty`), or the leader ends it.
@@ -584,12 +587,13 @@ of the game (`winningTeam` reads who is out from the objective), checked at the 
 `ARENA · FIRST TO 3 ROUNDS`): rounds are won one at a time, so the first team to reach the limit is always ahead of the rest. A mode whose limit cannot be
 none says so with `minLimit` on its entry in `GAME_MODES` (`limitRange` reads it), and the lobby's box then starts there and does not offer 0.
 
-**Respawn time** is a rule too (1 to 60 seconds, three by default). It is part of the setup the snapshot carries
-(`respawnTicks`), so every peer brings a champion back on the same tick, and a champion that is dead sees
-`Respawning in 8s` where its health was. It is what a **level 1** champion waits: a champion waits `GAME_RESPAWN_TICKS_PER_LEVEL` (2 seconds, in
-`constants.ts`) more for each level it has above the first, so the wait is the rule plus 2 seconds for each level gained (`respawnTicksAt`, in `progression.ts`: the one place
-that says how it scales, read by the simulator, which brings the champion back, and by the page, for its countdown, through `Simulator.respawnTicksFor`). A game with no experience
-has no levels above the first, so it is the rule alone. A monster is not a champion: it comes back by its own `respawnTicks`, whatever its level. `tests/respawn-scaling.test.ts`.
+**Respawn time** is a rule too, in two boxes: **Respawn time** (1 to 60 seconds, three by default), which is what a **level 1** champion waits, and
+**Extra respawn time per level** (0 to 30 seconds, `RESPAWN_PER_LEVEL_SECONDS`; by default `GAME_RESPAWN_TICKS_PER_LEVEL`, 2 seconds, in `constants.ts`), which a champion waits more for
+each level it has above the first. So the wait is the first plus the second for each level gained (`respawnTicksAt`, in `progression.ts`: the one place
+that says how it scales, read by the simulator, which brings the champion back, and by the page, for its countdown, through `Simulator.respawnTicksFor`). Both are part of the setup the
+snapshot carries (`respawnTicks`, `respawnTicksPerLevel`), so every peer brings a champion back on the same tick, and a champion that is dead sees
+`Respawning in 8s` where its health was. The second box shows only for a mode with levels (Core Destruction), and only such a game is given it: a game with no experience
+has no levels above the first, so it is the first alone. A monster is not a champion: it comes back by its own `respawnTicks`, whatever its level. `tests/respawn-scaling.test.ts`.
 
 **Lose items on death** is a rule for Core Destruction, the one mode with items (off by default; the tick box is in the lobby's rules and only
 shows while that mode is picked). With it on, a player who dies loses every item they carry but their **pet** (`KEPT_ON_DEATH` in `items.ts`). The items
@@ -649,7 +653,7 @@ capture the flag, a card for each flag (at base, dropped, or carried by whom, in
 and a hint to the local player (bring the flag home, your own flag is out, return your dropped flag); in core destruction, a row
 for each team's core instead of the scores, with its health in the team's colour and in words how it stands (`Protected by
 turrets`, its health, `Core broken · 2 players left`, `Eliminated`), and a hint to the local player (their own core is down, so
-they cannot respawn; or the enemy's is, so take down every player left). A dead player whose team has lost its core sees
+they cannot respawn; or an enemy's is, so take down every player left on that team, or on those teams when several cores are down). A dead player whose team has lost its core sees
 `Out of the game: your core is down` where the respawn countdown was. On the
 map (`render/objective-layer.ts`) the hill is outlined and filled from its middle by the share captured, with the
 share written over it, flickering while contested and with a heavy outline once it is held; the flags stand on a
@@ -897,12 +901,36 @@ being fixed, rolling back, snapshots), reading them from a map (including the co
 `tests/turret-range.test.ts` covers how the page shows them, and `tests/turret-shadow.test.ts` their shadows. `defineTurret` in `tests/fixtures.ts` registers a tier for a test.
 
 **Not here yet**, where a game would want it: targeting other things first (minions, or whoever hit an allied champion), a lobby
-switch for whether a game has turrets, and art of its own for each tier (and a different one for each team).
+switch for a game with no turrets at all, and art of its own for each tier (and a different one for each team). The lobby can make them healing zones instead (below).
+
+## Healing zones
+
+**Healing zones instead of turrets** is a lobby rule (`LobbyRules.healingZones`, off by default; a tick box in the rules, for every mode). With it on, every turret the map
+has, and in Core Destruction each core, is a **healing zone** of the same tier in the same place (`HEALING_ZONE_TIERS` in `turrets.ts`, one entry for each turret tier and
+the core's; the pure rules are in `healing-zones.ts`). It is in the setup the snapshot carries (`healingZones`), so a page that joins knows it (`Simulator.hasHealingZones`).
+
+A zone is still a **structure** (see "Structures"): it has health and resistance (`base`), is solid, is hurt by attacks only, is protected by the zones of its team below its tier
+as a turret is by the turrets, gives its team sight (`visionRange`), pays its `reward` when it falls, and is gone for good. The core's zone **is still the core**: when it
+falls its team cannot respawn. Each is no bigger than the tower it stands in for (its `radius`; a test checks it), so a map with room for the tower has room
+for it. Its body is `zone-<tier>`, in a registry of its own (`healingZones`), found with the turrets by `getStructureBody`. What it does not do is shoot: it has no damage and
+no reach, and `thinkTurrets` passes it over. Instead, every living player of its team whose middle is within its `zone.reach` (`tendHealingZones` in `simulator.ts`):
+
+- is **healed a flat amount**, `zone.healPerSecond`, whatever its most health, in a pulse four times a second (`HEALING_ZONE_PULSE_TICKS`, `zoneHealPerPulse`);
+- is **shielded** for `zone.shield` (lasting `zone.shieldTicks`) the moment it walks in, which starts its **shield timer**, and again every `zone.shieldEveryTicks` (5 seconds)
+  after the last while it stays in. The timer is the player's own (a marker on it, `HEALING_ZONE_SHIELD_KEY`, which is not drawn) and runs on when it walks out, so stepping out and
+  back in does not give a shield sooner. A new shield takes the last one's place: they do not stack.
+
+A player in more than one zone of its team is tended by the one that heals the most (`strongestZone`). Enemies, monsters and the dead get nothing. **With zones on, the shops do
+not heal** (see "Items and the shop"): the core is what heals a base, so its entry heals and shields the most. Every number is in the zone's entry to tune.
+
+**On screen.** A zone is not drawn as a tower: its body is a flat well edged in its team's colour with a pale cross on it (the core's set in a diamond), and round it the area it heals
+in is drawn on the ground (`HealingZoneLayer`, `render/healing-zone.ts`): a see-through disc of the team's colour out to its reach, a firmer edge, and a ring that swells slowly out
+from the body. It has no range ring and no shadow, and a broken zone is not drawn. The core's row in the mode's panel says `Protected by healing zones`. `tests/healing-zones.test.ts`.
 
 ## Structures
 
 Turrets and cores are **structures** (`structures.ts`; `SimCharacter.structure`). They stand where they are put, are solid, belong to a
-team, are destroyed for good (nothing brings one back), and are never paid for what they kill, scored for, or on the scoreboard. Two
+team, are destroyed for good (nothing brings one back), and are never paid for what they kill, scored for, or on the scoreboard. Three
 rules make them what they are:
 
 - **Only attacks hurt them.** An auto attack, a swing or a shot, does its damage to a structure, less its resistance. An ability does
@@ -910,6 +938,13 @@ rules make them what they are:
   blink, and no status or mark, so it cannot be stunned, rooted, slowed, silenced or burnt. (The simulator tells an attack's damage
   by its source id, `ATTACK_SOURCE_PREFIX`: an auto's damage is physical, an ability's is magic.) It is done in `applyWrites`, where every
   effect lands, so no effect has to know of it.
+- **Abilities go through them.** A structure is not in the way of an ability, and is not a hit for it: a bolt, a wave or a field flies on past a turret, a healing
+  zone or a core and goes on to the enemy behind it (a shot is spent on the first thing it hits, and that is never a structure); a blast, a line, a cone and a
+  box do not take one in; and a dash that touches only a structure has touched no one, so it misses (`onMiss`) and does not connect (`onConnect`). Only an auto
+  attack touches a structure, and what it leaves behind, such as its shot in the air. That is decided in one place, `touchesStructures(sourceId)` (in
+  `effects.ts`), by the same source id as the damage above: it is asked by the selectors (`enemiesInRadius`, `alliesInRadius`, `enemiesInLine`,
+  `enemiesInCone`, `enemiesInBox`), by the entity hits and by the dash hits in the simulator. A body is still solid, though: a dash stops where its body meets a
+  structure, and a blink does not land in one. `tests/ability-through-structures.test.ts`.
 - **Arcane adds to an attack on one.** Since only an attack hurts a structure, a champion whose strength is its arcane would do nothing to
   one, so an auto on a turret or a core deals `STRUCTURE_ARCANE_DAMAGE` (`structures.ts`, 1) damage for each point of the attacker's arcane,
   on top of the attack's own damage: 1 arcane is +1 attack damage to a structure. It is one extra hit for the whole attack (`arcaneOnStructure`,
@@ -938,7 +973,7 @@ its body is the id `turret-3`, the server puts it in the game with `addTurret` l
 in its range, ramps, is solid, is hurt by attacks only, is protected until the turrets below its tier are down, is a place its team sees from, has a range ring, and is
 destroyed for good. Everything that makes it what it is, to be tuned, is its entry: `base` (health, damage, attack speed, resistance), `radius`, `attackRange`,
 `attackWindup`, `attackProjectile`, `ramp`, `visionRange` and `reward`, the same fields as any tier (see "Turrets"). The default is the last gun of a base, a little harder and
-further than a tier 2 turret. The server puts one in a game of that mode for each of its teams (one or two), at the base of the slot the team starts at (the biggest team at the first
+further than a tier 2 turret. The server puts one in a game of that mode for each of its teams (one to four), at the base of the slot the team starts at (the biggest team at the first
 core of the map), after the players and the turrets. No monster goes after one.
 
 What the flag changes, and all it changes:
@@ -959,7 +994,7 @@ destroy animation (`res/turret/core-destroyed.png`, whose frames are wider than 
 after it fell.
 
 **To add one to a map:** put a point of class `core` with the `team-name` of the slot on each team's base (see "Maps from Tiled"). The
-competitive map has none yet, so Core Destruction is greyed on it until it does. `tests/structures.test.ts` covers the two rules
+`competetive` map has the cores of two teams and `4-player-competetive` of four, so a game of three or four teams needs the second, and a map with no cores greys Core Destruction out. `tests/structures.test.ts` covers the two rules
 (who is protected, what hurts a structure), `tests/core-mode.test.ts` the mode (the objective, respawns, winning, reading it from
 a map, the server, and what the page shows), `tests/core-turret.test.ts` what is the core's own (that it is the highest tier of turret, what its flag does, how the page and a
 map treat it), and `tests/structure-sprites.test.ts` how a turret or a core is drawn and how it falls. A core for a test is `defineTurret(tier, { ..., core: true })` in
@@ -1004,7 +1039,13 @@ as nothing is bought with them. The numbers are in `progression.ts`.
   not cut short. It is gone when the victim dies. `creditKill` and `rankDamage` are the rules on their own. `tests/credit.test.ts`.
 - **Setting a monster's reward.** `MonsterDef.reward` is `{ gold, xp, shards }`, each a whole number, 0 or more. Whatever it
   leaves out is `DEFAULT_MONSTER_REWARD` (25 gold, 25 experience, no shards), so a monster that says nothing is worth that.
-  At level 1 the slime pays 20 gold and 60 experience, and the golem 120 gold, 100 experience and 1 shard.
+  At level 1 the slime pays 20 gold and 60 experience, and the golem 50 gold, 150 experience and 1 shard.
+- **Killing a monster heals you.** The player who kills a monster is healed by a share of **their own maximum health**, set on the monster:
+  `MonsterDef.healOnKill`, a number from 0 to 1 (0.1 is a tenth, 0 heals nobody). Whatever it leaves out is `DEFAULT_MONSTER_HEAL_ON_KILL` (in
+  `progression.ts`, 0.1). The slime heals by 0.1 and the golem by 0.25 (the two `healOnKill` lines in `monsters.ts`: the numbers to change). It is the same at
+  every level of the monster, stops at the maximum like any heal, and is worked out on the tick of the kill in the killer's frame, after any level the kill gave them,
+  so a late order that undoes the kill takes it back. It is the player the death names who is healed, the one who landed the last blow or else did the most damage, and
+  killing a player or a structure heals nobody. It needs no economy, so it is in every mode. `tests/monster-heal.test.ts`.
 - **Levels.** You start at level 1, and each level takes **more experience than the one before**, in a straight line: `xpToNextLevel(level)` is
   `GAME_XP_FIRST_LEVEL` (100) plus `GAME_XP_STEP` (50) for each level after the first, so the levels take 100, 150, 200, 250 ... and level 2 is at 100
   experience, level 3 at 250, level 4 at 450. Up to `GAME_MAX_LEVEL` (18), and experience past the highest is still counted. **`xpToNextLevel` is the one
@@ -1081,7 +1122,7 @@ It is the simulator's rule, in `computeFrame`, as a `heal` event for each player
 the maximum health, does not make a hit's damage numbers, and the same on every peer on the same tick, and a late order that moves a player in or out
 of its shop changes it with the rest. It heals the team that owns the shop only (not an enemy standing in it, and not a champion in the other team's),
 never the dead, a monster or a structure, and **in every mode that has shops**, not only the one with an economy. Unlike buying, healing is not allowed
-from anywhere: a game with no shops has no area to heal in.
+from anywhere: a game with no shops has no area to heal in. **In a game with healing zones the shops do not heal** (and are not tinted): the zones do (see "Healing zones").
 
 **On screen.**
 - **The healing area** is the shop's rectangle drawn on the ground with a faint see-through **green tint** and a fainter line round the edge
@@ -1134,7 +1175,7 @@ Every one that a frame works out is read at the level in that frame.
 | `maxHp`, `attackDamage`, `attackSpeed` | As before, and they grow. A level gained adds its health to the maximum and to the health the character has (a dead one's stays 0), and a respawn is at the health of its level. |
 | `arcane` | **Ability power**: an amount, 0 for none, that does **nothing by itself**. Damage is as it is written unless an ability says it scales with arcane, by its own ratio (`scaled(100, { arcane: 0.6 })` is 100 and 0.6 for each point of it), so one ability can grow harder with it than another. Items and levels add points of it; the stats panel shows the amount. The one thing it does by itself: an auto attack on a turret or a core deals a point of damage for each point of it (`STRUCTURE_ARCANE_DAMAGE`, see "Turrets"). See "Scaling an ability" below. |
 | `resistance` | Takes `x / (100 + x)` off every hit taken, League's formula: 100 takes half, 300 three quarters, and no amount all of it. It applies to autos, abilities and burns alike, and then to a `resist` status as well (they multiply). A health cost (`loseHealth`) is not damage and ignores it. |
-| `haste` | Takes `x / (100 + x)` off an ability's cooldown, as it starts it (`hastedCooldownTicks`, whole ticks, never under one). It applies to a cooldown that is put back on its whole (`startCooldown`) and to what a refund takes off (a share of the shortened cooldown). An auto attack's rate is the attack speed, not this. |
+| `haste` | Takes `x / (100 + x)` off an ability's cooldown, as it starts it (`hastedCooldownTicks`, whole ticks, never under one). It applies to a cooldown that is put back on its whole (`startCooldown`, unless it is given a set number of ticks, which haste leaves alone) and to what a refund takes off (a share of the shortened cooldown). An auto attack's rate is the attack speed, not this. |
 
 **Base and growth.** A champion holds its stats twice, as two `StatBlock`s (`stats.ts`), a class of the six numbers `maxHp`,
 `attackDamage`, `attackSpeed`, `resistance`, `haste` and `arcane`, each a number, 0 or more. `base` is what it is at level 1, and
@@ -1848,7 +1889,8 @@ its dasher's death runs no `onMiss`.
 `popMarkers(key, to, { count })` takes only that many of a stack, the oldest, where it used to take all
 of them, which is how an auto or a Kunai spends one stack of two. `startCooldown(abilityId)` puts an
 ability on its whole cooldown from now, whatever was left, where `refundCooldown` and `capCooldown` only
-take time off.
+take time off. `startCooldown(abilityId, to, ticks)` puts it on a cooldown of exactly `ticks` instead, which haste does not shorten (the Fireball uses it to keep Detonate from going off the
+moment the shot leaves).
 
 **Dodge** is a status (`dodge(ticks)`) that makes an auto aimed at the unit land nothing, whether it is
 a swing or a shot arriving. `Champion.attackEffects` is replaced as a whole for a dodging subject:
@@ -2012,7 +2054,10 @@ enemy takes the shot's damage (`FIREBALL_DAMAGE`) and a stack, and then the **bl
 fuse, `fireball-blast`, so the stack the shot put on is there to be counted) and hurts and puts a stack on everyone in it. So the enemy hit **straight on takes two stacks**, and one caught only by the blast
 one. Every hit, the shot's and the blast's, **slows** what it hits (`FIREBALL_SLOW`), or **stuns** it instead (`FIREBALL_STUN_TICKS`) if that hit brings it to full stacks or it was there already. While the
 shot flies the key is **Detonate** (`detonate`, the recast, as Stick's is Recall), which sets the blast off where the shot is and takes the shot away: a blast with no shot before it is one stack for everyone
-in it, the enemy it would have hit too. A shot that hits nothing and is not set off **blows up at the end of its flight** the same way (its `onExpire`), or where it meets the edge of the arena if that
+in it, the enemy it would have hit too. **Not at once**: the throw puts Detonate on a cooldown of `FIREBALL_DETONATE_DELAY_TICKS` (0.3 seconds, in `abilities.ts`: the number to change), so pressing the key
+twice in a row, or mashing it, does not set the shot off the moment it leaves (a press in that time is dropped, like any cast that cannot be made). It is put on with `startCooldown('detonate', self(), ticks)`,
+whose `ticks` is a cooldown of exactly that length that **haste does not shorten** (without it, `startCooldown` is the ability's own cooldown, which haste does), since how fast a finger double-taps does
+not change with the mage's haste. A longer delay is more room for a stray second press, and less of the flight (`FIREBALL_RANGE / FIREBALL_SPEED`, 0.75 seconds) in which the shot can be set off. A shot that hits nothing and is not set off **blows up at the end of its flight** the same way (its `onExpire`), or where it meets the edge of the arena if that
 comes first (`stopsAtWalls`), so the blast is always on the map. W, **Fire Tornado**, marks a circle at a point (`TORNADO_RADIUS`), which a
 tornado bursts out of when its warning runs out (`TORNADO_DELAY_TICKS`): every enemy inside then is hurt, given a stack and **knocked up** (`knockUp`, for `TORNADO_KNOCKUP_TICKS`), and one that
 walked out first is not. E, **Scorch**, sends a wave of fire along the ground (`SCORCH_RANGE`, `SCORCH_HALF_WIDTH`) through every enemy in its way, hurting each once as it reaches it
@@ -2021,13 +2066,14 @@ it starts. An enemy on the burning ground burns (`SCORCH_BURN`) while it stands 
 they overlap, and the ground puts no stacks on. It is tested in `tests/firemage.test.ts`.
 
 **Aurel** is a melee bloodletter who hits harder as he weakens, makes his prey bleed and runs it down. P: his autos do up to `LOW_HEALTH_BONUS` more the less health he has (all of it at none, half
-of it at half his health, none at full). Q, **Rend**, is a strike at an enemy close by (`REND_RANGE`; aimed at one farther off, he walks up to it first). It hurts it (`REND_DAMAGE`), makes it **bleed**
+of it at half his health, none at full), and each one that lands on an enemy bleeding from him sets the bleed back to its whole `BLEED_TICKS` from then, with the damage
+it had (`refreshBleed`, which is `prolong` on the bleed's name); an auto never starts a bleed. Q, **Rend**, is a strike at an enemy close by (`REND_RANGE`; aimed at one farther off, he walks up to it first). It hurts it (`REND_DAMAGE`), makes it **bleed**
 (`bleed`: damage over time, one status of his that a Rend renews, for `BLEED_TICKS`), heals him a set amount (`REND_HEAL`, which grows with his level), gives him move
 speed for a moment (`REND_HASTE`, for `REND_HASTE_TICKS`). It does **not reset his auto**: the next one comes when it would have anyway. Against an enemy that **was bleeding
 already** it heals him a share of the health he is missing as well (`REND_MISSING_HEAL`), and the move speed is more (`REND_BLEEDING_HASTE`). W, **Transfusion**, takes every crowd control off him (`cleanse`) and heals him a
 share (`TRANSFUSION_SHARE`) of the **health he lost in the last `TRANSFUSION_WINDOW_TICKS`**. It is **cast through crowd control** (`unstoppable`): a stun, a knock-up, a fear or a silence does not stop it.
 While it is ready the page shows on his health bar what it would heal, as a paler stretch after his health (`healthBarPreview`). E, **Bloodrush**, dashes onto an enemy, landing beside it (`besideTarget`),
-and slows it (`BLOODRUSH_SLOW`). It reaches `BLOODRUSH_RANGE`, or `BLOODRUSH_BLEEDING_RANGE` to a **bleeding** enemy (`rangeAgainst`); aimed at one out of reach he walks up to it and dashes once it is in
+and hurts it (`BLOODRUSH_DAMAGE`, which grows with his attack damage) and slows it (`BLOODRUSH_SLOW`): both land on that enemy as he sets off, and not on anyone he passes on the way. It reaches `BLOODRUSH_RANGE`, or `BLOODRUSH_BLEEDING_RANGE` to a **bleeding** enemy (`rangeAgainst`); aimed at one out of reach he walks up to it and dashes once it is in
 reach, as for any ability aimed at an enemy, and the ring drawn while it is aimed grows to the longer reach over a bleeding enemy. It is tested in `tests/aurel.test.ts`.
 
 **Ent** is a melee treant who roots what he strikes, grows groves that heal his allies, and bursts the spores he plants. P: the **first auto he lands on an enemy roots it** (`ENT_ROOT_TICKS`), and
@@ -2036,15 +2082,19 @@ first strike, and a structure is passed over. Q, **Root Burst**, is a small circ
 in it and slowing it a lot (`ROOTBURST_SLOW`). W, **Grove**, is a big circle (`GROVE_RADIUS`) that a grove grows out of after a long warning (`GROVE_DELAY_TICKS`): every ally in it then, him too, is healed
 (`GROVE_HEAL`), and every enemy in it is hurt and **rooted** (`GROVE_ROOT_TICKS`). Both hit whoever is inside as the warning runs out, so they can be stepped out of. E, **Spore**, is a strike at an enemy close
 by (`SPORE_RANGE`; aimed at one farther off he walks up to it first) that hurts it and **plants a spore** on it: damage over time (`spore`, a status kind of its own, `'spore'`, so that a poison of his items' is never
-taken for one), one of his on each enemy, for `SPORE_TICKS`. When Root Burst, Grove or Spore hits an enemy that carries his spore, the spore **bursts** (`burstSpore`): the enemy takes bonus damage
-(`SPORE_POP_DAMAGE`), he is **healed** a good deal (`SPORE_POP_HEAL`, which grows with his arcane and his most health), and the spore is gone. Spore plants a fresh one after it bursts the old, and its cooldown is a
+taken for one), one of his on each enemy, for `SPORE_TICKS`. While it lasts it **heals him a little on each pulse** (`SPORE_HEAL_PER_SECOND`, with its arcane scaling: small next to a
+burst). When Root Burst, Grove or Spore hits an enemy that carries his spore, the spore **bursts** (`burstSpore`): the enemy takes bonus damage
+(`SPORE_POP_DAMAGE`), he is **healed** a good deal (`SPORE_POP_HEAL`, which grows with his arcane and his most health), and the spore is gone. It also bursts if **the enemy carrying it dies**:
+he is healed as by a burst (the amount is worked out when the spore was planted), unless the spore was planted or burst on that same tick, so a killing blow never pays twice. A spore that
+**runs out of time does not burst**: it is just gone. Spore plants a fresh one after it bursts the old, and its cooldown is a
 little shorter than a spore lasts, so Spore after Spore bursts each time. It is tested in `tests/ent.test.ts`.
 
 The engine got a few things for them, each usable by any champion:
 
 - **Burns and bleeds by name.** `burn(dps, ticks, to, { named })` makes the burn the owner's one status of that name, whatever cast or entity lights it, so the patches of one trail, or every ability of a
   champion that feeds one burn, renew it instead of adding up. `bleed` and `spore` are the same damage over time under other status kinds (`'bleed'`, `'spore'`, pulsed with the burns), so what reads
-  them can tell them apart.
+  them can tell them apart. Any of them can feed whoever put it on: `ownerHealPerSecond` heals the owner on each pulse (`Status.pulseHeal`), and `ownerHealOnDeath` heals it once if the
+  carrier dies with it on (`Status.deathHeal`); the tooltip tells the first as a heal a second.
   `onEach(selector, effects)` runs effects once for each unit a selector picks, with that unit as the subject (for a blast whose effect on each unit depends on that unit's stacks).
 - **Knock-ups.** `knockUp(ticks)` gives the status `'airborne'`, which holds a unit exactly as a stun does (it cannot walk, attack or cast, and its windup is cut short) and is told and drawn as being thrown
   into the air.
@@ -2292,7 +2342,7 @@ Set these as environment variables on the server, for example
 | `WEBRTC_PORT_MIN` | `10000` | UDP port used for WebRTC |
 | `WEBRTC_PORT_MAX` | same as min | Top of the UDP range, if you want to allow a range |
 | `WEBRTC_ICE_SERVERS` | Google STUN | Comma-separated STUN/TURN URLs |
-| `LOBBY_MAX_PLAYERS` | `8` | Players per lobby, from 1 to 8 |
+| `LOBBY_MAX_PLAYERS` | `16` | Players per lobby, from 1 to 16 |
 | `GAME_MAPS_DIR` | `res/maps` | The folder the server reads its maps from (every `.tmj` in it), and reads again each time a game starts |
 
 ### Keeping it running
@@ -2313,7 +2363,7 @@ such as `pm2` keeps for you (`pm2 logs moba`). The time is UTC, and what follows
 
 ```
 2026-10-24T09:41:22.752Z INFO  lobby created lobby=6LWDQ6 leader=Alice map=competetive mode=core lobbies=1
-2026-10-24T09:41:22.757Z INFO  player joined lobby=6LWDQ6 name="Bob Smith" players=2/8
+2026-10-24T09:41:22.757Z INFO  player joined lobby=6LWDQ6 name="Bob Smith" players=2/16
 2026-10-24T09:41:22.765Z WARN  join rejected lobby=6LWDQ6 name=Dave reason="This lobby has already started a game."
 2026-10-24T09:41:33.582Z INFO  game started lobby=UATV6Q mode=deathmatch map=ffa_arena players="Alice (Red), Bob (Blue)"
 2026-10-24T09:42:01.220Z INFO  game finished lobby=L2VMZT mode=deathmatch map=ffa_arena reason=limit winner=Blue scores="Blue 25, Red 17" players=2 seconds=412

@@ -28,10 +28,10 @@ export type TurretShadow = {
 }
 
 // The shadow of every tower that is standing, the core of a base too (it is a turret). One that is destroyed has none, as it is not there; one that is not in the list (a turret
-// the team cannot see is left out of the frame) has none either.
+// the team cannot see is left out of the frame) has none either. A healing zone is no tower: it lies flat on the ground, with its zone round it (see healing-zone.ts).
 export function layoutTurretShadows(characters: readonly RenderedCharacter[]): TurretShadow[] {
   return characters
-    .filter((character) => character.turret !== undefined && !character.dead)
+    .filter((character) => character.turret !== undefined && character.turret.zone === undefined && !character.dead)
     .map((character) => {
       const radius = character.champion.radius
       return {

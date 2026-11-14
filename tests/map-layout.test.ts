@@ -124,7 +124,7 @@ test('the arena is found, and spawn points are measured from its corner in world
   const layout = readMapLayout(mapWith([arena(), ...allSpawns()]))
   assert.deepEqual(layout.arenaRect, { ...ARENA_AT, width: GAME_ARENA_WIDTH / 3, height: GAME_ARENA_HEIGHT / 3 })
   assert.equal(layout.spawns.length, GAME_MAX_PLAYERS)
-  assert.deepEqual(layout.spawns.map((points) => points.length), [4, 4, 2, 2, 1, 1, 1, 1])
+  assert.deepEqual(layout.spawns.map((points) => points.length), Array.from({ length: GAME_MAX_PLAYERS }, (_, slot) => spawnPointsNeeded(slot + 1)))
   assert.deepEqual([layout.terrain.width, layout.terrain.height], [GAME_ARENA_WIDTH, GAME_ARENA_HEIGHT])
   // Slot 3, point 2 is 60 and 40 map pixels from the corner, which is 180 and 120 once drawn at 3.
   assert.deepEqual(layout.spawns[2][1], { x: 180, y: 120 })
@@ -263,9 +263,9 @@ test('a spawn point that is not right says which one and what is wrong', () => {
   const others = allSpawns().filter((point) => point.name !== 'spawn-4-2')
   const cases: Array<[unknown, RegExp]> = [
     [spawn(4, 2, 100, -200, { point: false, width: 5, height: 5 }), /spawn-4-2 is not a point/],
-    [spawn(undefined, 2, 100, -200), /spawn-undefined-2 needs a team-name from 1 to 8/],
-    [spawn(9, 2, 100, -200), /spawn-9-2 needs a team-name from 1 to 8/],
-    [spawn('four', 2, 100, -200), /needs a team-name from 1 to 8/],
+    [spawn(undefined, 2, 100, -200), new RegExp(`spawn-undefined-2 needs a team-name from 1 to ${GAME_MAX_PLAYERS}`)],
+    [spawn(GAME_MAX_PLAYERS + 1, 2, 100, -200), new RegExp(`spawn-${GAME_MAX_PLAYERS + 1}-2 needs a team-name from 1 to ${GAME_MAX_PLAYERS}`)],
+    [spawn('four', 2, 100, -200), new RegExp(`needs a team-name from 1 to ${GAME_MAX_PLAYERS}`)],
     [spawn(4, undefined, 100, -200), /spawn-4-undefined needs a spawn-number of 1 or more/],
     [spawn(4, 0, 100, -200), /needs a spawn-number of 1 or more/],
     [spawn(4, 1, 140, -140), /spawn-4-1 has the same spawn-number \(1\) as another point in slot 4/],
@@ -292,7 +292,7 @@ test('a map is played on with as many slots, and as many points in each, as it h
   assert.deepEqual(readMapLayout(mapWith([arena(), ...trimmed([3, 3, 2])])).spawns.map((points) => points.length), [3, 3, 2])
   assert.deepEqual(readMapLayout(mapWith([arena(), ...trimmed([1])])).spawns.map((points) => points.length), [1])
   // More points than a slot is ever used for are fine.
-  readMapLayout(mapWith([arena(), ...allSpawns(), spawn(5, 2, 100 + 300 / 3, -200 + 300 / 3)]))
+  readMapLayout(mapWith([arena(), ...allSpawns(), spawn(GAME_MAX_PLAYERS, 2, 100 + 300 / 3, -200 + 300 / 3)]))
 })
 
 test('a map with no spawn points, or that skips a slot or a number, is not played on', () => {
@@ -300,7 +300,7 @@ test('a map with no spawn points, or that skips a slot or a number, is not playe
   assert.match(problemsOf(mapWith([arena()])), /no spawn points: a team has nowhere to start/)
   // Slot 2 is empty but slot 3 is not: the second biggest team would have nowhere to start.
   const skipped = allSpawns().filter((point) => point.properties[0].value !== 2)
-  assert.match(problemsOf(mapWith([arena(), ...skipped])), /Slot 2 has no spawn points but slot 8 has: slots are used in order from 1/)
+  assert.match(problemsOf(mapWith([arena(), ...skipped])), new RegExp(`Slot 2 has no spawn points but slot ${GAME_MAX_PLAYERS} has: slots are used in order from 1`))
   // Point 3 is missing, so 4 is not reached: three points are counted, and the numbering is wrong.
   assert.match(problemsOf(mapWith([arena(), ...without('spawn-1-3')])), /Slot 1's spawn points must be numbered 1, 2, 3 ... with none missing/)
 })
@@ -386,9 +386,9 @@ test('a flag is read in whole world units from the corner of the arena, by the s
 test('a flag that is not right says which one and what is wrong', () => {
   const cases: Array<[unknown, RegExp]> = [
     [flag(1, 50, 50, { point: false, width: 5, height: 5 }), /ctf-flag-1 is not a point/],
-    [flag(undefined, 50, 50), /ctf-flag-undefined needs a team-name from 1 to 8/],
-    [flag(9, 50, 50), /ctf-flag-9 needs a team-name from 1 to 8/],
-    [flag('red', 50, 50), /needs a team-name from 1 to 8/],
+    [flag(undefined, 50, 50), new RegExp(`ctf-flag-undefined needs a team-name from 1 to ${GAME_MAX_PLAYERS}`)],
+    [flag(GAME_MAX_PLAYERS + 1, 50, 50), new RegExp(`ctf-flag-${GAME_MAX_PLAYERS + 1} needs a team-name from 1 to ${GAME_MAX_PLAYERS}`)],
+    [flag('red', 50, 50), new RegExp(`needs a team-name from 1 to ${GAME_MAX_PLAYERS}`)],
     [flag(1, -1, 50), /ctf-flag-1 is outside the arena/],
     [flag(1, 50, GAME_ARENA_HEIGHT / 3 + 1), /ctf-flag-1 is outside the arena/],
     [flag(1, 0, 50), /ctf-flag-1 is too close to a wall or the arena's edge/],

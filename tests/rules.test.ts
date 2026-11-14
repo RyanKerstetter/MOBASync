@@ -16,6 +16,7 @@ import {
   modeRules,
   NO_OBJECTIVES,
   readRulesChange,
+  RESPAWN_PER_LEVEL_SECONDS,
   RESPAWN_SECONDS,
   Simulator,
   Terrain,
@@ -146,11 +147,13 @@ test('a game of core destruction is given the rule when it is on, and no other g
     teams: [1, 2],
     loseItemsOnDeath: true,
     respawnTicks: RESPAWN_SECONDS.default * GAME_TPS,
+    respawnTicksPerLevel: RESPAWN_PER_LEVEL_SECONDS.default * GAME_TPS,
   })
   assert.deepEqual(createModeSetup('core', [1, 2], CORES, modeRules(withGold, 'core')), {
     kind: 'core',
     teams: [1, 2],
     respawnTicks: RESPAWN_SECONDS.default * GAME_TPS,
+    respawnTicksPerLevel: RESPAWN_PER_LEVEL_SECONDS.default * GAME_TPS,
   })
 })
 

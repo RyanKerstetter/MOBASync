@@ -1,5 +1,7 @@
 import {
   abilityIconName,
+  abilityName,
+  getAbilityDef,
   getItem,
   ITEM_SLOT_NAMES,
   ITEM_SLOTS,
@@ -282,7 +284,8 @@ export function createHudView(container: HTMLElement, handlers?: HudHandlers) {
         // 0 just cast to 1 ready; the stylesheet turns it into how much of the icon is in colour.
         slot.root.style.setProperty('--filled', String(view.filled))
         slot.key.textContent = view.key
-        slot.name.textContent = view.abilityId
+        // Its name as a player reads it ("Fire Tornado"), not its id ("firetornado").
+        slot.name.textContent = abilityName({ id: view.abilityId, ...getAbilityDef(view.abilityId) })
         slot.time.textContent = view.secondsLeft
       })
       // A tooltip that is up is written again when what it says has changed (a level, an item, haste, or the ability on the key).

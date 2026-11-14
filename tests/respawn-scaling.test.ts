@@ -2,9 +2,17 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { ClientGameState } from '../apps/client/src/game-state.ts'
 import {
+  applyRulesChange,
+  createModeSetup,
+  defaultRules,
+  GAME_MODES,
   GAME_RESPAWN_TICKS,
   GAME_RESPAWN_TICKS_PER_LEVEL,
   GAME_TPS,
+  GameSnapshotSchema,
+  modeRules,
+  readRulesChange,
+  RESPAWN_PER_LEVEL_SECONDS,
   respawnTicksAt,
   Simulator,
   xpToReachLevel,
@@ -13,8 +21,8 @@ import {
 } from '../packages/shared/src/index.ts'
 import { defineChampion, defineMonster } from './fixtures.ts'
 
-// How long a champion stays dead: the respawn time of the game, and `GAME_RESPAWN_TICKS_PER_LEVEL` more for each level it has above the first (`respawnTicksAt`). The lobby's
-// respawn time is what a level 1 champion waits. A monster comes back by its own profile. The champions and the monster here are the tests' own; the respawn time of the game
+// How long a champion stays dead: the respawn time of the game, and the time per level more for each level it has above the first (`respawnTicksAt`; the lobby sets it, and
+// `GAME_RESPAWN_TICKS_PER_LEVEL` is what a game that is not told waits). The lobby's respawn time is what a level 1 champion waits. A monster comes back by its own profile. The champions and the monster here are the tests' own; the respawn time of the game
 // is one the tests give it, so retuning the real one changes nothing here.
 
 const BASE = 100
@@ -140,4 +148,48 @@ test('the page counts down the champion\'s own wait: more for a higher level', (
     assert.ok(Math.abs(secondsLeft(level) - expected) < 0.05, `level ${level}: ${secondsLeft(level)} seconds left, and ${expected} to wait`)
   }
   assert.ok(secondsLeft(3) > secondsLeft(1), 'a higher level waits longer')
+})
+
+// ---------------------------------------------------------------------------- the time per level is a rule too
+
+test('the time per level is the lobby\'s to set, in whole seconds from 0, and a game with levels is given it in ticks', () => {
+  assert.equal(defaultRules().respawnPerLevelSeconds, RESPAWN_PER_LEVEL_SECONDS.default)
+  assert.equal(RESPAWN_PER_LEVEL_SECONDS.default * GAME_TPS, GAME_RESPAWN_TICKS_PER_LEVEL, 'by default it waits what it always did')
+  assert.equal(RESPAWN_PER_LEVEL_SECONDS.min, 0, 'and it can be none')
+  assert.deepEqual(readRulesChange({ respawnPerLevelSeconds: 0 }), { change: { respawnPerLevelSeconds: 0 } })
+  for (const bad of [RESPAWN_PER_LEVEL_SECONDS.max + 1, -1, 1.5, '3', null]) {
+    const read = readRulesChange({ respawnPerLevelSeconds: bad })
+    assert.ok('problem' in read && /per level/.test(read.problem), `${String(bad)} is refused, and says so`)
+  }
+  const rules = applyRulesChange(defaultRules(), { respawnSeconds: 7, respawnPerLevelSeconds: 4 })
+  assert.equal(applyRulesChange(rules, { respawnSeconds: 9 }).respawnPerLevelSeconds, 4, 'a change to the base leaves it')
+  const economyModes = GAME_MODES.filter((mode) => mode.economy).map((mode) => mode.id)
+  assert.ok(economyModes.length > 0)
+  for (const mode of GAME_MODES.map((each) => each.id)) {
+    const given = modeRules(rules, mode)
+    assert.equal(given.respawnTicks, 7 * GAME_TPS, `${mode}: the base`)
+    assert.equal(given.respawnTicksPerLevel, economyModes.includes(mode) ? 4 * GAME_TPS : undefined, `${mode}: the time per level, only where there are levels`)
+  }
+})
+
+test('a champion waits the base and the time per level the game was set to, and with none per level the same at every level', () => {
+  for (const perLevel of [0, 3 * GAME_TPS]) {
+    for (const level of [1, 4]) {
+      const simulator = death(level, { ...economy, respawnTicksPerLevel: perLevel })
+      const wait = BASE + perLevel * (level - 1)
+      assert.equal(respawnTicksAt(BASE, level, perLevel), wait)
+      assert.equal(simulator.respawnTicksFor(1, simulator.at(SLAIN)), wait, `${perLevel} a level, level ${level}: the page is told the same wait`)
+      assert.equal(simulator.at(SLAIN + wait - 1).get(1)?.isDead(), true, `${perLevel} a level, level ${level}: still dead the tick before`)
+      assert.equal(simulator.at(SLAIN + wait).get(1)?.isDead(), false, `${perLevel} a level, level ${level}: back after ${wait} ticks`)
+    }
+  }
+})
+
+test('the time per level travels with the snapshot', () => {
+  const setup = createModeSetup('core', [1, 2], { flags: [], cores: [{ x: 100, y: 100 }, { x: 900, y: 100 }] }, { respawnTicks: BASE, respawnTicksPerLevel: 5 * GAME_TPS })
+  const read = GameSnapshotSchema.parse(JSON.parse(JSON.stringify(new Simulator(undefined, setup).snapshot())))
+  const restored = new Simulator()
+  restored.replaceFromSnapshot(read)
+  assert.equal(restored.respawnTicksPerLevel, 5 * GAME_TPS)
+  assert.equal(new Simulator(undefined, economy).respawnTicksPerLevel, GAME_RESPAWN_TICKS_PER_LEVEL, 'and a game not told waits what it always did')
 })

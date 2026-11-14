@@ -747,7 +747,8 @@ export async function startGame({
       entities: sight.visibleEntities(gameState.getEntities(now)),
       ...(sight.mask ? { fog: sight.mask } : {}),
       mode,
-      shops: gameState.getShopZones(),
+      // The shops are tinted as the healing areas they are, which they are not in a game with healing zones.
+      ...(gameState.hasHealingZones() ? {} : { shops: gameState.getShopZones() }),
       bushes: gameState.getTerrain().bushes,
       rewards: gameState.getKillRewards(now),
       localCharacterId,

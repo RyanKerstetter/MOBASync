@@ -8,8 +8,11 @@ import { TeamVision } from '../apps/client/src/team-vision.ts'
 import { ServerGameState } from '../apps/server/src/game-state.ts'
 import {
   advanceObjective,
+  coreSlotsOf,
+  coreTeamsProblem,
   createModeSetup,
   GAME_ART_SCALE,
+  GAME_CORE_MAX_TEAMS,
   GAME_MAX_CHAMPION_RADIUS,
   GAME_MAX_PLAYERS,
   GAME_VISION_RANGE,
@@ -26,6 +29,7 @@ import {
   parseTiledMap,
   readMapLayout,
   Simulator,
+  startProblem,
   summarizeMap,
   teamCountProblem,
   Terrain,
@@ -43,8 +47,8 @@ import {
 import { brawler, defineChampion, defineTurret } from './fixtures.ts'
 import { testSpawns } from './test-spawns.ts'
 
-// Core destruction (see modes.ts): two teams, each with a core at its base. Break the enemy's, and that team can no longer respawn; take down
-// every player left on it and the game is won. The cores and tiers in these are the tests' own.
+// Core destruction (see modes.ts): up to four teams, each with a core at its base. Break an enemy's, and that team can no longer respawn; take down
+// every player left on it, and on every other team, and the game is won. The cores and tiers in these are the tests' own.
 
 // A core is a turret, the last of a base: it waits for the turrets of its team of lower tiers. These reach no one (a range of 1), so there is only the breaking of them. One is
 // below the outpost, and so waits for nothing; the other is above it, and waits for it.
@@ -56,18 +60,23 @@ const slayer = defineChampion({ ...brawler, id: 't-cm-slayer', base: { ...brawle
 
 const ONE = { x: 600, y: 700 }
 const TWO = { x: 1900, y: 700 }
+const THREE = { x: 1250, y: 300 }
+const FOUR = { x: 1250, y: 1100 }
 const pair = [ONE, TWO]
+const four = [ONE, TWO, THREE, FOUR]
 
 // ---------------------------------------------------------------------------- the mode
 
-test('core destruction is a mode of its own, with no score limit to set, for one team or two', () => {
+test('core destruction is a mode of its own, with no score limit to set, for one team up to the most it takes', () => {
   const mode = getGameMode('core')
   assert.deepEqual([mode.id, mode.name, mode.scoreName], ['core', 'Core Destruction', 'cores'])
-  assert.deepEqual([mode.defaultLimit, mode.maxLimit], [0, 0], 'it ends when a team is out')
+  assert.deepEqual([mode.defaultLimit, mode.maxLimit], [0, 0], 'it ends when every team but one is out')
+  assert.ok(GAME_CORE_MAX_TEAMS >= 4, 'it takes four teams')
   assert.equal(teamCountProblem('core', 1), undefined, 'one team plays alone')
-  assert.equal(teamCountProblem('core', 2), undefined)
-  assert.match(teamCountProblem('core', 3) ?? '', /Core Destruction needs 1 or 2 teams, and there are 3/)
-  assert.match(teamCountProblem('core', 0) ?? '', /1 or 2 teams, and there are 0/)
+  for (let teams = 2; teams <= GAME_CORE_MAX_TEAMS; teams += 1) assert.equal(teamCountProblem('core', teams), undefined, `${teams} teams`)
+  const tooMany = GAME_CORE_MAX_TEAMS + 1
+  assert.match(teamCountProblem('core', tooMany) ?? '', new RegExp(`Core Destruction needs from 1 to ${GAME_CORE_MAX_TEAMS} teams, and there are ${tooMany}`))
+  assert.match(teamCountProblem('core', 0) ?? '', new RegExp(`from 1 to ${GAME_CORE_MAX_TEAMS} teams, and there are 0`))
 })
 
 test('a map needs a core for each of the first two teams for it, and says which it lacks', () => {
@@ -77,20 +86,50 @@ test('a map needs a core for each of the first two teams for it, and says which 
   for (const mode of ['deathmatch', 'koth', 'ctf'] as const) assert.equal(modeSupportProblem(mode, map), undefined, `${mode} does not need a core`)
   assert.match(modeStartProblem('core', [1, 2], NO_OBJECTIVES) ?? '', /no core for each of the first two teams/)
   assert.match(modeStartProblem('core', [1, 2], { flags: [], cores: [ONE, undefined] }) ?? '', /no core/, 'one core is not enough')
-  assert.match(modeStartProblem('core', [1, 2, 3], { flags: [], cores: pair }) ?? '', /1 or 2 teams/)
   assert.equal(modeStartProblem('core', [1, 2], { flags: [], cores: pair }), undefined)
   assert.equal(modeStartProblem('core', [1], { flags: [], cores: pair }), undefined, 'a lone player is fine on a map that has the cores')
   assert.match(modeStartProblem('core', [1], NO_OBJECTIVES) ?? '', /no core for each of the first two teams/, 'but the map still has to be one for the mode')
 })
 
-test('a game is set up with its two teams, the biggest first, and the respawn time it is given, and its objective starts with nothing broken', () => {
+test('a game of more than two teams needs a core for each, in the slots from the first with none skipped, and says how many the map has', () => {
+  assert.deepEqual([undefined, [], [ONE], [ONE, undefined, TWO], pair, four].map((cores) => coreSlotsOf(cores)), [0, 0, 1, 1, 2, 4])
+  assert.match(modeStartProblem('core', [1, 2, 3], { flags: [], cores: pair }) ?? '', /This map has cores for only 2 teams, and there are 3: Core Destruction needs a core for each team/)
+  assert.equal(modeStartProblem('core', [1, 2, 3], { flags: [], cores: four }), undefined, 'three teams on a map with four cores')
+  assert.equal(modeStartProblem('core', [1, 2, 3, 4], { flags: [], cores: four }), undefined, 'and four')
+  assert.match(modeStartProblem('core', [1, 2, 3, 4], { flags: [], cores: [ONE, TWO, undefined, FOUR] }) ?? '', /cores for only 2 teams, and there are 4/, 'a gap ends the slots in use: the fourth is not reached')
+  assert.match(modeStartProblem('core', [1, 2, 3, 4, 5], { flags: [], cores: [...four, ONE] }) ?? '', new RegExp(`from 1 to ${GAME_CORE_MAX_TEAMS} teams, and there are 5`), 'more than the mode takes, whatever the map has')
+  // Only this mode asks it.
+  assert.equal(coreTeamsProblem('deathmatch', 6, 2), undefined)
+  assert.equal(coreTeamsProblem('core', 2, 2), undefined)
+  assert.match(coreTeamsProblem('core', 3, 2, 'The Pit') ?? '', /^The Pit has cores for only 2 teams, and there are 3/)
+})
+
+test('the lobby is told a map has cores for only so many teams before the game starts, from what the map says it has', () => {
+  const pit = { name: 'The Pit', spawns: [4, 4, 4, 4], hill: false, flags: false, cores: true }
+  assert.match(startProblem('core', [1, 2, 3], { ...pit, coreSlots: 2 }) ?? '', /The Pit has cores for only 2 teams, and there are 3/)
+  assert.equal(startProblem('core', [1, 2, 3], { ...pit, coreSlots: 3 }), undefined)
+  assert.equal(startProblem('core', [1, 2, 3, 4], { ...pit, coreSlots: 4 }), undefined)
+  assert.match(startProblem('core', [1, 2, 3, 4], { ...pit, coreSlots: 3 }) ?? '', /cores for only 3 teams, and there are 4/)
+  // A map that does not say how many is taken to have the two its `cores` stands for.
+  assert.match(startProblem('core', [1, 2, 3], pit) ?? '', /cores for only 2 teams/)
+  assert.equal(startProblem('core', [1, 2], pit), undefined)
+  assert.equal(startProblem('deathmatch', [1, 2, 3], { ...pit, coreSlots: 2 }), undefined, 'another mode asks for no core')
+})
+
+test('a game is set up with its teams, the biggest first, and the respawn time it is given, and its objective starts with nothing broken', () => {
   const setup = createModeSetup('core', [2, 1, 1], { flags: [], cores: pair }, { respawnTicks: 120 })
   assert.deepEqual(setup, { kind: 'core', teams: [1, 2], respawnTicks: 120 }, 'team 1 has two players, so it starts at the first slot')
   assert.deepEqual(createModeSetup('core', [1, 2], { flags: [], cores: pair }), { kind: 'core', teams: [1, 2] })
   assert.throws(() => createModeSetup('core', [1, 2], NO_OBJECTIVES), /no core for each of the first two teams/)
-  assert.throws(() => createModeSetup('core', [1, 2, 3], { flags: [], cores: pair }), /1 or 2 teams/)
+  assert.throws(() => createModeSetup('core', [1, 2, 3], { flags: [], cores: pair }), /cores for only 2 teams, and there are 3/)
   assert.deepEqual(createModeSetup('core', [2, 2], { flags: [], cores: pair }), { kind: 'core', teams: [2] }, 'a team alone is the only one in the setup')
   assert.deepEqual(initialObjective(setup), { kind: 'core', broken: [], eliminated: [], scores: {} })
+
+  // Four teams, ranked by size and then by number: team 1 has three players, team 3 two, and teams 2 and 4 one each.
+  const crowd = createModeSetup('core', [3, 3, 1, 1, 1, 2, 4], { flags: [], cores: four })
+  assert.deepEqual(crowd, { kind: 'core', teams: [1, 3, 2, 4] })
+  assert.deepEqual(initialObjective(crowd), { kind: 'core', broken: [], eliminated: [], scores: {} })
+  assert.throws(() => createModeSetup('core', [1, 2, 3, 4, 5], { flags: [], cores: [...four, ONE] }), new RegExp(`from 1 to ${GAME_CORE_MAX_TEAMS} teams, and there are 5`))
 })
 
 // ---------------------------------------------------------------------------- the objective
@@ -140,6 +179,43 @@ test('when both teams are out at once no one has won, and an objective that is n
   assert.equal(winningTeam(setup, undefined), undefined)
   assert.equal(winningTeam(setup, { kind: 'deathmatch', scores: { 1: 50 } }), undefined, 'a score does not win it: there is no limit')
   assert.equal(winningTeam({ kind: 'core', teams: [1, 2], scoreLimit: 1 } as ModeSetup, { kind: 'deathmatch', scores: { 1: 50 } }), undefined)
+})
+
+// ---------------------------------------------------------------------------- four teams
+
+const setupFour: ModeSetup = { kind: 'core', teams: [1, 2, 3, 4] }
+const standingOf = (...flags: boolean[]): ObjectiveCore[] => flags.map((isStanding, index) => ({ team: index + 1, standing: isStanding }))
+const stepFour = (state: ObjectiveState | undefined, units: ObjectiveUnit[], cores: ObjectiveCore[]) => advanceObjective(state, setupFour, units, 1, [], cores)
+
+test('with four teams each broken core is a point for every other team, a team is out on its own, and the last team not out wins', () => {
+  const all = [unit(1, 1), unit(2, 2), unit(3, 3), unit(4, 4)]
+  const start = stepFour(undefined, all, standingOf(true, true, true, true))
+  assert.deepEqual(start, { kind: 'core', broken: [], eliminated: [], scores: { 1: 0, 2: 0, 3: 0, 4: 0 } })
+  assert.equal(winningTeam(setupFour, start), undefined)
+
+  // Team 2's core is broken, with its player still alive: it cannot respawn, but is not out. Each of the other three has broken one core.
+  const first = stepFour(start, all, standingOf(true, false, true, true))
+  assert.deepEqual(first, { kind: 'core', broken: [2], eliminated: [], scores: { 1: 1, 2: 0, 3: 1, 4: 1 } })
+
+  // Its last player falls: out, and three teams are left, so no one has won.
+  const second = stepFour(first, [unit(1, 1), unit(2, 2, false), unit(3, 3), unit(4, 4)], standingOf(true, false, true, true))
+  assert.deepEqual(second?.kind === 'core' && second.eliminated, [2])
+  assert.equal(winningTeam(setupFour, second), undefined)
+
+  // Team 4's core and then its player: two are out, and the other two are still fighting.
+  const third = stepFour(second, [unit(1, 1), unit(2, 2, false), unit(3, 3), unit(4, 4, false)], standingOf(true, false, true, false))
+  assert.deepEqual(third, { kind: 'core', broken: [2, 4], eliminated: [2, 4], scores: { 1: 2, 2: 1, 3: 2, 4: 1 } })
+  assert.equal(winningTeam(setupFour, third), undefined)
+
+  // And team 3: team 1 is the last team standing, and has won.
+  const last = stepFour(third, [unit(1, 1), unit(3, 3, false)], standingOf(true, false, false, false))
+  assert.deepEqual(last?.kind === 'core' && last.eliminated, [2, 3, 4])
+  assert.equal(winningTeam(setupFour, last), 1)
+
+  // If the last teams fall on one tick no one has won, as with two.
+  const together = stepFour(third, [unit(1, 1, false), unit(3, 3, false)], standingOf(false, false, false, false))
+  assert.deepEqual(together?.kind === 'core' && together.eliminated, [1, 2, 3, 4])
+  assert.equal(winningTeam(setupFour, together), undefined)
 })
 
 // ---------------------------------------------------------------------------- a game
@@ -208,6 +284,40 @@ test('a team respawns until its core is broken, and then does not, and the last 
   assert.equal(simulator.at(last + 400).get(3)?.isDead(), true)
   const after = simulator.at(last + 400).getObjective()
   assert.deepEqual(after, { kind: 'core', broken: [2], eliminated: [2], scores: { 1: 1, 2: 0 } })
+  assert.equal(winningTeam(simulator.mode, after), 1)
+})
+
+test('with four teams each core broken stops that team respawning alone, and the game is won by the last team with a player left', () => {
+  const simulator = new Simulator(Terrain.plain(), createModeSetup('core', [1, 2, 3, 4], { flags: [], cores: four }, { respawnTicks: 60 }))
+  const coreOf = { 1: 10, 2: 11, 3: 12, 4: 13 }
+  four.forEach((at, index) => simulator.addTurret(10 + index, frail, at, index + 1))
+  // Team 1 has a slayer beside each of the other three cores (1, 2 and 3), and each of the other teams a frail player (5, 6 and 7) beside its own.
+  const beside = [{ x: 1800, y: 700 }, { x: 1250, y: 400 }, { x: 1250, y: 1000 }]
+  const frailOf = [{ x: 1800, y: 840 }, { x: 1250, y: 540 }, { x: 1250, y: 860 }]
+  beside.forEach((at, index) => simulator.addPlayer(1 + index, `s${index}`, `Slayer ${index}`, at, slayer, 1))
+  frailOf.forEach((at, index) => simulator.addPlayer(5 + index, `f${index}`, `Frail ${index}`, at, glass, 2 + index))
+  simulator.addOrder(1, attack(1, 1, coreOf[2]))
+  simulator.addOrder(2, attack(2, 1, coreOf[3]))
+  simulator.addOrder(3, attack(3, 1, coreOf[4]))
+  run(simulator, 1, 40)
+  for (const team of [2, 3, 4] as const) assert.equal(simulator.at(40).get(coreOf[team])?.isDead(), true, `the core of team ${team} is down`)
+  assert.equal(simulator.at(40).get(coreOf[1])?.isDead(), false, 'and team 1\'s stands')
+  // Every team has broken the cores of the others: team 1 three, and each of the rest two.
+  assert.deepEqual(objectiveOf(simulator, 40), { kind: 'core', broken: [2, 3, 4], eliminated: [], scores: { 1: 3, 2: 2, 3: 2, 4: 2 } })
+  assert.equal(winningTeam(simulator.mode, simulator.at(40).getObjective()), undefined, 'each of the three still has its player')
+
+  // The players of the three teams are taken down, and with their cores gone not one comes back.
+  simulator.addOrder(1, attack(1, 41, 5))
+  simulator.addOrder(2, attack(2, 41, 6))
+  simulator.addOrder(3, attack(3, 41, 7))
+  run(simulator, 41, 300)
+  for (const id of [5, 6, 7]) {
+    assert.equal(simulator.at(300).get(id)?.isDead(), true, `player ${id} is dead and has not come back`)
+    assert.equal(simulator.canRespawn(id, simulator.at(300)), false, `and its team cannot bring it back`)
+  }
+  assert.equal(simulator.canRespawn(1, simulator.at(300)), true, 'while team 1 can')
+  const after = simulator.at(300).getObjective()
+  assert.deepEqual(after, { kind: 'core', broken: [2, 3, 4], eliminated: [2, 3, 4], scores: { 1: 3, 2: 2, 3: 2, 4: 2 } })
   assert.equal(winningTeam(simulator.mode, after), 1)
 })
 
@@ -356,6 +466,9 @@ test('a map puts a core where its core point is, for the slot of spawn points it
   assert.equal(summarizeMap('hearts', readMapLayout(mapWith([point(1, 100, 80), point(2, 500, 300)]))).cores, true, 'with both, the lobby is told')
   assert.equal(summarizeMap('hearts', readMapLayout(mapWith([point(2, 500, 300)]))).cores, false, 'with one it is not')
   assert.equal(summarizeMap('hearts', readMapLayout(mapWith([]))).cores, false)
+  // And how many teams the cores are for, counting from the first slot with none skipped.
+  const slotsOf = (...slots: number[]): number => summarizeMap('hearts', readMapLayout(mapWith(slots.map((slot) => point(slot, 100 + slot * 60, 80))))).coreSlots
+  assert.deepEqual([slotsOf(), slotsOf(1), slotsOf(1, 2), slotsOf(1, 2, 3), slotsOf(1, 2, 3, 4), slotsOf(2, 3), slotsOf(1, 2, 4)], [0, 1, 2, 3, 4, 0, 2])
 })
 
 test('a core point that is not right says which, and what is wrong', () => {
@@ -485,13 +598,42 @@ test('a game that is not told its mode is team deathmatch, whatever the lobby st
   assert.equal(state.mode, 'deathmatch', 'a map with no cores is played as it always was when no mode is given')
 })
 
-test('the server refuses the mode on a map with no cores, and with more than two teams, and says why', () => {
+const withFourCores = { ...withCores, cores: four }
+// Team 2 has two players, so it starts at the first slot, then teams 1, 3 and 4 with one each, in the order of their numbers.
+const crowd = [
+  { id: 'a', name: 'Ann', team: 2 },
+  { id: 'b', name: 'Bob', team: 2 },
+  { id: 'c', name: 'Cat', team: 4 },
+  { id: 'd', name: 'Dan', team: 1 },
+  { id: 'e', name: 'Eve', team: 3 },
+]
+
+test('the server puts a core in a game of this mode for each of its four teams, at the base of the slot each starts at', () => {
+  const state = started('core', withFourCores, crowd)
+  const cores = [...state.simulator.characters.values()].filter((character) => character.isCore)
+  assert.deepEqual(cores.map((character) => [character.team, character.initialPosition]), [[2, ONE], [1, TWO], [3, THREE], [4, FOUR]])
+  assert.deepEqual(state.simulator.mode, { kind: 'core', teams: [2, 1, 3, 4], respawnTicks: 60 })
+  assert.deepEqual(state.playingPlayerIds.sort(), ['a', 'b', 'c', 'd', 'e'], 'cores are not players')
+  const snapshot = GameSnapshotSchema.parse(JSON.parse(JSON.stringify(state.snapshot())))
+  assert.deepEqual(snapshot.mode, { kind: 'core', teams: [2, 1, 3, 4], respawnTicks: 60 })
+  assert.equal(snapshot.characters.filter((character) => character.championId === turretId(CORE_TIER)).length, 4)
+  // Three teams on the same map have the first three cores, and not the fourth.
+  const three = started('core', withFourCores, crowd.slice(0, 4).map((player, index) => ({ ...player, team: [2, 2, 3, 1][index] })))
+  assert.deepEqual([...three.simulator.characters.values()].filter((character) => character.isCore).map((character) => [character.team, character.initialPosition]), [[2, ONE], [1, TWO], [3, THREE]])
+})
+
+test('the server refuses the mode on a map with no cores, and with more teams than it has cores for, and says why', () => {
   const state = new ServerGameState([])
   assert.match(state.modeProblem(players, 'core', { ...withCores, cores: [] }) ?? '', /no core for each of the first two teams/)
   assert.match(state.modeProblem(players, 'core', { ...withCores, cores: [withCores.cores[0], undefined] }) ?? '', /no core/)
   assert.equal(state.modeProblem(players, 'core', withCores), undefined)
   const three = [...players, { id: 'c', name: 'Cat', team: 3 }]
-  assert.match(state.modeProblem(three, 'core', withCores) ?? '', /1 or 2 teams, and there are 3/)
+  assert.match(state.modeProblem(three, 'core', withCores) ?? '', /cores for only 2 teams, and there are 3/)
+  assert.equal(state.modeProblem(three, 'core', withFourCores), undefined, 'three teams on a map with four cores')
+  assert.equal(state.modeProblem(crowd, 'core', withFourCores), undefined, 'and four')
+  assert.match(state.modeProblem(crowd, 'core', { ...withFourCores, cores: [ONE, TWO, THREE] }) ?? '', /cores for only 3 teams, and there are 4/)
+  const five = [...crowd, { id: 'f', name: 'Fay', team: 5 }]
+  assert.match(state.modeProblem(five, 'core', { ...withFourCores, cores: [...four, ONE] }) ?? '', new RegExp(`from 1 to ${GAME_CORE_MAX_TEAMS} teams, and there are 5`))
 })
 
 // ---------------------------------------------------------------------------- playing alone
@@ -579,6 +721,25 @@ test('the local player is told when their own core is down, and when the other t
   assert.equal(coreHint(view([core(1, 'open'), core(2, 'broken')]), local), `${blue}'s core is down. Take down every one of their players to win.`)
   assert.equal(coreHint(view([core(1, 'open'), core(2, 'broken')]), undefined), undefined, 'and no one when it is not their game')
   assert.notEqual(red, blue)
+})
+
+test('with more teams, the local player is told of whichever enemy core is down, and not only the first', () => {
+  const local = { id: 1, team: 1 }
+  const green = getTeam(3).name
+  const gold = getTeam(4).name
+  assert.equal(coreHint(view([core(1, 'open'), core(2, 'open'), core(3, 'open'), core(4, 'open')]), local), undefined)
+  assert.equal(coreHint(view([core(1, 'open'), core(2, 'open'), core(3, 'broken'), core(4, 'open')]), local), `${green}'s core is down. Take down every one of their players to win.`, 'the third, with the second still up')
+  assert.equal(
+    coreHint(view([core(1, 'open'), core(2, 'broken'), core(3, 'open'), core(4, 'broken')]), local),
+    `The cores of ${blue} and ${gold} are down. Take down every player left on those teams to win.`,
+  )
+  assert.equal(
+    coreHint(view([core(1, 'open'), core(2, 'broken'), core(3, 'broken'), core(4, 'broken')]), local),
+    `The cores of ${blue}, ${green} and ${gold} are down. Take down every player left on those teams to win.`,
+  )
+  assert.match(coreHint(view([core(1, 'broken'), core(2, 'broken'), core(3, 'open'), core(4, 'open')]), local) ?? '', /Your core is down/, 'their own comes first')
+  assert.equal(coreHint(view([core(1, 'open'), core(2, 'eliminated'), core(3, 'open'), core(4, 'open')]), local), undefined, 'a team that is out is already taken down')
+  assert.match(coreHint(view([core(1, 'open'), core(2, 'broken'), core(3, 'open'), core(4, 'open')]), { id: 3, team: 3 }) ?? '', new RegExp(`^${blue}'s core is down`), 'it is told the same to a player of any other team')
 })
 
 function clientGame(): ClientGameState {
