@@ -18,6 +18,7 @@ import {
 } from 'three'
 import type { Champion } from '../../../../packages/shared/src/index.ts'
 import { guarded } from '../guard.ts'
+import { cutFinely } from './models/detail/shapes.ts'
 import { championFigure, type HumanoidModel } from './models/humanoid.ts'
 import { championLook } from './models/looks.ts'
 import { RELEASE_SECONDS } from './models/model.ts'
@@ -63,7 +64,8 @@ function glowTexture(): CanvasTexture {
 }
 
 function championModel(vision: VisionShading, champion: Champion): HumanoidModel {
-  const model = championFigure(vision, champion.radius, championLook(champion), champion.id)
+  // Seen up close here, so cut finely (see shapes.ts).
+  const model = cutFinely(() => championFigure(vision, champion.radius, championLook(champion), champion.id))
   // In a game a champion is about 3.6 times its radius tall; here every one is drawn at about 1.8 (times its look's `tall`), so the
   // camera is the same for all of them, and a broad or a tall champion still shows as broad or tall.
   model.root.scale.multiplyScalar(0.5 / champion.radius)

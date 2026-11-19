@@ -44,7 +44,7 @@ export class SlimeModel extends Model {
     this.bodyMaterial = this.surface('#46c454', { roughness: 0.06, metalness: 0, transparent: true, opacity: 0.74, emissive: colour('#145a1c'), emissiveIntensity: 0.45 })
     // A see-through body still gets the edge an enemy has.
     this.bodyMaterial.userData.outline = true
-    this.body = this.part(this.blob, new SphereGeometry(0.5, 36, 26), this.bodyMaterial, 0, 0.36, 0) as Mesh<SphereGeometry>
+    this.body = this.part(this.blob, new SphereGeometry(0.5, 24, 16), this.bodyMaterial, 0, 0.36, 0) as Mesh<SphereGeometry>
     this.body.castShadow = true
     this.rest = Float32Array.from(this.body.geometry.getAttribute('position').array as ArrayLike<number>)
     this.nucleus = this.part(this.blob, new SphereGeometry(0.16, 16, 12), this.surface('#1f6b26', { roughness: 0.3, emissive: colour('#0c3a10'), emissiveIntensity: 0.4 }), 0.04, 0.3, -0.03, false)

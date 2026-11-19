@@ -1,15 +1,10 @@
 import {
   BoxGeometry,
   CanvasTexture,
-  CapsuleGeometry,
   Color,
-  ConeGeometry,
-  CylinderGeometry,
   DoubleSide,
   Mesh,
-  SphereGeometry,
   SRGBColorSpace,
-  TorusGeometry,
   type BufferAttribute,
   type BufferGeometry,
   type Group,
@@ -17,6 +12,7 @@ import {
   type Object3D,
   type Texture,
 } from 'three'
+import { CapsuleGeometry, ConeGeometry, CylinderGeometry, SphereGeometry, TorusGeometry } from './shapes.ts'
 import { smoothstep } from '../../space.ts'
 import { approach, joint } from '../model.ts'
 import { lathe, radiusAt, Sculpt, shaped, type Detail, type DetailKit, type Rig, type Triple } from './kit.ts'

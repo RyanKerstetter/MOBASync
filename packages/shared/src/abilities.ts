@@ -1027,7 +1027,7 @@ export const PLATING_TICKS = seconds(6)
 // What a stack is worth: this many points of resistance, and this many more for each level he is (the level counts from 1, as it does for every `scaled` amount, so at
 // level 1 a stack is the two added together).
 export const PLATING_RESISTANCE_PER_STACK = 6
-export const PLATING_SCALING_PER_LEVEL = 1
+export const PLATING_SCALING_PER_LEVEL = .5
 
 // Hammer's Slam: the hammer comes down on the ground in front of him, on a rectangle `SLAM_LENGTH` long from where he stands and as wide as the
 // indicator. It leaves a mark on the ground for an instant, in the same rectangle.
@@ -1122,8 +1122,8 @@ ability({
 // and each auto he lands makes them last `RAGE_AUTO_TICKS` longer (`prolong`, in champions.ts), up to `RAGE_MAX_TICKS` left. The page draws what is left of it as
 // a bar over him, full at `RAGE_MAX_TICKS` (the champion's `meter`). The lifesteal is the share of the damage he deals (autos and abilities) that comes back to him as health.
 export const RAGE_KEY = 'rage'
-export const RAGE_TICKS = seconds(4)
-export const RAGE_AUTO_TICKS = seconds(0.2)
+export const RAGE_TICKS = seconds(5)
+export const RAGE_AUTO_TICKS = seconds(0.4)
 export const RAGE_MAX_TICKS = seconds(6)
 export const RAGE_HASTE = 0.3
 export const RAGE_ATTACK_SPEED = 0.5

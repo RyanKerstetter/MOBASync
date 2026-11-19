@@ -55,6 +55,9 @@ const GRID_CELLS = [12, 16, 24]
 const MAX_GROUND_POINTS = 220_000
 // How many squares of the grid a side each piece of the ground is.
 const CHUNK_CELLS = 48
+// The size of the tiles the trees, boulders, grass and bushes are drawn a tile at a time in (see `instanced`), in world units: a
+// few across the screen, so what is off it is not drawn, and not so small that there are many more meshes to draw.
+const SCENERY_TILE = 600
 
 // The ground of the map in 3D. It is one mesh, a grid of heights: zero where champions walk, and risen where the walls are
 // (and everywhere outside the arena), with the rise worked out from how far into a wall each point is, so where walls meet
@@ -330,8 +333,10 @@ export class Terrain3D {
     }
 
     const tint = new Color()
-    // An instanced mesh of `geometry` for each of `placed`, each put where `place` says (it is handed the mesh to set the
-    // matrix and colour of the instance on).
+    // Instanced meshes of `geometry` for each of `placed`, each put where `place` says (it is handed the mesh to set the matrix and
+    // colour of the instance on). They are made a tile of the map at a time (`SCENERY_TILE`), so only the tiles in view are drawn,
+    // and only those near the champion cast shadows: one mesh for the whole map would draw every tree on it, twice, every frame.
+    // They are placed in the order given, so what is drawn is the same however it is cut up.
     const instanced = (
       geometry: BufferGeometry,
       material: Material,
@@ -344,14 +349,24 @@ export class Terrain3D {
         material.dispose()
         return
       }
-      const mesh = new InstancedMesh(geometry, material, placed.length)
-      placed.forEach((item, index) => place(item, index, mesh))
-      mesh.castShadow = shadows
-      mesh.receiveShadow = true
-      mesh.instanceMatrix.needsUpdate = true
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
-      mesh.computeBoundingSphere()
-      this.group.add(mesh)
+      const tileOf = (item: Placed): string => `${Math.floor(item.x / SCENERY_TILE)},${Math.floor(item.y / SCENERY_TILE)}`
+      const counts = new Map<string, number>()
+      for (const item of placed) counts.set(tileOf(item), (counts.get(tileOf(item)) ?? 0) + 1)
+      const tiles = new Map<string, { mesh: InstancedMesh; next: number }>()
+      for (const [tile, count] of counts) tiles.set(tile, { mesh: new InstancedMesh(geometry, material, count), next: 0 })
+      for (const item of placed) {
+        const tile = tiles.get(tileOf(item))!
+        place(item, tile.next, tile.mesh)
+        tile.next += 1
+      }
+      for (const { mesh } of tiles.values()) {
+        mesh.castShadow = shadows
+        mesh.receiveShadow = true
+        mesh.instanceMatrix.needsUpdate = true
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+        mesh.computeBoundingSphere()
+        this.group.add(mesh)
+      }
       this.disposables.push(geometry, material)
     }
     const leafMaterial = (): MeshStandardMaterial => vision.shade(new MeshStandardMaterial({ color: '#ffffff', roughness: 0.85, flatShading: true }))

@@ -19,6 +19,8 @@ export interface GameRenderer {
   follow(center: Vector2): void
   // The point of the world under a point on the screen (the mouse), in the screen's own pixels.
   screenToWorld(point: Vector2): Vector2
+  // The ground under a point on the screen, whatever stands on it: where an ability aimed at the ground goes.
+  screenToGround(point: Vector2): Vector2
   update(frame: WorldFrame): void
   // Draws champions from these sprite sets from now on, for a renderer that draws sprites.
   setSpriteSets(sets: ReadonlyMap<string, LoadedSpriteSet>): void
@@ -67,6 +69,11 @@ export class FlatRenderer implements GameRenderer {
   }
 
   screenToWorld(point: Vector2): Vector2 {
+    return screenToWorld(this.camera, point)
+  }
+
+  // From straight above, the ground under the pointer is what it is over.
+  screenToGround(point: Vector2): Vector2 {
     return screenToWorld(this.camera, point)
   }
 

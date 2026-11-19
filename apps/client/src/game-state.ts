@@ -232,6 +232,11 @@ export type AbilityCooldown = {
   ticksRemaining: number
   cooldownTicks: number
 }
+// Where an ability is aimed: the ground under the pointer, which an ability aimed at a point or in a direction goes to, and the point
+// of whoever the pointer is over (in 3D, a body stands up off the ground, so pointing at its head is pointing at it), which an ability
+// cast on a unit picks from. A single point is both.
+export type CastAim = { ground: Vector2; unit: Vector2 }
+
 export type CastAttempt =
   | { ok: true; order: CastOrder }
   | { ok: false; reason: string }
@@ -503,11 +508,11 @@ export class ClientGameState {
     return issued ? { ok: true, order: issued } : { ok: false, reason: 'The order could not be given.' }
   }
 
-  // Aim is in arena coordinates. The ability is resolved from the slot now, so
+  // Aim is in arena coordinates (see `CastAim`). The ability is resolved from the slot now, so
   // the order names what was cast rather than which key was pressed. With `selfCast`, an ability for allies is cast on the champion itself, wherever the aim is (the
   // Alt key), except one that is for the unit the champion has linked: see `abilitySelfCasts`. `attack` is whether a windup ends the attack the champion is making (see
   // `CastOrderSchema`); left out, it does.
-  createCastOrder(slot: number, aim: Vector2, now = performance.now(), selfCast = false, attack: { keepAttacking?: boolean } = {}): CastAttempt {
+  createCastOrder(slot: number, aim: Vector2 | CastAim, now = performance.now(), selfCast = false, attack: { keepAttacking?: boolean } = {}): CastAttempt {
     const ability = this.abilityInSlot(slot)
     if (!ability.ok) return ability
     const { localCharacterId } = ability
@@ -652,7 +657,7 @@ export class ClientGameState {
   // would advance the simulation a tick per frame and stamp later orders in the future.
   getCastPreview(
     slot: number,
-    aim: Vector2,
+    aim: Vector2 | CastAim,
     now = performance.now(),
     characters?: readonly RenderedCharacter[],
   ): CastPreview | undefined {
@@ -693,11 +698,14 @@ export class ClientGameState {
   private castTarget(
     def: AbilityDef,
     origin: Vector2,
-    aim: Vector2,
+    given: Vector2 | CastAim,
     now: number,
     frame: GameTickSnapshot,
     characters?: readonly RenderedCharacter[],
   ): { ok: true; target: CastTarget; outOfRange?: true } | { ok: false; reason: string } {
+    // An ability aimed at a point or in a direction goes where the ground is pointed at, never to an enemy the pointer happens to be over:
+    // it is aimed, not snapped. Only one cast on a unit picks the unit pointed at.
+    const { ground: aim, unit: pointedAt } = 'ground' in given ? given : { ground: given, unit: given }
     if (def.targeting === 'none') return { ok: true, target: { mode: 'none' } }
     if (def.targeting === 'point') {
       const distance = distanceBetween(origin, aim)
@@ -722,7 +730,7 @@ export class ClientGameState {
       if (linked === undefined) return { ok: false, reason: 'You have no one linked.' }
       unitId = linked
     } else {
-      const unit = def.targetsAllies ? this.getAllyNear(aim, now, characters) : this.getEnemyNear(aim, now, characters)
+      const unit = def.targetsAllies ? this.getAllyNear(pointedAt, now, characters) : this.getEnemyNear(pointedAt, now, characters)
       if (!unit) return { ok: false, reason: def.targetsAllies ? `Aim ${def.id} at a teammate, or at yourself.` : `Aim ${def.id} at an enemy.` }
       unitId = unit.id
     }

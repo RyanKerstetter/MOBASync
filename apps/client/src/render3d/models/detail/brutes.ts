@@ -1,17 +1,13 @@
 import {
   BoxGeometry,
-  CapsuleGeometry,
-  ConeGeometry,
-  CylinderGeometry,
   DoubleSide,
   IcosahedronGeometry,
   OctahedronGeometry,
-  SphereGeometry,
-  TorusGeometry,
   type Group,
   type Material,
   type Object3D,
 } from 'three'
+import { CapsuleGeometry, ConeGeometry, CylinderGeometry, SphereGeometry, TorusGeometry } from './shapes.ts'
 import { seededRandom } from '../../space.ts'
 import type { Look } from '../looks.ts'
 import { joint } from '../model.ts'

@@ -1,16 +1,12 @@
 import {
   BoxGeometry,
-  CapsuleGeometry,
-  ConeGeometry,
-  CylinderGeometry,
   IcosahedronGeometry,
   OctahedronGeometry,
-  SphereGeometry,
-  TorusGeometry,
   type Group,
   type Material,
   type Object3D,
 } from 'three'
+import { CapsuleGeometry, ConeGeometry, CylinderGeometry, SphereGeometry, TorusGeometry } from './shapes.ts'
 import type { Look } from '../looks.ts'
 import { joint } from '../model.ts'
 import { arms, band, belt, boots, chest, chestFront, face, hand, legs, ring, strap } from './body.ts'

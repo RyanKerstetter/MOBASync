@@ -30,7 +30,7 @@ import { loadSettings, MAX_SOUND_VOLUME, readAttackMarkerSize, readClickRadius, 
 import { AttackSoundDirector, placeSound } from './audio/attack-sounds.ts'
 import { SoundEngine } from './audio/sound-engine.ts'
 import { AbilitySoundDirector } from './audio/ability-sound-director.ts'
-import { ClientGameState } from './game-state.ts'
+import { ClientGameState, type CastAim } from './game-state.ts'
 import { abilityKeyCodes, isMovementKey, keyLabel, MovementKeys } from './movement-keys.ts'
 import { createTeamVision, type TeamVision } from './team-vision.ts'
 import { abilitySlotViews, ROUND_OUT_TEXT } from './ui/hud.ts'
@@ -241,6 +241,8 @@ export async function startGame({
   // camera moves under a still mouse as the champion walks.
   let pointerOnScreen = { x: app.screen.width / 2, y: app.screen.height / 2 }
   const pointerInWorld = () => world.screenToWorld(pointerOnScreen)
+  // Where an ability is aimed: at the ground under the mouse, or, for one cast on a unit, at whoever the mouse is over (see `CastAim`).
+  const castAim = (): CastAim => ({ ground: world.screenToGround(pointerOnScreen), unit: pointerInWorld() })
   const castControl = new CastControl(castMode ?? settings.castMode)
   // What the player turned off in the menu last time stays off.
   world.effects = { ...settings.effects }
@@ -514,7 +516,7 @@ export async function startGame({
       buffered = { slot, selfCast, at: now }
       return
     }
-    sendAttempt(gameState.createCastOrder(slot, pointerInWorld(), now, selfCast, { keepAttacking: settings.castKeepsAttack }))
+    sendAttempt(gameState.createCastOrder(slot, castAim(), now, selfCast, { keepAttacking: settings.castKeepsAttack }))
   }
   // Each frame, the held ability is cast as soon as nothing keeps it waiting.
   const castBuffered = (now: number): void => {
@@ -526,7 +528,7 @@ export async function startGame({
     if (gameState.castMustWait(buffered.slot, now) !== undefined) return
     const { slot, selfCast } = buffered
     buffered = undefined
-    sendAttempt(gameState.createCastOrder(slot, pointerInWorld(), now, selfCast, { keepAttacking: settings.castKeepsAttack }))
+    sendAttempt(gameState.createCastOrder(slot, castAim(), now, selfCast, { keepAttacking: settings.castKeepsAttack }))
   }
   // Alt on its own would open the browser's menu bar when it is let go, so it is kept from doing that while the game is being played.
   const isAlt = (event: KeyboardEvent): boolean => event.code === 'AltLeft' || event.code === 'AltRight'
@@ -871,7 +873,7 @@ export async function startGame({
       localCharacterId,
       ...(local ? { localAttackCooldown: gameState.getAttackCooldownProgress(now) } : {}),
       ...(world.debug ? { debugPath: gameState.getLocalPath(now) } : {}),
-      ...(aimed === undefined ? {} : { castPreview: gameState.getCastPreview(aimed, pointerInWorld(), now, characters) }),
+      ...(aimed === undefined ? {} : { castPreview: gameState.getCastPreview(aimed, castAim(), now, characters) }),
       attackMarkers: chooseAttackMarkers({
         hoveredId: hovered?.id,
         lockedId: gameState.getLocalAttackTarget(now),

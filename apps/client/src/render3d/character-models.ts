@@ -47,6 +47,8 @@ export type Release = { id: number; kind: 'attack' | 'cast'; abilityId?: string;
 export type FacingHints = {
   // Where each character's attack is aimed, for those that are attacking someone: they turn to face it.
   targetOf: (character: RenderedCharacter) => Vector2 | undefined
+  // Whether something this tall standing here is on the screen, or near enough that its shadow may be. Everything is, if not said.
+  inView?: (position: Vector2, height: number) => boolean
 }
 
 // Every character, in 3D: a model for each (see models/), stood where it is, turned the way it goes or the way it aims, and
@@ -169,7 +171,10 @@ export class CharacterModels3D {
       if (character.dead) actor.deadSince ??= t
       else actor.deadSince = undefined
 
-      model.pose({
+      // Posed only where it can be seen: not when it is hidden from the team, nor far off the screen (`inView`, which leaves room for
+      // a shadow that falls onto it). What it is doing is still kept up above, so it is right the moment it comes into view.
+      const seen = !hidden.has(character.id) && (hints.inView?.(position, model.height) ?? true)
+      if (seen) model.pose({
         t,
         dt,
         moving,
@@ -193,7 +198,7 @@ export class CharacterModels3D {
       const seenNow = !hidden.has(character.id)
       model.root.visible = seenNow && corpse.body
       model.setOpacity(character.invisible ? INVISIBLE_ALPHA : 1)
-      if (model.root.visible) model.ambient(fx, dt)
+      if (model.root.visible && seen) model.ambient(fx, dt)
 
       this.updatePips(actor, character, t, seenNow && !character.dead)
       this.updateStars(actor, character, t, seenNow && !character.dead && character.stunned)

@@ -6,6 +6,7 @@ import {
   CatmullRomCurve3,
   Color,
   DoubleSide,
+  Float32BufferAttribute,
   Group,
   LatheGeometry,
   Mesh,
@@ -14,13 +15,14 @@ import {
   Vector3,
   type ColorRepresentation,
   type Material,
-  type MeshStandardMaterial,
+  MeshStandardMaterial,
   type MeshStandardMaterialParameters,
   type Object3D,
   type Texture,
 } from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { seededRandom, smoothstep } from '../../space.ts'
+import { sidesFor, stepsFor } from './shapes.ts'
 import type { Look } from '../looks.ts'
 
 // What every champion built in detail is made with: the humanoid's skeleton to hang it on, ways to shape pieces (turned
@@ -108,8 +110,10 @@ export function shaped<T extends BufferGeometry>(geometry: T, place: Place = {})
 
 // A shape turned round the Y axis from a profile of [radius, height] points, given from the bottom up so it faces out; part of
 // the way round only, from `from` (0 is ahead, +Z; a quarter turn is +X) for `span` radians.
+// (With as many sides as its size wants: see shapes.ts.)
 export function lathe(profile: Array<[number, number]>, segments = 20, from = 0, span = Math.PI * 2): LatheGeometry {
-  return new LatheGeometry(profile.map(([r, y]) => new ThreeVector2(r, y)), segments, from, span)
+  const widest = Math.max(...profile.map(([r]) => Math.abs(r)))
+  return new LatheGeometry(profile.map(([r, y]) => new ThreeVector2(r, y)), sidesFor(widest * span / (Math.PI * 2), segments, 6), from, span)
 }
 
 // The radius of a profile at a height, between its points.
@@ -124,8 +128,12 @@ export function radiusAt(profile: Array<[number, number]>, y: number): number {
 
 // A tube swept along a smooth curve through `points`, its radius given along it (0 at the start, 1 at the end): a horn, a limb
 // of a bow, a strand of hair, a branch.
-export function sweep(points: Triple[], radius: number | ((u: number) => number), radial = 8, steps = 24): BufferGeometry {
+// (With as many sides and steps as its size wants: see shapes.ts.)
+export function sweep(points: Triple[], radius: number | ((u: number) => number), mostRadial = 8, mostSteps = 24): BufferGeometry {
   const curve = new CatmullRomCurve3(points.map(([x, y, z]) => new Vector3(x, y, z)))
+  const thickest = typeof radius === 'number' ? radius : Math.max(...[0, 0.25, 0.5, 0.75, 1].map(radius))
+  const radial = sidesFor(thickest, mostRadial, 4)
+  const steps = stepsFor(curve.getLength(), mostSteps, 6)
   const frames = curve.computeFrenetFrames(steps, false)
   const positions: number[] = []
   const normals: number[] = []
@@ -199,15 +207,66 @@ class Plates {
     bin.pieces.push(geometry)
   }
 
+  // Each joint's pieces are drawn in as few meshes as can be: those of plain surfaces that differ only in colour (cloth, leather,
+  // skin, trim) are one mesh, each piece keeping its colour in its corners, as each mesh drawn costs the browser time every frame.
+  // A surface that is painted, see-through or glows (and may change as it is played) keeps a mesh of its own.
   build(kit: DetailKit): void {
+    const groups = new Map<string, typeof this.bins>()
     for (const bin of this.bins) {
-      const merged = bin.pieces.length === 1 ? bin.pieces[0] : mergeGeometries(bin.pieces, false)
-      if (!merged) throw new Error('The pieces of a model could not be merged.')
-      if (merged !== bin.pieces[0]) for (const piece of bin.pieces) piece.dispose()
-      kit.part(bin.parent, merged, bin.material, 0, 0, 0, bin.shadow)
+      const key = `${bin.parent.uuid}|${bin.shadow}|${blendKey(bin.material) ?? bin.material.uuid}`
+      const group = groups.get(key)
+      if (group) group.push(bin)
+      else groups.set(key, [bin])
+    }
+    for (const group of groups.values()) {
+      const [first] = group
+      if (group.length === 1) {
+        place(kit, first.parent, first.pieces, first.material, first.shadow)
+        continue
+      }
+      const surfaces = group.map((bin) => bin.material as MeshStandardMaterial)
+      for (const bin of group) {
+        const { r, g, b } = (bin.material as MeshStandardMaterial).color
+        for (const piece of bin.pieces) {
+          const count = piece.getAttribute('position').count
+          const colors = new Float32Array(count * 3)
+          for (let index = 0; index < count; index += 1) colors.set([r, g, b], index * 3)
+          piece.setAttribute('color', new Float32BufferAttribute(colors, 3))
+        }
+      }
+      const average = (read: (surface: MeshStandardMaterial) => number): number => surfaces.reduce((sum, surface) => sum + read(surface), 0) / surfaces.length
+      const blended = kit.surface('#ffffff', {
+        vertexColors: true,
+        roughness: average((surface) => surface.roughness),
+        metalness: average((surface) => surface.metalness),
+        side: surfaces[0].side,
+        flatShading: surfaces[0].flatShading,
+      })
+      place(kit, first.parent, group.flatMap((bin) => bin.pieces), blended, first.shadow)
     }
     this.bins.length = 0
   }
+}
+
+// What a surface can be drawn together with others in: undefined for one that keeps a mesh of its own (see `Plates.build`). Surfaces
+// alike in all but colour, and near enough in how rough and how metal they are, are drawn together.
+function blendKey(material: Material): string | undefined {
+  if (!(material instanceof MeshStandardMaterial) || material.type !== 'MeshStandardMaterial') return undefined
+  if (material.transparent || material.opacity < 1 || material.alphaTest > 0 || material.vertexColors) return undefined
+  if (material.map || material.normalMap || material.roughnessMap || material.metalnessMap || material.emissiveMap || material.alphaMap || material.bumpMap) return undefined
+  if (material.emissiveIntensity > 0 && material.emissive.getHex() !== 0) return undefined
+  if (material.userData.baseGlow !== undefined || material.userData.glow === true) return undefined
+  return `${material.side}|${material.flatShading}|${Math.round(material.roughness * 5)}|${Math.round(material.metalness * 4)}`
+}
+
+// Pieces merged into one mesh on a joint.
+function place(kit: DetailKit, parent: Object3D, pieces: BufferGeometry[], material: Material, shadow: boolean): void {
+  // Merged pieces must all have the same attributes: where one has no texture coordinates, none keep them.
+  if (pieces.some((piece) => !piece.hasAttribute('uv'))) for (const piece of pieces) piece.deleteAttribute('uv')
+  const merged = pieces.length === 1 ? pieces[0] : mergeGeometries(pieces, false)
+  if (!merged) throw new Error('The pieces of a model could not be merged.')
+  if (merged !== pieces[0]) for (const piece of pieces) piece.dispose()
+  kit.part(parent, merged, material, 0, 0, 0, shadow)
 }
 
 // One detailed model being built: its pieces, its surfaces, and what moves each frame.
@@ -432,8 +491,9 @@ export class Skirt {
       out[index + 1] = this.rest[index + 1]
       out[index + 2] = z
     }
+    // Its normals are left as they were made: it only ripples and sways, which hardly changes how it is lit, and working them out
+    // again for every robe every frame costs more than anything else in drawing it.
     this.geometry.getAttribute('position').needsUpdate = true
-    this.geometry.computeVertexNormals()
   }
 }
 
@@ -442,6 +502,7 @@ export class Skirt {
 export class Cape {
   private readonly geometry: BufferGeometry
   private readonly rest: Float32Array
+  private readonly restNormals: Float32Array
   private trail = 0.1
 
   constructor(
@@ -468,6 +529,7 @@ export class Cape {
     }
     this.geometry = geometry
     this.rest = (geometry.getAttribute('position').array as Float32Array).slice()
+    this.restNormals = (geometry.getAttribute('normal').array as Float32Array).slice()
     const holder = new Group()
     holder.position.set(...options.at)
     parent.add(holder)
@@ -487,7 +549,9 @@ export class Cape {
   private drape(t: number, walk: number, dead: boolean): void {
     const { width, length, outset = 0.06, wrap = 0.12 } = this.options
     const positions = this.geometry.getAttribute('position')
+    const normals = this.geometry.getAttribute('normal')
     const out = positions.array as Float32Array
+    const turned = normals.array as Float32Array
     const trail = Math.max(0.02, this.trail)
     for (let index = 0; index < out.length; index += 3) {
       const x0 = this.rest[index]
@@ -505,8 +569,17 @@ export class Cape {
       out[index] = x
       out[index + 1] = y
       out[index + 2] = z + z0
+      // Its normal turned back as far as the cloth is bent there (about the X axis, as the cloth is), which is much cheaper than
+      // working the normals out again from its faces.
+      const cos = Math.cos(bend)
+      const sin = Math.sin(bend)
+      const ny = this.restNormals[index + 1]
+      const nz = this.restNormals[index + 2]
+      turned[index] = this.restNormals[index]
+      turned[index + 1] = ny * cos - nz * sin
+      turned[index + 2] = ny * sin + nz * cos
     }
     positions.needsUpdate = true
-    this.geometry.computeVertexNormals()
+    normals.needsUpdate = true
   }
 }

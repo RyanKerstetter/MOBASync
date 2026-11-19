@@ -1,17 +1,13 @@
 import {
   BoxGeometry,
-  CapsuleGeometry,
-  ConeGeometry,
-  CylinderGeometry,
   Quaternion,
-  SphereGeometry,
-  TorusGeometry,
   Vector3,
   type BufferGeometry,
   type Group,
   type Material,
   type Object3D,
 } from 'three'
+import { CapsuleGeometry, ConeGeometry, CylinderGeometry, SphereGeometry, TorusGeometry } from './shapes.ts'
 import { lathe, radiusAt, shaped, sweep, type Sculpt, type Triple } from './kit.ts'
 
 // Pieces of a body every detailed champion is made from: the chest, the neck, a face, arms, hands, legs, boots, belts and

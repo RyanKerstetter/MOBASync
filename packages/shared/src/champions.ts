@@ -663,7 +663,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     description: 'A hulking bruiser that toughens with every blow, leaps onto its prey and flies into a rage.',
     passive: `Auto attacks give a stack of resistance, up to ${PLATING_MAX_STACKS}. Stacks last ${PLATING_TICKS / GAME_TPS} seconds and every auto renews them.`,
     base: { maxHp: 1100, attackDamage: 70, attackSpeed: .9, resistance: 0, haste: 0, arcane: 10 },
-    growth: { maxHp: 80, attackDamage: 9, attackSpeed: 0.02, resistance: 7, haste: 5, arcane: 3 },
+    growth: { maxHp: 80, attackDamage: 9, attackSpeed: 0.02, resistance: 6, haste: 5, arcane: 3 },
     moveSpeed: 145,
     radius: 24,
     attackRange: 100,

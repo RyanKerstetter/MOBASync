@@ -3,11 +3,14 @@ import {
   ACESFilmicToneMapping,
   Color,
   DirectionalLight,
+  Frustum,
   HemisphereLight,
+  Matrix4,
   PCFSoftShadowMap,
   PerspectiveCamera,
   Raycaster,
   Scene,
+  Sphere,
   Vector2 as ThreeVector2,
   Vector3,
   WebGLRenderer,
@@ -38,6 +41,10 @@ const NO_CHARACTERS: readonly RenderedCharacter[] = []
 const SUN_DIRECTION = new Vector3(-0.55, 1, -0.4).normalize()
 // How far round the camera's target the sun's shadows are worked out, which is more than the screen shows.
 const SHADOW_REACH = 1300
+// How far off the screen a character is still posed, in world units: far enough that its shadow, falling onto the screen, moves.
+const VIEW_MARGIN = 250
+// The most pixels the world is drawn with for each of the page's (see the constructor).
+const MAX_PIXEL_RATIO = 1.5
 
 export type WorldRenderer3DOptions = {
   // What the game is drawn in: its canvas is put under the page's 2D canvas, which goes on drawing the names and bars over it.
@@ -59,6 +66,11 @@ export class WorldRenderer3D implements GameRenderer {
   private readonly renderer: WebGLRenderer
   private readonly scene = new Scene()
   private readonly camera = new PerspectiveCamera(34, 1, 10, 9000)
+  // What the camera sees this frame, for leaving unposed the characters far off the screen (see `CharacterModels3D.update`).
+  private readonly view = new Frustum()
+  private readonly viewMatrix = new Matrix4()
+  private readonly viewSphere = new Sphere()
+  private readonly viewPoint = new Vector3()
   private readonly sun: DirectionalLight
   private readonly vision = new VisionShading()
   private readonly terrain: Terrain3D
@@ -95,7 +107,9 @@ export class WorldRenderer3D implements GameRenderer {
     this.app = options.app
     this.ground = options.ground
     this.renderer = new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+    // Sharper than this on a high-density screen costs far more to draw (twice the density is four times the pixels, each lit and
+    // shadowed) than it shows, with the edges smoothed as they are.
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO))
     this.renderer.shadowMap.enabled = true
     this.renderer.shadowMap.type = PCFSoftShadowMap
     this.renderer.toneMapping = ACESFilmicToneMapping
@@ -210,6 +224,14 @@ export class WorldRenderer3D implements GameRenderer {
     return best?.at ?? rayToGround(origin, direction) ?? { ...this.center }
   }
 
+  // The ground under a point of the screen, whatever body stands in front of it.
+  screenToGround(point: Vector2): Vector2 {
+    const { width, height } = this.size
+    if (width === 0 || height === 0) return { ...this.center }
+    this.raycaster.setFromCamera(new ThreeVector2(point.x / width * 2 - 1, -(point.y / height) * 2 + 1), this.camera)
+    return rayToGround(this.raycaster.ray.origin, this.raycaster.ray.direction) ?? { ...this.center }
+  }
+
   update(frame: WorldFrame): void {
     const { now, characters, entities } = frame
     const dt = this.lastNow === undefined ? 1 / 60 : Math.min(0.1, Math.max(0, (now - this.lastNow) / 1000))
@@ -226,7 +248,9 @@ export class WorldRenderer3D implements GameRenderer {
 
     const localTeam = everyone.get(frame.localCharacterId ?? -1)?.team
     // Each layer on its own, so one that goes wrong leaves the others drawn (see guard.ts); a batch that was begun is always ended.
+    this.view.setFromProjectionMatrix(this.viewMatrix.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse))
     guarded('The 3D characters', () => this.characters.update(characters, unseen, now, dt, fx, {
+      inView: (position, height) => this.view.intersectsSphere(this.viewSphere.set(this.viewPoint.set(position.x, height / 2, position.y), height + VIEW_MARGIN)),
       // A monster that is after someone faces them while it stands.
       targetOf: (character) => {
         const target = character.monster?.targetId === undefined ? undefined : everyone.get(character.monster.targetId)
