@@ -10,6 +10,7 @@ import { layoutCorpse } from './corpse.ts'
 import { characterDepth } from './depth.ts'
 import { layoutDeaggroBar } from './deaggro-bar.ts'
 import { layoutHealthBar } from './health-bar.ts'
+import type { OverlayAnchor } from './overlay-anchor.ts'
 import { layoutLevelBadge, LEVEL_BADGE_RADIUS } from './level-badge.ts'
 import { layoutStackPips } from './stack-pips.ts'
 import { statusLabels } from './status-labels.ts'
@@ -72,6 +73,9 @@ export class CharacterLayer {
   readonly view = new Container()
   readonly overlay = new Container()
   private readonly actors = new Map<number, Actor>()
+  // Where each character's name and bars are placed from, when the world is not drawn flat (see `OverlayAnchor`). Without
+  // one, from where the character stands, as the overlay shares the world's coordinates.
+  anchor: OverlayAnchor | undefined
 
   // `paint` is how a sheet is painted in a team's colour (see `teamVariant`): the page's own, unless a test gives another.
   constructor(
@@ -132,7 +136,8 @@ export class CharacterLayer {
       // A knocked-up body is drawn up off the ground, as high as its arc has it, and is still drawn in front of and behind what it stands in front of and behind.
       actor.node.position.set(character.position.x, character.position.y - (character.lift ?? 0) * AIRBORNE_LIFT)
       actor.node.zIndex = characterDepth(character.position)
-      actor.overlay.position.set(character.position.x, character.position.y)
+      const anchored = this.anchor?.(character.position, radius, character.id) ?? character.position
+      actor.overlay.position.set(anchored.x, anchored.y)
       // A death leaves no bars until the respawn: a faint ghost for a circle, and for a sprite its
       // death animation at full strength, ending lying down.
       // An invisible one that is drawn at all (its own team sees it, an enemy does not: see `TeamVision`) is drawn faintly.

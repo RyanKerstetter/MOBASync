@@ -1,5 +1,5 @@
 {
-  "name": "2d-moba",
+  "name": "3d-moba",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -9,14 +9,14 @@
   ],
   "scripts": {
     "dev": "concurrently -n client,server -c cyan,green \"npm:dev:client\" \"npm:dev:server\"",
-    "dev:client": "npm run dev --workspace @2d-moba/client",
-    "dev:server": "npm run dev --workspace @2d-moba/server",
+    "dev:client": "npm run dev --workspace @3d-moba/client",
+    "dev:server": "npm run dev --workspace @3d-moba/server",
     "start": "npm run build:client && concurrently -n client,server -c cyan,green \"npm:preview\" \"npm:start:server\"",
-    "start:server": "npm run start --workspace @2d-moba/server",
-    "build:client": "npm run build --workspace @2d-moba/client",
+    "start:server": "npm run start --workspace @3d-moba/server",
+    "build:client": "npm run build --workspace @3d-moba/client",
     "test": "tsx --test \"tests/*.test.ts\"",
-    "build": "npm run build --workspace @2d-moba/client && npm run typecheck --workspace @2d-moba/server",
-    "preview": "npm run preview --workspace @2d-moba/client"
+    "build": "npm run build --workspace @3d-moba/client && npm run typecheck --workspace @3d-moba/server",
+    "preview": "npm run preview --workspace @3d-moba/client"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

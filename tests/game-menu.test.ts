@@ -18,11 +18,13 @@ import {
   readClickRadius,
   readMaxFps,
   saveSettings,
+  SOUND_VOLUME_STEP,
   UNCAPPED_FPS,
   type GameSettings,
 } from '../apps/client/src/game-settings.ts'
 import { GAME_TPS } from '../packages/shared/src/index.ts'
 import { DEFAULT_EFFECTS, EFFECT_KEYS, readEffects } from '../apps/client/src/render/effect-settings.ts'
+import { RENDERER_KINDS } from '../apps/client/src/render/renderer-kind.ts'
 
 function fakeStorage(initial?: string) {
   const store = new Map<string, string>()
@@ -338,9 +340,12 @@ test('settings are kept, and a missing, damaged or odd stored value is the defau
     walkKeepsCast: !DEFAULT_SETTINGS.walkKeepsCast,
     movementKeys: !DEFAULT_SETTINGS.movementKeys,
     castKeepsAttack: !DEFAULT_SETTINGS.castKeepsAttack,
+    bufferAbilities: !DEFAULT_SETTINGS.bufferAbilities,
     attackMarkerSize: DEFAULT_ATTACK_MARKER_SIZE + ATTACK_MARKER_SIZE_STEP,
     diagnostics: false,
     maxFps: 144,
+    renderer: RENDERER_KINDS.find((kind) => kind !== DEFAULT_SETTINGS.renderer) ?? DEFAULT_SETTINGS.renderer,
+    soundVolume: DEFAULT_SETTINGS.soundVolume === 0 ? SOUND_VOLUME_STEP : 0,
   }
   saveSettings(chosen, storage)
   assert.deepEqual(loadSettings(storage), chosen, 'what was saved comes back')

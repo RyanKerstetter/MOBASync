@@ -1,4 +1,6 @@
 import { Container, Text } from 'pixi.js'
+import type { Vector2 } from '../../../../packages/shared/src/index.ts'
+import type { OverlayAnchor } from './overlay-anchor.ts'
 import {
   KILL_REWARD_LIFT,
   KILL_REWARD_LINE_HEIGHT,
@@ -10,8 +12,9 @@ import {
 type Shown = {
   node: Container
   startedAt: number
-  // Where it started from, so it rises from there.
-  startY: number
+  // Where the victim fell, and how big it was, so it rises from over there.
+  at: Vector2
+  radius: number
 }
 
 // The gold and experience a kill paid, over where the victim fell (see kill-reward.ts): each is a stack of lines, gold over experience, that
@@ -19,6 +22,9 @@ type Shown = {
 export class KillRewardLayer {
   readonly view = new Container()
   private readonly shown: Shown[] = []
+  // Where the rewards are placed from, when the world is not drawn flat (see `OverlayAnchor`). Without one, from where the
+  // victim fell.
+  anchor: OverlayAnchor | undefined
 
   // Shows the kills just made (`rewards`, each told once) and moves the ones already up on to `now`.
   update(rewards: readonly KillRewardView[], now: number): void {
@@ -33,7 +39,8 @@ export class KillRewardLayer {
       }
       shown.node.alpha = pose.alpha
       shown.node.scale.set(pose.scale)
-      shown.node.y = shown.startY - pose.rise
+      const base = this.anchor?.(shown.at, shown.radius) ?? shown.at
+      shown.node.position.set(base.x, base.y - shown.radius - KILL_REWARD_LIFT - pose.rise)
     }
   }
 
@@ -51,9 +58,9 @@ export class KillRewardLayer {
       text.y = -(lines.length - 1 - index) * KILL_REWARD_LINE_HEIGHT
       node.addChild(text)
     })
-    const startY = reward.position.y - reward.radius - KILL_REWARD_LIFT
-    node.position.set(reward.position.x, startY)
+    const at = { x: reward.position.x, y: reward.position.y }
+    node.position.set(at.x, at.y - reward.radius - KILL_REWARD_LIFT)
     this.view.addChild(node)
-    this.shown.push({ node, startedAt: now, startY })
+    this.shown.push({ node, startedAt: now, at, radius: reward.radius })
   }
 }

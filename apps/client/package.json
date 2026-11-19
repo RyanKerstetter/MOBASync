@@ -1,5 +1,5 @@
 {
-  "name": "@2d-moba/client",
+  "name": "@3d-moba/client",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -10,9 +10,11 @@
   },
   "dependencies": {
     "@geckos.io/client": "^3.1.0",
-    "pixi.js": "^8.11.0"
+    "pixi.js": "^8.11.0",
+    "three": "^0.170.0"
   },
   "devDependencies": {
+    "@types/three": "^0.170.0",
     "vite": "^6.0.0"
   }
 }

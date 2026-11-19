@@ -35,6 +35,10 @@ export type ActionView = {
   kind: 'attack' | 'cast'
   progress: number
   aimAt?: Vector2
+  // Which ability is being cast, for one that is (the 3D view gives each its own look).
+  abilityId?: string
+  // Whom it is aimed at, for an attack or a cast aimed at a unit.
+  targetId?: number
 }
 
 // What a champion is doing this frame, as far as its animation cares.

@@ -189,6 +189,13 @@ export type RenderedCharacter =
     dodging: boolean
     // What it is in the middle of, if anything: an auto attack or an ability winding up.
     action?: ActionView
+    // Being moved by a dash (a leap, a dash through an enemy, a pull), for how it is drawn.
+    dashing?: true
+    // The kinds of status on it (see `Status.kind`), for how it is drawn: a shield, a lifesteal, a longer reach. Left out when there are none.
+    statusKinds?: readonly string[]
+    // The abilities it has cast lately and how long ago, in milliseconds, newest last: seen from their cooldowns starting, so an ability that goes off the moment it is
+    // cast (a dash, a buff), which is never seen winding up, is still seen. For how the page draws it, not a rule of the game.
+    casts?: readonly { abilityId: string; ageMs: number }[]
     // Range and cooldown include active attack-range and attack-speed bonuses.
     attackRange: number
     attackCooldownTicks: number
@@ -243,6 +250,9 @@ export type CastPreview = {
   // A unit ability aimed at an enemy (or for allies, a teammate) beyond its range: it would not cast yet, but walk up to them and cast on reaching them.
   outOfRange?: boolean
 }
+
+// How long a cast stays in `RenderedCharacter.casts`, in milliseconds.
+const RECENT_CAST_MS = 1500
 
 // How far past its edge a click still picks a champion, however the extra click radius is set.
 export const PICK_SLACK = 6
@@ -301,6 +311,9 @@ export class ClientGameState {
   private serverSnapshot: GameSnapshot | undefined
   private readonly localOrders = new Map<number, TrackedOrder>()
   private readonly renderedRemotePositions = new Map<number, RenderedRemotePosition>()
+  // For each character, the tick each of its abilities was last seen to be ready on, and the casts that have been seen from them starting again (see `RenderedCharacter.casts`).
+  private readonly cooldownsSeen = new Map<number, Map<string, number>>()
+  private readonly castsSeen = new Map<number, Array<{ abilityId: string; at: number }>>()
   private serverTick = 0
   private serverTickReceivedAt = performance.now()
   private nextOrderSequence = 1
@@ -507,7 +520,7 @@ export class ClientGameState {
     const entityOut = this.entityOut(frame, localCharacterId)
     const def = abilityOnKey(ability.def, entityOut)
     const blocker = this.castBlocker(def, state, entityOut)
-    if (blocker) return { ok: false, reason: blocker }
+    if (blocker) return { ok: false, reason: blocker.reason }
     const origin = state.getPosition()
     const aimed = selfCast && def.targetsAllies && !def.targetsLinked
       ? { ok: true as const, target: { mode: 'unit', unitId: localCharacterId } satisfies CastTarget }
@@ -530,7 +543,7 @@ export class ClientGameState {
     const state = frame.get(localCharacterId)
     if (!state) return { ok: false, reason: 'Your champion is not available.' }
     const blocker = this.castBlocker(def, state, this.entityOut(frame, localCharacterId))
-    if (blocker) return { ok: false, reason: blocker }
+    if (blocker) return { ok: false, reason: blocker.reason }
     const objective = this.simulator.at(tick - 1).getObjective()
     if (objective?.kind === 'ctf' && objective.flags.some((flag) => flag.carrierId === localCharacterId)) {
       return { ok: false, reason: 'You cannot go back while you carry a flag.' }
@@ -568,32 +581,62 @@ export class ClientGameState {
     const state = frame.get(ability.localCharacterId)
     if (!state) return 'Your champion is not available.'
     const entityOut = this.entityOut(frame, ability.localCharacterId)
-    return this.castBlocker(abilityOnKey(ability.def, entityOut), state, entityOut)
+    return this.castBlocker(abilityOnKey(ability.def, entityOut), state, entityOut)?.reason
   }
 
-  // Why this ability cannot be started by this character right now, if it cannot: the things the
-  // simulator would quietly drop the order for.
+  // Why a cast of the ability in a slot, given now, would be refused or dropped only for the moment: the champion is winding something
+  // up, dashing, stunned, knocked up, feared or silenced, all of which end by themselves. The page holds such a cast and sends it once
+  // this says nothing (see the controls setting `bufferAbilities`). Nothing, too, for a cast refused for good (a cooldown, a missing
+  // stick), which the cast itself says.
+  castMustWait(slot: number, now = performance.now()): string | undefined {
+    const ability = this.abilityInSlot(slot)
+    if (!ability.ok) return undefined
+    const tick = this.nextOrderTick(now)
+    const frame = this.simulator.at(tick)
+    const state = frame.get(ability.localCharacterId)
+    if (!state) return undefined
+    const entityOut = this.entityOut(frame, ability.localCharacterId)
+    const blocker = this.castBlocker(abilityOnKey(ability.def, entityOut), state, entityOut)
+    if (blocker) return blocker.wait ? blocker.reason : undefined
+    return this.busyWith(state, tick)
+  }
+
+  // Whether the champion is in the middle of something the simulator will not start a cast during: an attack or an ability winding up
+  // (but not Back, which a cast breaks off), or a dash. It ends by itself, so it is worth waiting for.
+  private busyWith(state: CharacterTickSnapshot, tick: number): string | undefined {
+    if (state.isDashing()) return 'You cannot cast while dashing.'
+    const action = state.getAction()
+    if (action && action.launchTick > tick && !(action.kind === 'cast' && action.abilityId === BACK_ABILITY_ID)) {
+      return action.kind === 'attack' ? 'You cannot cast while an attack winds up.' : 'You cannot cast while another ability winds up.'
+    }
+    return undefined
+  }
+
+  // Why this ability cannot be started by this character right now, if it cannot: the things the simulator would quietly drop the
+  // order for. `wait` for one that ends by itself (a stun, a silence), which a cast can be held through; not for a cooldown or a
+  // requirement, which the player has to see to.
   private castBlocker(
     def: AbilityDef,
     state: CharacterTickSnapshot,
     entityOut: (defId: string) => boolean,
-  ): string | undefined {
-    if (!state.getAbilityCooldown(def.id).ready) return `${def.id} is on cooldown.`
+  ): { reason: string; wait: boolean } | undefined {
+    if (!state.getAbilityCooldown(def.id).ready) return { reason: `${def.id} is on cooldown.`, wait: false }
     const statuses = state.getStatuses()
     // An unstoppable ability (a cleanse) is cast through all of these (see `AbilityDef.unstoppable`).
     if (!def.unstoppable) {
-      if (hasStatus(statuses, 'stun')) return 'You cannot cast while stunned.'
-      if (hasStatus(statuses, 'airborne')) return 'You cannot cast while airborne.'
-      if (hasStatus(statuses, 'fear')) return 'You cannot cast while feared.'
-      if (hasStatus(statuses, 'silence') && !def.universal) return 'You cannot cast while silenced.'
+      if (hasStatus(statuses, 'stun')) return { reason: 'You cannot cast while stunned.', wait: true }
+      if (hasStatus(statuses, 'airborne')) return { reason: 'You cannot cast while airborne.', wait: true }
+      if (hasStatus(statuses, 'fear')) return { reason: 'You cannot cast while feared.', wait: true }
+      if (hasStatus(statuses, 'silence') && !def.universal) return { reason: 'You cannot cast while silenced.', wait: true }
     }
     if (!meetsRequirement(def, entityOut, (abilityId) => !state.getAbilityCooldown(abilityId).ready) && def.requires) {
       const base = def.requires.out
         ? `${def.id} needs your ${def.requires.entity} out`
         : `${def.id} cannot be cast while your ${def.requires.entity} is out`
-      return def.orWhen
-        ? `${base}, or your ${def.orWhen.onCooldown} on cooldown with none in play.`
-        : `${base}.`
+      return {
+        reason: def.orWhen ? `${base}, or your ${def.orWhen.onCooldown} on cooldown with none in play.` : `${base}.`,
+        wait: false,
+      }
     }
     return undefined
   }
@@ -1289,6 +1332,9 @@ export class ClientGameState {
         invisible: hasStatus(statuses, 'invisible'),
         dodging: hasStatus(statuses, 'dodge'),
         ...this.getActionView(snapshot, state, now),
+        ...(state?.isDashing() ? { dashing: true as const } : {}),
+        ...(statuses.length > 0 ? { statusKinds: [...new Set(statuses.map((status) => status.kind))] } : {}),
+        ...this.castsOf(character, state, snapshot.tick, now),
         attackRange: character.champion.attackRangeWith(statuses, itemTotals(state?.getItems()).attackRange ?? 0),
         attackCooldownTicks: character.champion.attackCooldownTicksWith(statuses, state?.getLevel() ?? 1, itemTotals(state?.getItems()).attackSpeed ?? 0, itemAttackSpeedBonus(state?.getItems())),
         ...this.getRenderedCharacterView(character.id, now, snapshot),
@@ -1296,6 +1342,11 @@ export class ClientGameState {
     }
     for (const characterId of this.renderedRemotePositions.keys()) {
       if (!activeCharacterIds.has(characterId)) this.renderedRemotePositions.delete(characterId)
+    }
+    for (const characterId of this.cooldownsSeen.keys()) {
+      if (activeCharacterIds.has(characterId)) continue
+      this.cooldownsSeen.delete(characterId)
+      this.castsSeen.delete(characterId)
     }
     return characters
   }
@@ -1318,6 +1369,36 @@ export class ClientGameState {
       }))
     }
     return most > 0 ? { healPreview: most } : {}
+  }
+
+  // The abilities a character has cast lately (see `RenderedCharacter.casts`): an ability whose cooldown is seen to start again, by more than half of it, has just been
+  // cast. A cooldown that is cut short (a refund) only ever moves it the other way. One started by something else (the Fire Mage's fireball starts Detonate's) looks
+  // like a cast of it, which the page leaves to whoever draws it.
+  private castsOf(character: SimCharacter, state: CharacterTickSnapshot | undefined, tick: number, now: number): { casts?: { abilityId: string; ageMs: number }[] } {
+    if (!state || state.isDead()) return {}
+    let seen = this.cooldownsSeen.get(character.id)
+    const first = seen === undefined
+    if (!seen) {
+      seen = new Map()
+      this.cooldownsSeen.set(character.id, seen)
+    }
+    let casts = this.castsSeen.get(character.id)
+    for (const abilityId of character.champion.castableAbilities()) {
+      const cooldown = state.getAbilityCooldown(abilityId)
+      const readyAt = tick + (cooldown.ready ? 0 : cooldown.ticksRemaining)
+      const before = seen.get(abilityId)
+      seen.set(abilityId, readyAt)
+      if (first || before === undefined) continue
+      const length = getAbilityDef(abilityId)?.cooldownTicks ?? 0
+      if (readyAt - before > Math.max(3, length / 2)) {
+        casts ??= []
+        casts.push({ abilityId, at: now })
+        this.castsSeen.set(character.id, casts)
+      }
+    }
+    if (!casts) return {}
+    while (casts.length > 0 && now - casts[0].at > RECENT_CAST_MS) casts.shift()
+    return casts.length > 0 ? { casts: casts.map((cast) => ({ abilityId: cast.abilityId, ageMs: now - cast.at })) } : {}
   }
 
   // How far through going back a character is (see `RenderedCharacter.backing`), read at the estimated tick and not the frame's, so the ring goes round smoothly between frames.
@@ -1382,13 +1463,26 @@ export class ClientGameState {
     const length = action.launchTick - action.startTick
     const progress = length <= 0 ? 1 : clamp((this.estimateTick(now) - action.startTick) / length, 0, 1)
     let aimAt: Vector2 | undefined
-    if (action.kind === 'attack') aimAt = snapshot.get(action.targetId)?.getPosition()
-    else if (action.target.mode === 'point') aimAt = action.target.point
-    else if (action.target.mode === 'unit') aimAt = snapshot.get(action.target.unitId)?.getPosition()
-    else if (action.target.mode === 'direction') {
+    let targetId: number | undefined
+    if (action.kind === 'attack') {
+      targetId = action.targetId
+      aimAt = snapshot.get(action.targetId)?.getPosition()
+    } else if (action.target.mode === 'point') aimAt = action.target.point
+    else if (action.target.mode === 'unit') {
+      targetId = action.target.unitId
+      aimAt = snapshot.get(action.target.unitId)?.getPosition()
+    } else if (action.target.mode === 'direction') {
       aimAt = { x: action.origin.x + action.target.dir.x * 100, y: action.origin.y + action.target.dir.y * 100 }
     }
-    return { action: { kind: action.kind, progress, ...(aimAt ? { aimAt: { ...aimAt } } : {}) } }
+    return {
+      action: {
+        kind: action.kind,
+        progress,
+        ...(aimAt ? { aimAt: { ...aimAt } } : {}),
+        ...(action.kind === 'cast' ? { abilityId: action.abilityId } : {}),
+        ...(targetId !== undefined ? { targetId } : {}),
+      },
+    }
   }
 
   private estimateTick(now: number): number {

@@ -1,5 +1,6 @@
 import { DEFAULT_CAST_MODE, type CastMode } from './cast-control.ts'
 import { DEFAULT_EFFECTS, readEffects, type EffectSettings } from './render/effect-settings.ts'
+import { DEFAULT_RENDERER, RENDERER_KINDS, type RendererKind } from './render/renderer-kind.ts'
 
 // What a player chooses for themselves, kept in the browser so it is there next time. Every setting
 // has a default and is checked on the way in, so a missing or odd stored value is just the default.
@@ -17,6 +18,9 @@ export type GameSettings = {
   movementKeys: boolean
   // Whether casting an ability with a windup while attacking an enemy goes back to attacking it once the cast is done, instead of ending the attack (the controls menu).
   castKeepsAttack: boolean
+  // Whether an ability pressed while the champion cannot cast yet (it is winding something up, dashing, stunned) is held and cast the moment it can, instead of being
+  // dropped (the controls menu).
+  bufferAbilities: boolean
   // How big the marker on the enemy being attacked is drawn, in percent of its own size (the graphics menu; see attack-marker.ts).
   attackMarkerSize: number
   // Whether the frame rate and network diagnostics are shown at the top left (the dev menu).
@@ -24,6 +28,10 @@ export type GameSettings = {
   // The most frames a second the page draws (the graphics menu): one of `FRAME_RATE_OPTIONS`, and `UNCAPPED_FPS` for no limit. It is only how often the world is drawn: the game itself
   // runs at `GAME_TPS` ticks a second whatever this is.
   maxFps: number
+  // Whether the world is drawn in 3D (models, a slanted camera) or in 2D (sprites, from straight above) (the graphics menu).
+  renderer: RendererKind
+  // How loud the game's sounds are, in percent: 0 is silent (the sound menu).
+  soundVolume: number
 }
 
 // No limit on the frame rate: the page draws a frame each time the browser asks for one, which is as often as the display refreshes (a browser cannot draw faster than that).
@@ -49,6 +57,11 @@ export const MAX_ATTACK_MARKER_SIZE = 300
 export const ATTACK_MARKER_SIZE_STEP = 25
 export const DEFAULT_ATTACK_MARKER_SIZE = MIN_ATTACK_MARKER_SIZE
 
+// The sound volume is in percent, from silent to full; the menu's slider moves in steps of SOUND_VOLUME_STEP.
+export const MAX_SOUND_VOLUME = 100
+export const SOUND_VOLUME_STEP = 5
+export const DEFAULT_SOUND_VOLUME = 60
+
 export const DEFAULT_SETTINGS: GameSettings = {
   castMode: DEFAULT_CAST_MODE,
   effects: { ...DEFAULT_EFFECTS },
@@ -57,9 +70,12 @@ export const DEFAULT_SETTINGS: GameSettings = {
   walkKeepsCast: true,
   movementKeys: false,
   castKeepsAttack: true,
+  bufferAbilities: true,
   attackMarkerSize: DEFAULT_ATTACK_MARKER_SIZE,
   diagnostics: true,
   maxFps: DEFAULT_MAX_FPS,
+  renderer: DEFAULT_RENDERER,
+  soundVolume: DEFAULT_SOUND_VOLUME,
 }
 
 // What was stored for the click radius, held to the range the menu offers: a number is rounded and kept between none and the most, and
@@ -73,6 +89,12 @@ export function readClickRadius(stored: unknown): number {
 export function readAttackMarkerSize(stored: unknown): number {
   if (typeof stored !== 'number' || !Number.isFinite(stored)) return DEFAULT_ATTACK_MARKER_SIZE
   return Math.min(MAX_ATTACK_MARKER_SIZE, Math.max(MIN_ATTACK_MARKER_SIZE, Math.round(stored)))
+}
+
+// The same for the sound volume: a number is rounded and kept between silent and full, and anything else is the default.
+export function readSoundVolume(stored: unknown): number {
+  if (typeof stored !== 'number' || !Number.isFinite(stored)) return DEFAULT_SOUND_VOLUME
+  return Math.min(MAX_SOUND_VOLUME, Math.max(0, Math.round(stored)))
 }
 
 const STORAGE_KEY = 'moba-settings'
@@ -102,9 +124,12 @@ export function loadSettings(storage: SettingsStorage | undefined = defaultStora
       walkKeepsCast: typeof fields.walkKeepsCast === 'boolean' ? fields.walkKeepsCast : DEFAULT_SETTINGS.walkKeepsCast,
       movementKeys: typeof fields.movementKeys === 'boolean' ? fields.movementKeys : DEFAULT_SETTINGS.movementKeys,
       castKeepsAttack: typeof fields.castKeepsAttack === 'boolean' ? fields.castKeepsAttack : DEFAULT_SETTINGS.castKeepsAttack,
+      bufferAbilities: typeof fields.bufferAbilities === 'boolean' ? fields.bufferAbilities : DEFAULT_SETTINGS.bufferAbilities,
       attackMarkerSize: readAttackMarkerSize(fields.attackMarkerSize),
       diagnostics: typeof fields.diagnostics === 'boolean' ? fields.diagnostics : DEFAULT_SETTINGS.diagnostics,
       maxFps: readMaxFps(fields.maxFps),
+      renderer: RENDERER_KINDS.find((kind) => kind === fields.renderer) ?? DEFAULT_SETTINGS.renderer,
+      soundVolume: readSoundVolume(fields.soundVolume),
     }
   } catch {
     return { ...DEFAULT_SETTINGS, effects: { ...DEFAULT_SETTINGS.effects } }

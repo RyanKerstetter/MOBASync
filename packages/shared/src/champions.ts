@@ -684,7 +684,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     name: 'Chain',
     description: 'A melee skirmisher that hooks enemies in, whirls its chains around it and dashes through fights.',
     passive: `The first auto on an enemy, or first hit on it with the edge of Whirl, deals bonus damage and heals you. Each enemy has its own ${FIRST_STRIKE_COOLDOWN_TICKS / GAME_TPS} second cooldown.`,
-    base: { maxHp: 900, attackDamage: 70, attackSpeed: 1, resistance: 0, haste: 0, arcane: 10 },
+    base: { maxHp: 900, attackDamage: 80, attackSpeed: 1, resistance: 0, haste: 0, arcane: 10 },
     growth: { maxHp: 65, attackDamage: 18, attackSpeed: 0.02, resistance: 5, haste: 8, arcane: 3 },
     moveSpeed: 150,
     radius: 21,

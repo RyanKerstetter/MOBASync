@@ -2,8 +2,6 @@ import geckos from '@geckos.io/client'
 import {
   GAME_ARENA_HEIGHT,
   GAME_ARENA_WIDTH,
-  GAME_VIEW_HEIGHT,
-  GAME_VIEW_WIDTH,
   GAME_ORDER_TIMEOUT_MS,
   GAME_PING_INTERVAL_MS,
   GameBroadcastOrderSchema,
@@ -22,14 +20,16 @@ import {
   type Vector2,
 } from '../../../packages/shared/src/index.ts'
 import { chooseAttackMarkers } from './render/attack-marker.ts'
-import { computeCamera, screenToWorld, type Camera } from './camera.ts'
 import { CastControl, type CastMode } from './cast-control.ts'
 import { loadSpriteSets, type LoadedSpriteSet } from './character-sprite.ts'
 import { championSprites } from './champion-sprites.ts'
 import { createDebugOverlay } from './ui/debug-overlay.ts'
 import { createGameMenu, menuFooter, menuTabs } from './game-menu.ts'
 import { HoldCommand, type HeldCommand } from './hold-command.ts'
-import { loadSettings, readAttackMarkerSize, readClickRadius, readMaxFps, saveSettings } from './game-settings.ts'
+import { loadSettings, MAX_SOUND_VOLUME, readAttackMarkerSize, readClickRadius, readMaxFps, readSoundVolume, saveSettings } from './game-settings.ts'
+import { AttackSoundDirector, placeSound } from './audio/attack-sounds.ts'
+import { SoundEngine } from './audio/sound-engine.ts'
+import { AbilitySoundDirector } from './audio/ability-sound-director.ts'
 import { ClientGameState } from './game-state.ts'
 import { abilityKeyCodes, isMovementKey, keyLabel, MovementKeys } from './movement-keys.ts'
 import { createTeamVision, type TeamVision } from './team-vision.ts'
@@ -41,8 +41,10 @@ import { createItemTooltip } from './ui/item-tooltip.ts'
 import { createModeHudView } from './ui/mode-hud-view.ts'
 import { createResultsView } from './ui/results-view.ts'
 import { createGameMap } from './render/game-map.ts'
+import { FlatRenderer, type GameRenderer } from './render/game-renderer.ts'
+import { rendererFromSearch, type RendererKind } from './render/renderer-kind.ts'
 import { createPixiApp } from './render/pixi-app.ts'
-import { WorldRenderer } from './render/world-renderer.ts'
+import { WorldRenderer3D } from './render3d/world-renderer-3d.ts'
 import { createScoreboardView } from './ui/scoreboard-view.ts'
 import { createShopView } from './ui/shop-view.ts'
 import { decodeSnapshot } from './snapshot-codec.ts'
@@ -69,6 +71,10 @@ type GameOptions = {
   // last chose in the escape menu, which is kept in the browser.
   castMode?: CastMode
 }
+
+// How long an ability pressed too soon is held for (see `castAtCursor`), in milliseconds: long enough to outlast a dash or a windup,
+// and not so long that it goes off long after the player has moved on.
+const BUFFER_MS = 1200
 
 // The key for Back, which every champion has, and which takes it to its spawn after a channel.
 const BACK_KEY = 'KeyB'
@@ -113,12 +119,17 @@ export async function startGame({
   }
   // What the player chose last time, which the renderer starts with: the most frames a second it draws is one of them.
   const settings = loadSettings()
+  // The sounds of the game, at the volume the player chose, and what tells from each frame which attacks to hear (see audio/).
+  const sounds = new SoundEngine()
+  sounds.setVolume(settings.soundVolume / MAX_SOUND_VOLUME)
+  const attackSounds = new AttackSoundDirector()
+  const abilitySounds = new AbilitySoundDirector()
   // The keys that cast each ability slot, which move off W when W, A, S and D steer (see movement-keys.ts).
   let abilityKeys = abilityKeyCodes(settings.movementKeys)
   const movementKeys = new MovementKeys()
   const app = await createPixiApp(container, { maxFPS: settings.maxFps })
   // The sprite sheets, before anything is drawn. If they cannot be loaded, champions are circles.
-  const spriteSets: Map<string, LoadedSpriteSet> = await loadSpriteSets(championSprites).catch((error: unknown) => {
+  let spriteSets: Map<string, LoadedSpriteSet> = await loadSpriteSets(championSprites).catch((error: unknown) => {
     console.warn('Could not load the champion sprites, so champions are drawn as circles.', error)
     return new Map<string, LoadedSpriteSet>()
   })
@@ -164,19 +175,53 @@ export async function startGame({
     width: mapInfo.width > 0 ? mapInfo.width : GAME_ARENA_WIDTH,
     height: mapInfo.height > 0 ? mapInfo.height : GAME_ARENA_HEIGHT,
   }
-  const { map, terrain: pageTerrain } = await createGameMap(mapInfo.id, arenaSize)
-  const world = new WorldRenderer({ map, spriteSets })
-  app.stage.addChild(world.scene)
-  // The camera is locked on the champion being controlled, so the world is moved so that champion
-  // is always the middle of the screen. Until it exists the camera rests on the middle of the map.
-  let cameraCenter = { x: (pageTerrain?.width ?? arenaSize.width) / 2, y: (pageTerrain?.height ?? arenaSize.height) / 2 }
-  let camera: Camera = computeCamera(app.screen, { width: GAME_VIEW_WIDTH, height: GAME_VIEW_HEIGHT }, cameraCenter)
+  const { map, terrain: pageTerrain, paths } = await createGameMap(mapInfo.id, arenaSize)
+  // The world is drawn in 3D or in 2D (see `GameRenderer`), as the player last chose in the graphics menu, or as the address
+  // asks (`?renderer=2d`). It can be changed while the game runs. The 2D world is made once and kept, so going back to it is
+  // instant; the 3D one is built again each time, as it holds the most on the graphics card. A browser that cannot draw in 3D
+  // draws in 2D.
+  const ground = {
+    width: pageTerrain?.width ?? arenaSize.width,
+    height: pageTerrain?.height ?? arenaSize.height,
+    walls: pageTerrain?.walls ?? [],
+    bushes: pageTerrain?.bushes ?? [],
+    paths,
+  }
+  let flat: FlatRenderer | undefined
+  const makeRenderer = (kind: RendererKind): GameRenderer => {
+    if (kind === '3d') {
+      try {
+        const made = new WorldRenderer3D({ container, app, ground })
+        // The page's own canvas is clear where it draws nothing, so the 3D world shows through it.
+        app.renderer.background.alpha = 0
+        return made
+      } catch (error) {
+        console.warn('Could not draw the world in 3D, so it is drawn in 2D.', error)
+      }
+    }
+    app.renderer.background.alpha = 1
+    flat = flat ? flat.attach() : new FlatRenderer(app, { map, spriteSets })
+    return flat
+  }
+  let world: GameRenderer = makeRenderer(rendererFromSearch(window.location.search) ?? settings.renderer)
+  // The camera is locked on the champion being controlled, so that champion is always in the middle
+  // of the screen. Until it exists the camera rests on the middle of the map.
+  let cameraCenter = { x: ground.width / 2, y: ground.height / 2 }
   const updateCamera = (center: { x: number; y: number }): void => {
     cameraCenter = center
-    camera = computeCamera(app.screen, { width: GAME_VIEW_WIDTH, height: GAME_VIEW_HEIGHT }, center)
-    world.setCamera(camera)
+    world.follow(center)
   }
   updateCamera(cameraCenter)
+  // Draws the world the other way, keeping what the player had on.
+  const switchRenderer = (kind: RendererKind): void => {
+    if (kind === world.kind) return
+    const { effects, debug } = world
+    world.destroy()
+    world = makeRenderer(kind)
+    world.effects = effects
+    world.debug = debug
+    world.follow(cameraCenter)
+  }
 
   const gameState = new ClientGameState()
   // What the team sees: the vision system is made on the first frame, when the game's ground has come, and the address
@@ -194,7 +239,7 @@ export async function startGame({
   // The mouse is remembered on screen and turned into a world point when it is used, because the
   // camera moves under a still mouse as the champion walks.
   let pointerOnScreen = { x: app.screen.width / 2, y: app.screen.height / 2 }
-  const pointerInWorld = () => screenToWorld(camera, pointerOnScreen)
+  const pointerInWorld = () => world.screenToWorld(pointerOnScreen)
   const castControl = new CastControl(castMode ?? settings.castMode)
   // What the player turned off in the menu last time stays off.
   world.effects = { ...settings.effects }
@@ -203,7 +248,9 @@ export async function startGame({
   // Dev tool: redraw every champion from `overrides` (sheets picked from a folder, see
   // `spriteOverridesFrom`) over the art the game came with, or from that art alone with none.
   const applySprites = async (overrides?: ReadonlyMap<string, Blob>): Promise<void> => {
-    world.setSpriteSets(await loadSpriteSets(championSprites, overrides))
+    spriteSets = await loadSpriteSets(championSprites, overrides)
+    world.setSpriteSets(spriteSets)
+    if (flat !== world) flat?.setSpriteSets(spriteSets)
   }
   const pickSpriteFolder = (): void => {
     const input = document.createElement('input')
@@ -275,9 +322,21 @@ export async function startGame({
         abilityKeys = abilityKeyCodes(on)
         saveSettings(settings)
       },
+      getBufferAbilities: () => settings.bufferAbilities,
+      setBufferAbilities: (on) => {
+        settings.bufferAbilities = on
+        if (!on) buffered = undefined
+        saveSettings(settings)
+      },
       getCastKeepsAttack: () => settings.castKeepsAttack,
       setCastKeepsAttack: (on) => {
         settings.castKeepsAttack = on
+        saveSettings(settings)
+      },
+      getSoundVolume: () => settings.soundVolume,
+      setSoundVolume: (volume) => {
+        settings.soundVolume = readSoundVolume(volume)
+        sounds.setVolume(settings.soundVolume / MAX_SOUND_VOLUME)
         saveSettings(settings)
       },
       getAttackMarkerSize: () => settings.attackMarkerSize,
@@ -290,6 +349,12 @@ export async function startGame({
         settings.effects[effect] = on
         world.effects = { ...settings.effects }
         saveSettings(settings)
+      },
+      getRenderer: () => world.kind,
+      setRenderer: (kind) => {
+        settings.renderer = kind
+        saveSettings(settings)
+        switchRenderer(kind)
       },
       getMaxFps: () => settings.maxFps,
       setMaxFps: (fps) => {
@@ -402,7 +467,7 @@ export async function startGame({
   // Right click is the command button: on an enemy it attacks them, anywhere else it walks there.
   app.stage.on('pointerdown', (event) => {
     if (menu.isOpen) return
-    const target = screenToWorld(camera, event.global)
+    const target = world.screenToWorld(event.global)
     if (event.button === 0) {
       if (inPlay() && castControl.aiming === undefined) inspectedId = gameState.getCharacterNear(target)?.id
       return
@@ -437,8 +502,31 @@ export async function startGame({
   }
   const onContextMenu = (event: MouseEvent): void => event.preventDefault()
   app.canvas.addEventListener('contextmenu', onContextMenu)
-  const castAtCursor = (slot: number, selfCast = false): void =>
-    sendAttempt(gameState.createCastOrder(slot, pointerInWorld(), performance.now(), selfCast, { keepAttacking: settings.castKeepsAttack }))
+  // An ability pressed while the champion cannot cast yet (winding something up, dashing, stunned) is held, if the controls say so, and
+  // cast the moment it can, at wherever the mouse is then (see `castBuffered`). Pressing another ability replaces it, and it is let go
+  // after `BUFFER_MS` if the champion still cannot cast.
+  let buffered: { slot: number; selfCast: boolean; at: number } | undefined
+  const castAtCursor = (slot: number, selfCast = false): void => {
+    const now = performance.now()
+    buffered = undefined
+    if (settings.bufferAbilities && gameState.castMustWait(slot, now) !== undefined) {
+      buffered = { slot, selfCast, at: now }
+      return
+    }
+    sendAttempt(gameState.createCastOrder(slot, pointerInWorld(), now, selfCast, { keepAttacking: settings.castKeepsAttack }))
+  }
+  // Each frame, the held ability is cast as soon as nothing keeps it waiting.
+  const castBuffered = (now: number): void => {
+    if (!buffered) return
+    if (!inPlay() || menu.isOpen || gameState.isLocalDead() || now - buffered.at > BUFFER_MS) {
+      buffered = undefined
+      return
+    }
+    if (gameState.castMustWait(buffered.slot, now) !== undefined) return
+    const { slot, selfCast } = buffered
+    buffered = undefined
+    sendAttempt(gameState.createCastOrder(slot, pointerInWorld(), now, selfCast, { keepAttacking: settings.castKeepsAttack }))
+  }
   // Alt on its own would open the browser's menu bar when it is let go, so it is kept from doing that while the game is being played.
   const isAlt = (event: KeyboardEvent): boolean => event.code === 'AltLeft' || event.code === 'AltRight'
   const onKeyDown = (event: KeyboardEvent): void => {
@@ -449,8 +537,9 @@ export async function startGame({
         shop.close()
         return
       }
-      if (castControl.aiming !== undefined) {
+      if (castControl.aiming !== undefined || buffered) {
         castControl.cancel()
+        buffered = undefined
         return
       }
       if (inPlay()) menu.toggle()
@@ -495,9 +584,10 @@ export async function startGame({
       if (action.type === 'cast') {
         castAtCursor(abilitySlot)
       } else if (action.type === 'aim') {
-        // An ability that could not be cast anyway says so now instead of showing its indicator.
+        // An ability that could not be cast anyway says so now instead of showing its indicator: unless it is only for now, and
+        // will be held when it is let go.
         const blocker = gameState.getCastBlocker(abilitySlot)
-        if (blocker) {
+        if (blocker && !(settings.bufferAbilities && gameState.castMustWait(abilitySlot) !== undefined)) {
           castControl.cancel()
           onStatus(blocker, true)
         }
@@ -528,6 +618,7 @@ export async function startGame({
   // A key let go while the window is not focused never reports its release.
   const onBlur = (): void => {
     castControl.cancel()
+    buffered = undefined
     holdCommand.release()
     giveSteer(movementKeys.releaseAll(performance.now()))
   }
@@ -721,6 +812,8 @@ export async function startGame({
     const characters = gameState.getCharacters(now)
     const localCharacterId = gameState.getLocalCharacterId()
     const local = characters.find((character) => character.id === localCharacterId)
+    // The camera first, so what is drawn and what the mouse is over are worked out from where it is this frame.
+    updateCamera(local?.position ?? cameraCenter)
     const dead = local?.dead ?? false
     // What the team sees, before anything is picked or drawn: the debug view (P) shows everything.
     const sight = visionOf()
@@ -739,12 +832,34 @@ export async function startGame({
     const picked = inspectedId === undefined ? undefined : characters.find((character) => character.id === inspectedId)
     if (inspectedId !== undefined && (!picked || picked.dead)) inspectedId = undefined
     const inspected = picked && !picked.dead && inPlay() && sight.isVisible(picked) ? picked : undefined
+    const seenCharacters = sight.visibleCharacters(characters)
+    const unseenCharacters = sight.hiddenCharacters(characters)
+    const allEntities = gameState.getEntities(now)
+    const seenEntities = sight.visibleEntities(allEntities)
+    // The attacks that went off or landed this frame, heard from where the champion is (or the camera, while it is dead). Only what the
+    // team sees is heard.
+    if (sounds.audible) {
+      const listener = local && !local.dead ? local.position : cameraCenter
+      const heard = {
+        now,
+        characters: seenCharacters,
+        unseen: unseenCharacters,
+        entities: allEntities,
+        visibleEntityIds: new Set(seenEntities.map((entity) => entity.id)),
+        localCharacterId,
+      }
+      for (const cue of attackSounds.update(heard)) {
+        const placement = placeSound(cue.at, listener, cue.own)
+        sounds.play(cue.sound[cue.part], { ...placement, gain: placement.gain * (cue.sound.level ?? 1) }, cue.delay)
+      }
+      for (const cue of abilitySounds.update(heard)) sounds.play(cue.recipe, placeSound(cue.at, listener, cue.own), cue.delay)
+    }
     world.update({
       now,
       // What is not seen is not drawn, nor are its names and bars: the darkness is over everything else.
-      characters: sight.visibleCharacters(characters),
-      unseen: sight.hiddenCharacters(characters),
-      entities: sight.visibleEntities(gameState.getEntities(now)),
+      characters: seenCharacters,
+      unseen: unseenCharacters,
+      entities: seenEntities,
       ...(sight.mask ? { fog: sight.mask } : {}),
       mode,
       // The shops are tinted as the healing areas they are, which they are not in a game with healing zones.
@@ -766,7 +881,6 @@ export async function startGame({
     const inspection = inspected ? gameState.getInspection(inspected, now) : undefined
     inspect.update(inspection ? inspectView(inspection) : undefined)
     app.canvas.style.cursor = hovered ? 'crosshair' : ''
-    updateCamera(local?.position ?? cameraCenter)
     // The cooldowns refresh every frame so they fill smoothly.
     const progress = gameState.getLocalProgress(now)
     const stats = gameState.getLocalStats(now)
@@ -808,6 +922,7 @@ export async function startGame({
     const now = performance.now()
     debugOverlay.frame(now, () => gameState.getDebugInfo())
     giveHeldCommand(now)
+    castBuffered(now)
     resumeSteering(now)
     drawFrame(now)
   })
@@ -831,6 +946,8 @@ export async function startGame({
     scoreboard.destroy()
     results.destroy()
     menu.destroy()
+    world.destroy()
+    sounds.close()
     reliableMessenger.close()
     channel.close()
     app.destroy(true, { children: true })

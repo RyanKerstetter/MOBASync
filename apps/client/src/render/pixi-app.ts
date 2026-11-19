@@ -6,6 +6,9 @@ export async function createPixiApp(container: HTMLElement, options: { maxFPS?: 
   const app = new Application()
   await app.init({
     background: '#101827',
+    // Made see-through, so the canvas has an alpha channel: the 3D world is drawn under it. The 2D world makes it solid again
+    // (see `makeRenderer` in game.ts). Whether a canvas can be see-through is fixed when it is made.
+    backgroundAlpha: 0,
     resizeTo: container,
     antialias: true,
     autoDensity: true,

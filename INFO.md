@@ -1,11 +1,11 @@
-# 2D MoBA
+# 3D-Moba
 
 A small browser lobby and game built with TypeScript, PixiJS, Geckos, Vite, and
 a lightweight HTTP server.
 
 ## Project structure
 
-- `apps/client` contains the lobby interface and PixiJS game.
+- `apps/client` contains the lobby interface and the game, drawn with three.js (3D) or PixiJS (2D).
 - `apps/server` contains the in-memory lobby API and Geckos game server.
 
 The client's game code is split by what it does:
@@ -29,6 +29,8 @@ The client's game code is split by what it does:
   middle is above a wall's base is behind it and the wall is drawn over it wherever they overlap, and one below is in front of it.
   The layer only decides when they are drawn: they stay in the scene where they were, so transforms, the camera and clean-up
   are as they were. Names and bars are in a layer of their own over it, so one is never hidden by a wall.
+- `render3d/` draws the same world in 3D with three.js (the default; see "The 3D view"). `game.ts` uses whichever the player
+  picked through `GameRenderer` (`render/game-renderer.ts`).
 - `ui/` is what is drawn over the canvas as ordinary page elements: the HUD, the game mode's scores, hill bar
   and flags, the scoreboard and killfeed, and the diagnostics overlay, each a `*-view.ts` over its pure logic.
 
@@ -183,6 +185,67 @@ lobby (`assignSpawns`, `spawns.ts`). So where a team starts depends on how big t
 which colours they picked or who joined first. The server works out the starting places once and sends
 them in the snapshot, so no peer works them out for itself.
 The floor has a grid so movement across it is visible, when there is no map from Tiled to draw instead.
+
+### The 3D view
+
+The world is drawn in **3D** by default, and can be drawn in **2D** as before: **Renderer** at the top of the Graphics tab of the
+escape menu switches between them while the game runs (and is remembered), and `?renderer=2d` in the address asks for 2D. Only how
+the world is drawn changes: the game, the HUD, the menus and what is drawn over each character (its name, bars and numbers) are the
+same in both. `game.ts` talks to either through `GameRenderer` (`render/game-renderer.ts`): it hands it the same `WorldFrame` each
+frame, tells it where the camera follows (`follow`), and asks it what point of the world is under the mouse (`screenToWorld`). The 2D
+renderer is `FlatRenderer`, the `WorldRenderer` it always was. The 3D one is `WorldRenderer3D` (`render3d/`), drawn with three.js on a
+canvas of its own under the Pixi canvas, which is see-through and goes on drawing the names, bars and numbers, each placed over the
+top of its character's model (the `anchor` of `CharacterLayer`, `FloatingNumberLayer` and `KillRewardLayer`; in 2D there is none).
+A browser that cannot draw in 3D is given 2D.
+
+- **The camera** (`moba-camera.ts`) looks down from the south at 56 degrees with a narrow field of view, as other MOBAs do, with
+  the champion a little below the middle of the screen. At the point it looks at, the screen shows as much of the world up and
+  down as the 2D camera does. The mouse is a ray from it: on a body (another character's, not your own) it is that body's middle,
+  so clicking a model anywhere on it picks it; anywhere else it is the ground.
+- **The map** (`terrain-mesh.ts`) is built from the game's own ground (the `Terrain`'s size, walls and bushes) and the tiles of the
+  map's path layers (any visible tile layer named with "path" and not "wall": `map-paths.ts`). It is a grid of heights, flat where
+  champions walk and risen into cliffs where the walls and the land outside the arena are, worked out from how far into a wall each
+  point is, so walls that touch run together and corners are rounded, and the foot of each is worn back a little in a wavy line so
+  no edge is ruler straight. The foot only ever goes back from the wall's rectangle, never out over ground that can be walked on.
+  The ground is painted in its shader from tiling grass, dirt and rock: dirt where the map draws paths, rock on the cliffs, moss on
+  their tops, shade at their feet. Trees stand deep in the walls and outside, boulders on the cliff faces, shrubs on walls too
+  narrow for trees, tufts of grass on the open ground, and leaves fill each bush.
+- **Vision** is the same mask as in 2D, but each material looks it up where it is drawn (`vision-shading.ts`), so the cliffs, the
+  trees and the ground are all darkened and drained of colour where the team cannot see, at whatever height.
+- **Characters** (`character-models.ts`, `models/`) are models posed each frame from what the character is doing: standing,
+  walking (worked out from where it is drawn, as for sprites), winding up an attack or a spell (`action.progress`), the moment it
+  goes off, stunned, knocked up, and dead. Every champion is one figure (`models/humanoid.ts`) dressed and armed by its look
+  (`models/looks.ts`, one for each champion): its build, armour, headgear, weapon, what it wears on its back, its colours, and how it
+  attacks and casts (a sword's swing, a two-handed slam, quick stabs, punches, a staff's thrust, a spell flung with both hands, a
+  bow drawn and loosed, a gun fired, something thrown). Teams are told apart by the name plates, not by the models: a character
+  of a team other than yours has a thin red outline (`Model.setOutline`), and only your own champion has a ring at its feet.
+  A new champion with no look
+  is dressed by whether it shoots (`fallbackLook`); `tests/champion-looks.test.ts` asks for one for every champion. Slimes hop
+  and lunge and melt when they die; golems lumber, slam both fists down and fall apart; wolves trot, spring and bite. Turrets are
+  towers with a crystal of their team's colour that flares as it shoots, cores are a great crystal over a pedestal, and healing
+  zones are fountains with a cross of green light; each has a barrier while it is protected and collapses when it is destroyed.
+- **Abilities and shots** are drawn by what each entity is (`effects/`): every entity of every champion's kit has an effect of its
+  own, listed by its id in `ENTITY_VISUALS` (`effects/entity-effects.ts`; the Fire Mage's and Capricorn's are in `elemental.ts`, the
+  rest in `kits.ts`), and each champion's auto attack is a shot of its own (an arrow, a tracer, a curse, a fireball, a tower's
+  bolt). An entity with no effect of its own is drawn from how it looks, as in 2D. An effect can play on after its entity is gone
+  (an explosion's smoke, a scorch mark). `tests/champion-looks.test.ts` checks every id in the list is an entity the game has, so
+  renaming one does not quietly lose its effect.
+- **What is not an entity** (`character-fx.ts`): an ability that is only a buff, a dash or a blow is drawn from the character (Leap's
+  gust, Stim's rush, Rage's roar, Ghost's smoke and the fear when it ends, Transfusion's swirl of blood), and what an ability aimed at
+  someone does lands on them as it goes off (Feast, Rend, Spore, Rejuvenate). The game state gives the page what it needs for that
+  (`RenderedCharacter`): which ability is winding up and at whom (`action.abilityId`, `action.targetId`), whether it is dashing, the
+  kinds of status on it, and the abilities it has cast lately (`casts`), seen from their cooldowns starting, since one with no windup
+  is never seen winding up. It is how the page draws, not a rule of the game. Melee swings leave an arc, dashes a trail of the
+  champion's own, a shield is a bubble, the Monk's link a tether of light, and roots, slows, blindness and fear each have a look.
+  A next blow that is empowered (Capricorn's passive, Flurry, the sword and shadow stacks, an ability that readies the next auto such
+  as Shackle or Hush) is shown by what the champion strikes with glowing, brighter the more stacks there are, and not as pips
+  (`EMPOWERING` in `character-fx.ts`); the 2D view still shows the pips. Stacks that build toward something are drawn on the ground
+  under the character instead (`GROUND_MARKS`): the Cursebearer's curse is a dark, shifting pool that grows with each stack, the
+  Trinketmaster's tricks a ring of segments filling in, the Grenadier's sights a crosshair closing in and turning red when ready,
+  embers a ring of flames, Sage's mark a ring of leaves, and fear a violet sigil with a marker over the head (so the Cloak can see
+  whom it may dash through).
+- What the 2D layers paint on the ground (the reach of the aimed ability, attack markers, zones, shops, the hill, turret ranges,
+  links) is painted on the 3D ground from the same layouts (`ground-overlays.ts`).
 
 ### Maps from Tiled
 
@@ -349,6 +412,41 @@ TypeScript), `tiled-loader.ts` loads a map and its pictures, and `TiledMapView` 
 `MapView`. Each tile layer is drawn once onto a canvas just big enough for its tiles and shown as
 one picture, so there are no hairline gaps between tiles at any zoom.
 
+### Sound
+
+Every auto attack has a sound as it goes off and another as it lands, and every ability has one as it goes off
+(`apps/client/src/audio/`). There are no sound files: each
+sound is made as it plays with the browser's Web Audio, from noise and tones shaped by filters and envelopes (`sound-engine.ts`:
+`noise`, `tone`, `crackle`, `swish`), so a sound is a short recipe in code. Materials are built the way they really sound, not
+from pure tones, which ring like a pipe (`timbres.ts`): struck metal is a click and narrow bands of noise at inharmonic pitches,
+struck wood a hard crack and the short hollow knock of its body, water a slap, a splash and spray with no bloops, and a curse a
+breath of whispering noise over a low thrum. A champion's attacks sound like what it fights with
+(`WEAPON_SOUNDS` in `attack-sounds.ts`, keyed by `Look.weapon`: a sword's swing and ring, a hammer's heave and crushing blow, a
+bow's twang and the arrow's thunk, a gunshot, a fireball's roar and burst, a splash of water, a hex), so a new champion is heard
+without anything more; the monsters (`MONSTER_SOUNDS`: a slime's splat, a golem's slam, a wolf's snarl and bite) and the turrets
+(`TURRET_SOUND`) have their own. A sound's `level` evens out how loud it is against the rest.
+
+What is heard is worked out from what is drawn, frame by frame (`AttackSoundDirector`): an attack that shoots is heard as its shot
+appears and as it is gone (a shot follows its target until it strikes), and one that does not as its windup ends past
+`LAUNCHED_PROGRESS` (sooner, it was cancelled), its swing and then its blow on the target. Only what the player's team sees is
+heard, so a sound never gives away anything in the dark. A sound is loudest near the champion (or the camera, while it is dead),
+fades out by `HEARING_RANGE`, and comes from the side it is on (`placeSound`); the player's own attacks are a little louder than
+anyone else's. At most a couple of dozen play at once, and a limiter keeps a pile of them from clipping. The volume is the
+**Sound** tab of the escape menu (0 is silent). `tests/attack-sounds.test.ts` checks that every champion, monster and turret has a
+sound and that every recipe builds as a browser would take it.
+
+Abilities (`ability-sounds.ts`) have a sound each by ability id (`ABILITY_SOUNDS`: Slam's crash, Rage's roar, Hush's "shh", a
+heal's rising chime, a dash's rush, a lobbed grenade's pin and throw), and some of what they leave have sounds of their own by
+entity id (`ENTITY_SOUNDS`): as it appears, for one that comes later than its ability (a grenade bursting where it lands, a geyser
+or a tornado erupting after its warning, Hammer Drop's landing, a grove growing), and as it strikes someone (a hex, a shuriken, a
+bolt through each enemy, a hook catching). One that comes at the moment its ability goes off (Radiance's burst, Slam's crater) has
+none, since the ability's sound is it. Going back has a hum as it begins and a rush as the champion is taken home (`BACK_SOUNDS`).
+`AbilitySoundDirector` hears an ability with a windup as the windup ends far enough through, one with none (a dash, a buff) from its
+cooldown starting (`RenderedCharacter.casts`), and an entity striking from its list of who it hit growing, or from its being gone
+before its time; only what the team sees is heard. `tests/ability-sounds.test.ts` checks every ability any champion or monster can
+cast has a sound, that every id in the tables is one the game has (so renaming one cannot quietly lose its sound), and when each is
+heard.
+
 ## Walls and walking
 
 Walls hold champions out while they walk, and that is all they do: attacks, abilities, shots, dashes,
@@ -505,9 +603,21 @@ speed-up in the fire Slash leaves. Teammates are still solid, and push each othe
 
 The client draws each body in its team's colour (`getTeam`), with a thick white outline on the
 champion you control, since a green fill no longer tells you which it is. Right-clicking a teammate (which just walks there), the
-Space key, and an ability aimed at a unit never pick a teammate, and the lobby shows
-each player's team by colour and name. Champion select lists who is picking what grouped by team, a heading in
-the team's colour over each group.
+Space key, and an ability aimed at a unit never pick a teammate, and the lobby lists the players under a
+banner for each team, in its colour and with its name. Champion select puts your team down the left and every other team
+down the right, a slot for each player with the portrait of what they have picked, and between them the champions (with a
+melee/ranged filter and a search), and under those the one you picked standing on a pedestal in 3D, turning slowly (drag
+it to turn it), with its stats as bars against every champion's and its abilities. The portraits and the pedestal use the
+game's own 3D models (`render3d/champion-stage.ts`, dressed by `championLook`), so a champion looks the same there as in
+a game; a browser without WebGL shows each champion's initial instead.
+
+The screens before a game (the entry page, the lobby and champion select) have a look of their own, set at the top of
+`style.css` (the `--menu-*` properties), like an old book or a tavern board: dark leather panels in a double rule
+with a bronze stud in each corner, on a faintly grained umber ground; headings in a book serif (Palatino) in small
+caps; aged bronze for what is picked; sealing-wax red for the one main button on each screen; moss green for being
+ready; and team banners cut as pennants. Text with numbers in it (the title, the count of who is locked in) is not in
+small caps, since the serif's small caps make figures small. It has no glows or drop shadows, and is scoped to those
+three screens, so the game's own controls keep their plain look.
 
 ## Game modes
 
@@ -1299,8 +1409,9 @@ the longest reach of any ability is about 650. Past the map's edge you see the d
 
 The bottom of the screen is the HUD (`ui/hud.ts` works out what it shows and `ui/hud-view.ts` fills in the
 elements): three separate panels in a row, each standing on the bottom edge with nothing under it. (In a mode with no economy, which is every one but Core
-Destruction, the two side panels are left out and the middle one, the abilities and the health, stands alone: `HudInput.economy`.) The whole UI is flat: square
-corners (the level's circle is the one exception), solid colours, and no shadows, glows or gradients. The dark screens share one set of
+Destruction, the two side panels are left out and the middle one, the abilities and the health, stands alone: `HudInput.economy`.) The game's UI is flat: square
+corners (the level's circle is the one exception), solid colours, and no shadows, glows or gradients. (The screens before a game
+have a look and colours of their own, the `--menu-*` ones: see "Teams".) The game's dark screens share one set of
 colours (the `--ui-*` custom properties at the top of `style.css`), text on a picture is plain text with a hard one-pixel edge and
 nothing behind it, and the browser's own buttons, inputs and focus rings are square too.
 
@@ -1361,7 +1472,11 @@ tabs beside the page, and they go back to a row along the top.
 - **Controls** has, under **Casting**, the **cast mode** (quick cast, or quick cast with an indicator) and **Keep attacking after casting** (on to begin with): with it
   on, an ability with a windup cast while attacking an enemy leaves the attack lock in place, so the champion goes back to attacking it the tick the cast goes off,
   instead of standing there. It is carried on each cast order as `keepAttacking`, so the simulator does the same on every peer. Back ends the attack whatever it says,
-  and so does an ability aimed at an enemy out of its reach, which replaces the attack lock with a walk up to cast; a cast with no windup never ended it. Under
+  and so does an ability aimed at an enemy out of its reach, which replaces the attack lock with a walk up to cast; a cast with no windup never ended it.
+  **Buffer abilities** (on to begin with): an ability pressed while the champion cannot act only for the moment (winding up an attack or another ability, dashing,
+  stunned, knocked up, feared or silenced) is held by the page and cast, aimed at the mouse, the frame it can be (`ClientGameState.castMustWait`, and the held cast
+  in `game.ts`). A held cast is dropped after a little over a second, or on Escape. A cooldown or a missing target is not held: it is refused as before. With it
+  off, such a press is refused at once. It changes only when the page sends the order, not what the game does with it. Under
   **Moving**, **WASD movement** (off to begin with: see "WASD movement",
   above) and two switches for what a walk does to a windup under way, **Moving doesn't cancel attacks** (off to begin with) and **Moving doesn't cancel abilities**
   (on to begin with), which are carried on each move and steer order as `keepAuto` and `keepCast`, so the simulator does the same on every peer (a windup that is kept
@@ -1371,6 +1486,7 @@ tabs beside the page, and they go back to a row along the top.
   an ability aimed at a unit, and so to the indicator on the enemy. It is added to the small slack every click has (`PICK_SLACK`), so the enemy nearest
   the click, by its middle, is still the one picked; it does not widen the click that looks at someone, or Space, which has no limit. It is a setting
   of the page kept with the rest (`clickRadius`, whole pixels, read back held between 0 and the most), and no rule of the game reads it.
+- **Sound** has the **volume** of the game's sounds, in percent (60 to begin with, 0 is silent: see "Sound"). It is only there when the page can make sound.
 - **Dev** has the **debug view** (the same as P, see below) and the **diagnostics** (the frame rate and network text at the top left), and, in a
   development build only, the tools to draw the champions from a folder of art picked from disk or to go back to the art the game came with.
 
@@ -1395,7 +1511,7 @@ What a player chooses is kept in the browser by `game-settings.ts` (`loadSetting
 defaulted if missing or odd, each effect on its own, so settings stored before an effect was added keep what they had and have the new one off). A
 browser that has stored its settings before keeps what it stored, so a player who had the effects on sees them on until they turn them off: the defaults are for
 a browser that has stored nothing (or whose stored settings are cleared). A setting is
-a field of `GameSettings`: the cast mode, the `effects`, the `clickRadius`, the windup switches and `movementKeys`, `castKeepsAttack`, the `attackMarkerSize`, whether
+a field of `GameSettings`: the cast mode, the `effects`, the `clickRadius`, the windup switches and `movementKeys`, `castKeepsAttack`, `bufferAbilities`, the `renderer`, the `soundVolume`, the `attackMarkerSize`, whether
 the `diagnostics` are shown and the `maxFps`. The debug view is not kept, as P never was.
 The renderer is told by `WorldRenderer.effects`, which `game.ts` sets from the settings when the game begins and again each time a switch is turned.
 
@@ -1586,7 +1702,9 @@ is held and casts where the cursor is when the key is let go; Escape, the window
 giving a move or attack command (right-click, on the ground or on an enemy, or Space with an enemy anywhere)
 drops the aim without casting. Quick cast casts the moment the key goes down. In both, an ability
 with nothing to aim (targeting `none`) casts on the press. Pressing another ability key while
-aiming moves the aim to it. A skillshot's indicator is just its band. An ability aimed at a point
+aiming moves the aim to it. A skillshot's indicator is just its band, as long as the ability's range. For a skillshot the range is only
+what is drawn (the shot goes by its own speed and lifetime), so one that fires a shot takes it from the shot (`flightOf` in
+`abilities.ts`), and `tests/direction-range.test.ts` checks each band ends where what it fires ends up. An ability aimed at a point
 or a unit also gets a ring at its range around the champion. The indicator is where it would go: a band along the quantized direction, a circle at the point held to range, or a ring
 on the enemy under the cursor, which turns amber when that enemy is beyond the ability's range (the champion walks up to it, then casts: see "An ability
 aimed at an enemy out of its reach"). The

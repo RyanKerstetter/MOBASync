@@ -3,35 +3,38 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>2D-MOBA</title>
+    <title>3D-Moba</title>
   </head>
   <body>
     <main>
-      <h1>2D-MOBA</h1>
+      <h1 class="brand">3D-Moba</h1>
 
       <section id="entry-panel" aria-label="Create or join a lobby">
-        <p>
-          <label for="username">Username</label>
-          <input id="username" type="text" maxlength="24" value="Player" autocomplete="nickname" />
-        </p>
-        <p><button id="create-button" type="button">Create lobby</button></p>
-        <form id="join-form">
-          <label for="lobby-code">Lobby code</label>
-          <input id="lobby-code" type="text" maxlength="6" autocomplete="off" />
-          <button type="submit">Join</button>
-        </form>
-        <p id="message" role="status" aria-live="polite"></p>
+        <div class="entry-card">
+          <div class="field">
+            <label for="username">Name</label>
+            <input id="username" type="text" maxlength="24" value="Player" autocomplete="nickname" />
+          </div>
+          <button id="create-button" class="primary-button" type="button">Create lobby</button>
+          <p class="entry-divider"><span>or join one</span></p>
+          <form id="join-form" class="join-row">
+            <label for="lobby-code" class="visually-hidden">Lobby code</label>
+            <input id="lobby-code" type="text" maxlength="6" autocomplete="off" placeholder="Lobby code" spellcheck="false" />
+            <button type="submit">Join</button>
+          </form>
+          <p id="message" role="status" aria-live="polite"></p>
+        </div>
       </section>
 
       <section id="lobby-panel" aria-label="Lobby" hidden>
         <header class="lobby-header">
-          <p class="lobby-code">Lobby code <strong id="active-code"></strong> <button id="copy-button" type="button">Copy</button> <span id="copy-status" class="copy-status" role="status" aria-live="polite"></span></p>
+          <p class="lobby-code"><span class="lobby-code-label">Lobby code</span> <strong id="active-code"></strong> <button id="copy-button" type="button">Copy</button> <span id="copy-status" class="copy-status" role="status" aria-live="polite"></span></p>
           <button id="leave-button" type="button">Leave lobby</button>
         </header>
 
         <div class="lobby-grid">
           <section class="lobby-card" aria-label="Players">
-            <h2>Players (<span id="player-count">0</span>)</h2>
+            <h2>Players <span id="player-count" class="heading-count">0</span></h2>
             <ul id="player-list"></ul>
             <p id="game-activity" class="game-activity" role="status" aria-live="polite" hidden></p>
 
@@ -99,24 +102,35 @@
           </div>
           <div class="lobby-actions">
             <button id="end-button" type="button" hidden>End game</button>
-            <button id="start-button" type="button">Start game</button>
+            <button id="start-button" class="primary-button" type="button">Start game</button>
           </div>
         </footer>
       </section>
 
       <section id="select-panel" aria-label="Champion select" hidden>
-        <div class="select-layout">
-          <h2>Choose your champion</h2>
-          <div class="select-body">
-            <ul id="champion-grid" class="champion-grid"></ul>
-            <aside id="champion-details" class="champion-details" aria-live="polite"></aside>
+        <div class="select-screen">
+          <header class="select-top">
+            <h2>Choose your champion</h2>
+            <p id="select-progress" class="select-progress"></p>
+          </header>
+          <aside id="select-own-team" class="select-side" aria-label="Your team"></aside>
+          <div class="select-center">
+            <div class="select-tools">
+              <div id="select-roles" class="role-tabs" role="group" aria-label="Show"></div>
+              <label for="select-search" class="visually-hidden">Search champions</label>
+              <input id="select-search" type="search" placeholder="Search" autocomplete="off" spellcheck="false" />
+            </div>
+            <ul id="champion-grid" class="champion-grid" aria-label="Champions"></ul>
+            <section id="champion-details" class="champion-details" aria-label="Champion"></section>
           </div>
-          <ul id="select-players" class="select-players" aria-label="Players"></ul>
-          <p id="select-message" role="status" aria-live="polite"></p>
-          <div class="select-actions">
+          <aside id="select-other-teams" class="select-side" aria-label="Other teams"></aside>
+          <footer class="select-bottom">
             <button id="select-back-button" type="button">Back to lobby</button>
-            <button id="lock-button" type="button">Lock in</button>
-          </div>
+            <div class="select-lock">
+              <button id="lock-button" class="primary-button" type="button">Lock in</button>
+              <p id="select-message" role="status" aria-live="polite"></p>
+            </div>
+          </footer>
         </div>
       </section>
 

@@ -1,6 +1,17 @@
 import type { CastMode } from './cast-control.ts'
-import { ATTACK_MARKER_SIZE_STEP, CLICK_RADIUS_STEP, FRAME_RATE_OPTIONS, MAX_ATTACK_MARKER_SIZE, MAX_CLICK_RADIUS, MIN_ATTACK_MARKER_SIZE, UNCAPPED_FPS } from './game-settings.ts'
+import {
+  ATTACK_MARKER_SIZE_STEP,
+  CLICK_RADIUS_STEP,
+  FRAME_RATE_OPTIONS,
+  MAX_ATTACK_MARKER_SIZE,
+  MAX_CLICK_RADIUS,
+  MAX_SOUND_VOLUME,
+  MIN_ATTACK_MARKER_SIZE,
+  SOUND_VOLUME_STEP,
+  UNCAPPED_FPS,
+} from './game-settings.ts'
 import { EFFECT_KEYS, type EffectKey } from './render/effect-settings.ts'
+import { RENDERER_KINDS, type RendererKind } from './render/renderer-kind.ts'
 import { element } from './ui/dom.ts'
 
 // One row of the escape menu, as data. The menu is built from lists of these, so adding to it is
@@ -43,6 +54,9 @@ export const CAST_MODE_LABELS: Readonly<Record<CastMode, string>> = {
   quick: 'Quick cast',
 }
 
+// What each way of drawing the world is called in the graphics menu.
+export const RENDERER_LABELS: Readonly<Record<RendererKind, string>> = { '3d': '3D', '2d': '2D' }
+
 // What a frame rate on the graphics menu says: the number, or that there is no limit.
 export const frameRateLabel = (fps: number): string => (fps === UNCAPPED_FPS ? 'Uncapped' : `${fps} fps`)
 
@@ -57,7 +71,8 @@ export const EFFECT_LABELS: Readonly<Record<EffectKey, { label: string; descript
 // it, so it knows nothing of the game and can be tested on its own.
 //   Graphics  what is drawn: the most frames a second, the effects, each of which can be turned off on its own, and how big the attack marker is.
 //   Controls  how the game is played: the cast mode and what a cast does to an attack, how walking is given, and how easy enemies are to click on.
-//   Dev       tools for whoever is working on the game: the debug view and the diagnostics, and the sprite tools (given only in a development build).
+//   Sound     how loud the game is (given only when the page can make sound).
+//   Dev      tools for whoever is working on the game: the debug view and the diagnostics, and the sprite tools (given only in a development build).
 export function menuTabs(actions: {
   getCastMode: () => CastMode
   setCastMode: (mode: CastMode) => void
@@ -75,6 +90,9 @@ export function menuTabs(actions: {
   // Whether casting an ability with a windup while attacking goes back to attacking after it.
   getCastKeepsAttack: () => boolean
   setCastKeepsAttack: (on: boolean) => void
+  // Whether an ability pressed while the champion cannot cast yet is held and cast the moment it can. Left out when it cannot be changed.
+  getBufferAbilities?: () => boolean
+  setBufferAbilities?: (on: boolean) => void
   // How big the marker on the enemy being attacked is, in percent of its own size.
   getAttackMarkerSize: () => number
   setAttackMarkerSize: (size: number) => void
@@ -83,6 +101,12 @@ export function menuTabs(actions: {
   // The most frames a second the page draws, one of `FRAME_RATE_OPTIONS` (`UNCAPPED_FPS` for no limit).
   getMaxFps: () => number
   setMaxFps: (fps: number) => void
+  // Whether the world is drawn in 3D or 2D. Left out when it cannot be changed.
+  getRenderer?: () => RendererKind
+  setRenderer?: (kind: RendererKind) => void
+  // How loud the game's sounds are, in percent. Left out when the page cannot make sound.
+  getSoundVolume?: () => number
+  setSoundVolume?: (volume: number) => void
   // The debug view (hitboxes, and everything seen), which the P key turns on and off as well.
   getDebugView: () => boolean
   setDebugView: (on: boolean) => void
@@ -92,11 +116,62 @@ export function menuTabs(actions: {
   // Left out when not given: draw the champions from a folder of art picked from disk, or go back to the art the game came with.
   sprites?: { pickFolder: () => void; reset: () => void }
 }): MenuTab[] {
+  // Holding on to an ability pressed too soon, when the page can change it.
+  const getBuffer = actions.getBufferAbilities
+  const setBuffer = actions.setBufferAbilities
+  const buffering: MenuItem[] = getBuffer && setBuffer
+    ? [{
+      kind: 'toggle',
+      label: 'Buffer abilities',
+      description: 'An ability pressed mid-dash, mid-cast or while stunned goes off as soon as it can.',
+      get: getBuffer,
+      set: setBuffer,
+    }]
+    : []
+  // How the world is drawn, when the page can change it.
+  const getRenderer = actions.getRenderer
+  const setRenderer = actions.setRenderer
+  const view: MenuSection[] = getRenderer && setRenderer
+    ? [{
+      title: 'View',
+      items: [{
+        kind: 'choice',
+        label: 'Renderer',
+        description: '3D uses models and a tilted camera. 2D is the flat, top-down view.',
+        options: RENDERER_KINDS.map((kind) => ({ value: kind, label: RENDERER_LABELS[kind] })),
+        get: getRenderer,
+        set: (value) => setRenderer(value as RendererKind),
+      }],
+    }]
+    : []
+  // How loud the game is, when the page can make sound.
+  const getVolume = actions.getSoundVolume
+  const setVolume = actions.setSoundVolume
+  const sound: MenuTab[] = getVolume && setVolume
+    ? [{
+      id: 'sound',
+      label: 'Sound',
+      sections: [{
+        title: 'Volume',
+        items: [{
+          kind: 'slider',
+          label: 'Volume',
+          description: 'How loud attacks and abilities are. 0 is silent.',
+          min: 0,
+          max: MAX_SOUND_VOLUME,
+          step: SOUND_VOLUME_STEP,
+          unit: '%',
+          get: getVolume,
+          set: setVolume,
+        }],
+      }],
+    }]
+    : []
   return [
     {
       id: 'graphics',
       label: 'Graphics',
-      sections: [{
+      sections: [...view, {
         title: 'Frame rate',
         items: [{
           kind: 'choice',
@@ -148,7 +223,7 @@ export function menuTabs(actions: {
           description: 'An ability cast while attacking an enemy goes back to attacking it after.',
           get: actions.getCastKeepsAttack,
           set: actions.setCastKeepsAttack,
-        }],
+        }, ...buffering],
       }, {
         title: 'Moving',
         items: [
@@ -189,6 +264,7 @@ export function menuTabs(actions: {
         }],
       }],
     },
+    ...sound,
     {
       id: 'dev',
       label: 'Dev',

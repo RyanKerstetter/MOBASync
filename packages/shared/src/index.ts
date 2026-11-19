@@ -651,6 +651,8 @@ export type {
   SimReader,
   SimWriter,
 } from './effects.js'
+// What the ids of an auto attack, and of the shot it fires, start with (the page tells an attack's shot from an ability's by it).
+export { ATTACK_SOURCE_PREFIX } from './effects.js'
 export {
   abilityDefs,
   BACK_ABILITY_ID,
@@ -663,6 +665,17 @@ export {
   meetsRequirement,
   quantizeDirection,
   withinCastRange,
+  // The marks champions put on what they hit, and how many make a full set, for the page to show them.
+  BURN_MAX_STACKS,
+  BURN_STACK_KEY,
+  CURSE_KEY,
+  CURSE_MAX_STACKS,
+  FEAR_KEY,
+  SAGE_KEY,
+  SIGHTED_AUTOS,
+  SIGHTED_KEY,
+  TRICK_HITS,
+  TRICK_KEY,
 } from './abilities.js'
 export type { AbilityDef, AbilityIndicator } from './abilities.js'
 export { abilityNumbers, amountValue, healPreview } from './ability-info.js'

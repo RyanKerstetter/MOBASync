@@ -264,6 +264,10 @@ ability({
   ],
 })
 
+// How far a shot flies before it runs out: the range of an ability aimed in a direction that fires it, so its indicator shows
+// where the shot goes. For a direction the range is only what is drawn; the shot itself goes by its speed and lifetime.
+const flightOf = (shot: { speed: number; lifetimeTicks: number }): number => Math.round(shot.speed * shot.lifetimeTicks / GAME_TPS)
+
 // Cursebearer's Hex: a line shot that slows and adds two stacks, or pops a full stack.
 const hexShot = {
   id: 'hex',
@@ -290,7 +294,7 @@ ability({
   id: 'hex',
   description: 'A shot that slows and adds curse stacks. At full stacks it pops them for bonus damage and haste.',
   targeting: 'direction',
-  range: 520,
+  range: flightOf(hexShot),
   windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(5),
   indicator: { width: hexShot.radius * 2 },
@@ -378,7 +382,7 @@ ability({
   id: 'tsunami',
   description: 'A wave that damages, knocks back and stuns enemies.',
   targeting: 'direction',
-  range: 320,
+  range: flightOf(tsunamiWave),
   windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(14),
   indicator: { width: tsunamiWave.box.halfWidth * 2 },
@@ -481,7 +485,7 @@ ability({
   id: 'bolt',
   description: 'A piercing bolt that slows. It hits harder the less health the enemy has.',
   targeting: 'direction',
-  range: 300,
+  range: flightOf(soldierBolt),
   windUpTicks: WINDUP_TICKS.default,
   cooldownTicks: seconds(7),
   indicator: { width: soldierBolt.radius * 2 },
@@ -1118,8 +1122,8 @@ ability({
 // and each auto he lands makes them last `RAGE_AUTO_TICKS` longer (`prolong`, in champions.ts), up to `RAGE_MAX_TICKS` left. The page draws what is left of it as
 // a bar over him, full at `RAGE_MAX_TICKS` (the champion's `meter`). The lifesteal is the share of the damage he deals (autos and abilities) that comes back to him as health.
 export const RAGE_KEY = 'rage'
-export const RAGE_TICKS = seconds(5)
-export const RAGE_AUTO_TICKS = seconds(0.6)
+export const RAGE_TICKS = seconds(4)
+export const RAGE_AUTO_TICKS = seconds(0.2)
 export const RAGE_MAX_TICKS = seconds(6)
 export const RAGE_HASTE = 0.3
 export const RAGE_ATTACK_SPEED = 0.5
@@ -1886,7 +1890,7 @@ export const LOW_HEALTH_BONUS = 0.4
 // Aurel's Rend: a strike at an enemy close by (`REND_RANGE`), which hurts it, makes it bleed, heals him a set amount and gives him move speed for a moment. It does not reset his
 // auto: the next one comes when it would have anyway. Against an enemy that was bleeding already it heals him a share of the health he is missing as well, and the
 // speed is more (`REND_BLEEDING_HASTE` for `REND_HASTE`). Aimed at one farther off, he walks up to it and strikes once it is in reach, as for any ability aimed at an enemy.
-export const REND_RANGE = 160
+export const REND_RANGE = 100
 export const REND_DAMAGE = 50
 export const REND_SCALING = { attackDamage: 0.8 } satisfies Scaling
 export const REND_HEAL = 40

@@ -1,5 +1,5 @@
 import './style.css'
-import { createChampionSelect } from './champion-select.ts'
+import { createChampionSelect, groupPlayersByTeam } from './champion-select.ts'
 import { startGame } from './game.ts'
 import { lobbyCodeFromSearch, searchWithLobby, searchWithoutLobby } from './lobby-link.ts'
 import { abilityIconUrl } from './ui/ability-icon-urls.ts'
@@ -214,24 +214,35 @@ function renderLobby(lobby: Lobby): void {
       : lobby.game.status === 'finished'
         ? 'Game finished'
         : 'Start game'
-  for (const player of lobby.players) {
-    const leads = player.id === lobby.leaderId
-    const team = getTeam(player.team)
-    const indicator = element('span', leads ? 'player-icon leader-icon' : 'player-icon', leads ? '♛' : '♟')
-    indicator.setAttribute('aria-label', leads ? 'Leader' : 'Player')
-    const swatch = element('span', 'team-swatch')
-    swatch.style.background = team.color
-    swatch.setAttribute('aria-hidden', 'true')
-    // The name of the team as well as its colour, so it does not rest on telling colours apart.
-    const item = element('li', 'player-row', indicator, swatch, element('span', '', player.name), element('span', 'team-name', team.name))
-    // Who is still in the game, for a lobby whose players have gone back to it while it goes on.
-    if (lobby.game.playingPlayerIds.includes(player.id) && (lobby.game.status === 'running' || lobby.game.status === 'finished')) {
-      item.append(element('span', 'player-status', lobby.game.status === 'finished' ? 'Results' : 'In game'))
+  // The players under a banner for each team, in its colour and with its name, so it does not rest on telling colours apart.
+  for (const group of groupPlayersByTeam(lobby.players)) {
+    const team = getTeam(group.team ?? 0)
+    const head = element('li', 'team-head', element('span', '', `${team.name} team`), element('span', 'team-head-count', String(group.players.length)))
+    head.style.setProperty('--team', team.color)
+    playerList.append(head)
+    for (const player of group.players) {
+      const leads = player.id === lobby.leaderId
+      const badge = element('span', 'player-badge', player.name.slice(0, 1).toUpperCase())
+      badge.setAttribute('aria-hidden', 'true')
+      const name = element('span', 'player-name', player.name)
+      if (leads) {
+        const crown = element('span', 'leader-icon', '♛')
+        crown.title = 'Leader'
+        crown.setAttribute('aria-label', 'Leader')
+        name.append(crown)
+      }
+      if (player.id === sessionId) name.append(element('span', 'player-you', 'You'))
+      const item = element('li', 'player-row', badge, name)
+      item.style.setProperty('--team', team.color)
+      // Who is still in the game, for a lobby whose players have gone back to it while it goes on.
+      if (lobby.game.playingPlayerIds.includes(player.id) && (lobby.game.status === 'running' || lobby.game.status === 'finished')) {
+        item.append(element('span', 'player-status', lobby.game.status === 'finished' ? 'Results' : 'In game'))
+      }
+      if (!leads && isLeader) {
+        item.append(element('span', 'player-actions', playerButton('Promote', 'leader', player), playerButton('Kick', 'players/kick', player)))
+      }
+      playerList.append(item)
     }
-    if (!leads && isLeader) {
-      item.append(element('span', 'player-actions', playerButton('Promote', 'leader', player), playerButton('Kick', 'players/kick', player)))
-    }
-    playerList.append(item)
   }
   playerCount.textContent = `${lobby.players.length}/${lobby.maxPlayers}`
   renderTeamPicker(lobby)

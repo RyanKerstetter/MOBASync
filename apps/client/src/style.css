@@ -1,17 +1,8 @@
-body {
-  max-width: 52rem;
-  margin: 2rem auto;
-  padding: 0 1rem;
-  font-family: Arial, sans-serif;
-  color: #202820;
-}
-
-input {
-  max-width: 12rem;
-}
-
-/* The look is flat: square corners, solid colours, and no shadows, glows or gradients. The dark screens (champion select, the
-   game and its menus) share this palette, so a colour is changed in one place. */
+/* The screens before a game (the entry page, the lobby and champion select) have a look of their own, like an old book or a tavern
+   board: dark leather panels in a double rule with a bronze stud at each corner, on a faintly grained umber ground; headings in a
+   book serif in small caps; aged bronze for what is picked; the one button that matters on each screen in sealing-wax red; and moss
+   green for being ready. Team banners are pennants. Their colours are the --menu-* properties below; the game and its menus keep
+   the --ui-* ones. */
 :root {
   --ui-bg: #121c2c;
   --ui-bg-raised: #1c2a40;
@@ -25,9 +16,51 @@ input {
   --ui-muted: #8ea4bd;
   --ui-accent: #79dfb1;
   --ui-danger: #e5535b;
+
+  --menu-bg: #15100c;
+  --menu-panel: #221a14;
+  --menu-field: #130e0a;
+  --menu-line: #3b2e22;
+  --menu-line-strong: #5a4632;
+  --menu-accent: #c49a52;
+  --menu-accent-bright: #ecc97c;
+  --menu-accent-dim: #6e5434;
+  --menu-seal: #8e2a1f;
+  --menu-seal-bright: #a8372a;
+  --menu-seal-edge: #c9694a;
+  --menu-text: #ece1c8;
+  --menu-muted: #a39279;
+  --menu-ready: #93c26c;
+  --menu-warning: #f0b35a;
+  --menu-danger: #ff8a80;
+  --menu-display: 'Palatino Linotype', 'Book Antiqua', Palatino, 'URW Palladio L', P052, Georgia, serif;
+  --menu-body: 'Segoe UI', system-ui, -apple-system, Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --menu-backdrop:
+    radial-gradient(ellipse 85% 75% at 50% 45%, transparent 55%, rgba(0, 0, 0, 0.5)),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.92 0 0 0 0 0.8 0 0 0 0 0.6 0 0 0 0.07 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"),
+    var(--menu-bg);
+  /* A bronze stud in each corner of a panel, inside its double rule. */
+  --menu-studs:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='9'%3E%3Cpath d='M4.5 0 9 4.5 4.5 9 0 4.5z' fill='%23b58f4c'/%3E%3C/svg%3E") left 3px top 3px / 9px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='9'%3E%3Cpath d='M4.5 0 9 4.5 4.5 9 0 4.5z' fill='%23b58f4c'/%3E%3C/svg%3E") right 3px top 3px / 9px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='9'%3E%3Cpath d='M4.5 0 9 4.5 4.5 9 0 4.5z' fill='%23b58f4c'/%3E%3C/svg%3E") left 3px bottom 3px / 9px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='9'%3E%3Cpath d='M4.5 0 9 4.5 4.5 9 0 4.5z' fill='%23b58f4c'/%3E%3C/svg%3E") right 3px bottom 3px / 9px no-repeat;
 }
 
-/* The browser's own controls are square and flat too. */
+/* The game's own pages keep the plain controls they always had; the screens before a game restyle theirs, below. */
+body {
+  min-height: 100vh;
+  margin: 0;
+  font-family: Arial, sans-serif;
+  color: #202820;
+  background: var(--menu-backdrop);
+  background-attachment: fixed;
+}
+
+input {
+  max-width: 12rem;
+}
+
 button,
 input,
 select,
@@ -35,7 +68,6 @@ textarea {
   border-radius: 0;
 }
 
-/* These are for the light pages (the lobby). The dark screens style their own buttons, below and further on. */
 button {
   color: #202820;
   background: #e9ede9;
@@ -74,117 +106,331 @@ textarea:focus {
   outline-offset: 0;
 }
 
-#select-panel :focus-visible,
 #game-panel :focus-visible {
   outline-color: var(--ui-accent);
 }
 
-#player-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
+/* The screens before a game. `:where` keeps these as weak as the plain rules above, so a class on a control still wins. */
+/* The book serif's figures sit low and small by default; numbers here (a count, a code, the 3 of the title) stand full height. */
+:where(#entry-panel, #lobby-panel, #select-panel),
+.brand {
+  font-variant-numeric: lining-nums;
 }
 
-.player-row,
-.player-actions {
+:where(#entry-panel, #lobby-panel, #select-panel) {
+  color: var(--menu-text);
+  font-family: var(--menu-body);
+}
+
+:where(#entry-panel, #lobby-panel, #select-panel) :where(*, *::before, *::after) {
+  box-sizing: border-box;
+}
+
+:where(#entry-panel, #lobby-panel, #select-panel) :where(button, input, select, textarea) {
+  font: inherit;
+}
+
+:where(#entry-panel, #lobby-panel, #select-panel) button {
+  padding: 0.45rem 0.95rem;
+  color: var(--menu-text);
+  background: #2a2119;
+  border: 1px solid var(--menu-accent-dim);
+  font-size: 0.94rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
+  cursor: pointer;
+  transition: border-color 120ms, color 120ms, box-shadow 120ms, background 120ms, transform 120ms;
+}
+
+:where(#entry-panel, #lobby-panel, #select-panel) button:hover:not(:disabled) {
+  color: var(--menu-accent-bright);
+  background: #34291f;
+  border-color: var(--menu-accent);
+  box-shadow: none;
+}
+
+:where(#entry-panel, #lobby-panel, #select-panel) button:disabled {
+  color: #6f6352;
+  border-color: var(--menu-line);
+  cursor: default;
+}
+
+:where(#entry-panel, #lobby-panel, #select-panel) :is(input, select, textarea) {
+  max-width: none;
+  padding: 0.45rem 0.6rem;
+  color: var(--menu-text);
+  background: var(--menu-field);
+  border: 1px solid var(--menu-line-strong);
+}
+
+:where(#entry-panel, #lobby-panel, #select-panel) input::placeholder {
+  color: #6f6352;
+}
+
+:where(#entry-panel, #lobby-panel, #select-panel) :is(input, select):disabled {
+  color: var(--menu-muted);
+  background: #100c09;
+  border-color: var(--menu-line);
+}
+
+:where(#entry-panel, #lobby-panel, #select-panel) select option {
+  color: var(--menu-text);
+  background: #1a140f;
+}
+
+:where(#entry-panel, #lobby-panel, #select-panel) input[type='checkbox'] {
+  width: 1.05rem;
+  height: 1.05rem;
+  padding: 0;
+  accent-color: var(--menu-accent);
+}
+
+:where(#entry-panel, #lobby-panel, #select-panel) button:focus-visible {
+  outline-color: var(--menu-accent-bright);
+}
+
+:where(#entry-panel, #lobby-panel, #select-panel) :is(input, select, textarea):focus {
+  border-color: var(--menu-accent);
+  outline: 1px solid var(--menu-accent);
+  box-shadow: none;
+}
+
+/* The one button that matters on each screen: create the lobby, start the game, lock in. */
+.primary-button {
+  padding: 0.7rem 1.8rem;
+  color: #f6e8c6;
+  background: var(--menu-seal);
+  border: 1px solid var(--menu-seal-edge);
+  font-family: var(--menu-display);
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  box-shadow: none;
+  outline: 1px solid rgba(0, 0, 0, 0.35);
+  outline-offset: -4px;
+}
+
+.primary-button:hover:not(:disabled) {
+  color: #fff3d6;
+  background: var(--menu-seal-bright);
+  border-color: #e08a66;
+  box-shadow: none;
+}
+
+.primary-button:disabled {
+  color: #7a6d5a;
+  background: #2a2119;
+  border-color: var(--menu-line-strong);
+  box-shadow: none;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The name of the game, in gold. On the entry page it is the title, large, over the card; in the lobby it sits at the left of the
+   bar along the top. */
+.brand {
+  margin: 0;
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.4em;
+  color: var(--menu-text);
+  font-family: var(--menu-display);
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
-.player-row {
-  padding: 0.4rem 0;
-  border-bottom: 1px solid #e3e8e3;
+.brand::before,
+.brand::after {
+  content: '\25C6';
+  color: var(--menu-accent);
+  font-size: 0.3em;
 }
 
-.player-row > span:nth-child(3) {
+/* A heading over a panel: small, in caps, spaced, with a gold rule running off after it. */
+.panel-heading,
+.lobby-card h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin: 0;
+  color: var(--menu-accent-bright);
+  font-family: var(--menu-display);
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-variant-caps: small-caps;
+}
+
+.heading-count {
+  color: var(--menu-muted);
+  font-family: var(--menu-body);
+  font-size: 0.8rem;
   font-weight: 600;
+  letter-spacing: 0.06em;
 }
 
-.player-icon {
-  width: 1rem;
-  flex: 0 0 1rem;
-  color: #777;
+.lobby-card h2::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--menu-line-strong);
+}
+
+/* A panel is ruled twice, the inner rule a little in from the edge, with a stud in each corner. */
+.entry-card,
+.lobby-card,
+.champion-details {
+  outline: 1px solid var(--menu-line);
+  outline-offset: -6px;
+}
+
+/* A team's banner is a pennant, its tail cut in a swallowtail; the other teams' fly the other way. */
+.team-head,
+.team-banner {
+  padding-right: 1.6rem;
+  clip-path: polygon(0 0, 100% 0, calc(100% - 0.7rem) 50%, 100% 100%, 0 100%);
+}
+
+#select-other-teams .team-banner {
+  padding-right: 0.7rem;
+  padding-left: 1.6rem;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 0.7rem 50%);
+}
+
+/* A diamond before each heading, as a book's ornament. */
+.lobby-card h2::before,
+.select-top h2::before {
+  content: '\25C6';
+  color: var(--menu-accent);
+  font-size: 0.6em;
+}
+
+/* ------------------------------------------------------------------------------------------------ the entry page */
+
+body:has(#entry-panel:not([hidden])) > main {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 0.4rem;
+  min-height: 100vh;
+  padding: 2rem 1rem;
+}
+
+body:has(#entry-panel:not([hidden])) .brand {
+  font-size: clamp(2.8rem, 9vw, 5.6rem);
+  line-height: 1;
+}
+
+#entry-panel:not([hidden]) {
+  display: grid;
+  justify-items: center;
+  gap: 1.8rem;
+  width: min(24rem, 100%);
+}
+
+.entry-card {
+  display: grid;
+  gap: 1rem;
+  width: 100%;
+  padding: 1.6rem 1.6rem 1.3rem;
+  background: var(--menu-studs), var(--menu-panel);
+  border: 1px solid var(--menu-line-strong);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+
+.entry-card input {
+  width: 100%;
+}
+
+.entry-card .primary-button {
+  width: 100%;
+}
+
+.entry-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin: 0;
+  color: var(--menu-muted);
+  font-size: 0.86rem;
+  letter-spacing: 0.04em;
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
+}
+
+.entry-divider::before,
+.entry-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--menu-line-strong);
+}
+
+.join-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.join-row input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--menu-display);
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+}
+
+.join-row input::placeholder {
+  font-family: var(--menu-body);
+  letter-spacing: 0.05em;
+  text-transform: none;
+}
+
+#message {
+  min-height: 1.2em;
+  margin: 0;
+  color: var(--menu-muted);
+  font-size: 0.85rem;
   text-align: center;
 }
 
-.leader-icon {
-  color: #a66b00;
-}
+/* ------------------------------------------------------------------------------------------------ the lobby */
 
-/* A player's team: a square in its colour, and its name beside the player's. */
-.team-swatch {
-  flex: 0 0 0.8rem;
-  width: 0.8rem;
-  height: 0.8rem;
-  border: 1px solid #55605a;
-}
-
-.team-name {
-  color: #666;
-  font-size: 0.75rem;
-}
-
-/* One square button in each team's colour; the player's own is outlined. */
-.team-picker {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.6rem;
-}
-
-.team-picker button {
-  width: 1.8rem;
-  height: 1.8rem;
-  padding: 0;
-  border: 2px solid #55605a;
-  cursor: pointer;
-}
-
-.team-picker button[aria-pressed='true'] {
-  outline: 2px solid #202820;
-  outline-offset: 2px;
-}
-
-.team-picker button:disabled {
-  cursor: default;
-  opacity: 0.45;
-}
-
-.player-actions {
-  margin-left: auto;
-}
-
-.player-actions button {
-  padding: 0.15rem 0.4rem;
-  font-size: 0.75rem;
-}
-
-/* The lobby is the whole page: a header with the code, three columns (the players, the game's settings, the chat)
-   that share the height, and a footer with what is stopping the game from starting and the buttons that start it. */
+/* The lobby is the whole page: a bar along the top with the name of the game and the code, three columns (the players, the game's
+   settings, the chat) that share the height, and a bar along the bottom with what is stopping the game from starting and the
+   button that starts it. */
 body:has(#lobby-panel:not([hidden])) {
-  box-sizing: border-box;
-  max-width: none;
   height: 100vh;
-  margin: 0;
-  padding: 1rem 1.5rem;
 }
 
 body:has(#lobby-panel:not([hidden])) > main {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
 }
 
-body:has(#lobby-panel:not([hidden])) > main > h1 {
-  margin: 0 0 0.75rem;
-  font-size: 1.4rem;
+body:has(#lobby-panel:not([hidden])) .brand {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  left: 1.5rem;
+  font-size: 1.35rem;
+  line-height: 3.6rem;
 }
 
 #lobby-panel:not([hidden]) {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 0.9rem;
   min-height: 0;
 }
 
@@ -194,6 +440,14 @@ body:has(#lobby-panel:not([hidden])) > main > h1 {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem 1rem;
+  padding: 0 1.5rem;
+  background: #100c09;
+}
+
+.lobby-header {
+  min-height: 3.6rem;
+  padding-left: 13rem;
+  border-bottom: 1px solid var(--menu-accent-dim);
 }
 
 .lobby-header button,
@@ -202,69 +456,82 @@ body:has(#lobby-panel:not([hidden])) > main > h1 {
 }
 
 .lobby-code {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
   margin: 0;
 }
 
+.lobby-code-label {
+  color: var(--menu-muted);
+  font-size: 0.86rem;
+  letter-spacing: 0.04em;
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
+}
+
 .lobby-code strong {
-  margin: 0 0.25rem;
-  font-size: 1.25rem;
-  letter-spacing: 0.1em;
+  padding: 0.2rem 0.6rem;
+  color: var(--menu-accent-bright);
+  background: var(--menu-field);
+  border: 1px solid var(--menu-accent-dim);
+  font-family: var(--menu-display);
+  font-size: 1.2rem;
+  letter-spacing: 0.3em;
 }
 
 /* Beside the Copy button. A failed copy turns the button red and puts the reason, in bold, next to it. */
 #copy-button.is-error {
   color: #fff;
-  background: #c0392b;
-  border: 1px solid #8e2a20;
-  font-weight: 700;
+  background: #8e2a20;
+  border-color: #c0392b;
 }
 
 .copy-status.is-error {
-  color: #a02828;
+  color: var(--menu-danger);
   font-weight: 700;
 }
 
 .lobby-grid {
   display: grid;
   flex: 1;
-  grid-template-columns: minmax(16rem, 1fr) minmax(18rem, 1.2fr) minmax(16rem, 1.2fr);
+  grid-template-columns: minmax(16rem, 1fr) minmax(18rem, 1.2fr) minmax(16rem, 1.1fr);
   grid-template-rows: minmax(0, 1fr);
   gap: 1rem;
   min-height: 0;
+  padding: 1rem 1.5rem;
 }
 
 .lobby-card {
-  box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 0.9rem;
+  gap: 1rem;
   min-width: 0;
   min-height: 0;
-  padding: 1rem;
+  padding: 1rem 1.1rem;
   overflow-y: auto;
-  background: #f8faf8;
-  border: 1px solid #cfd6cf;
-}
-
-.lobby-card h2,
-.lobby-group h3 {
-  margin: 0;
-}
-
-.lobby-card h2 {
-  font-size: 1.05rem;
+  background: var(--menu-studs), var(--menu-panel);
+  border: 1px solid var(--menu-line-strong);
+  box-shadow: none;
 }
 
 .lobby-group {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 0.6rem;
+  gap: 0.65rem;
   padding-top: 0.9rem;
-  border-top: 1px solid #e3e8e3;
+  border-top: 1px solid var(--menu-line);
 }
 
 .lobby-group h3 {
-  font-size: 0.9rem;
+  margin: 0;
+  color: var(--menu-muted);
+  font-size: 0.86rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
 }
 
 /* The first thing in a card has nothing above it to be separated from. */
@@ -273,43 +540,217 @@ body:has(#lobby-panel:not([hidden])) > main > h1 {
   border-top: 0;
 }
 
-.lobby-note {
-  margin: -0.5rem 0 0;
-  color: #666;
-  font-size: 0.8rem;
+/* The players, under a banner for each team in its colour. */
+#player-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.team-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 0.7rem;
+  padding: 0.3rem 0.6rem;
+  color: var(--menu-text);
+  background: color-mix(in srgb, var(--team) 20%, var(--menu-panel));
+  border-left: 3px solid var(--team);
+  font-family: var(--menu-display);
+  font-size: 0.89rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-variant-caps: small-caps;
+}
+
+.team-head:first-child {
+  margin-top: 0;
+}
+
+.team-head-count {
+  color: var(--menu-muted);
+  font-family: var(--menu-body);
+  letter-spacing: 0.05em;
+}
+
+.player-row,
+.player-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.player-row {
+  padding: 0.45rem 0.5rem 0.45rem 0.6rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.player-row:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.player-badge {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  color: #fff;
+  background: color-mix(in srgb, var(--team) 55%, #000);
+  border: 1px solid color-mix(in srgb, var(--team) 70%, #fff);
+  font-family: var(--menu-display);
+  font-weight: 700;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.7);
+}
+
+.player-name {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.leader-icon {
+  color: var(--menu-accent-bright);
+  font-size: 0.95rem;
+}
+
+.player-you {
+  padding: 0.05rem 0.35rem;
+  color: var(--menu-accent);
+  border: 1px solid var(--menu-accent-dim);
+  font-size: 0.74rem;
+  letter-spacing: 0.04em;
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
+}
+
+.player-status {
+  color: var(--menu-ready);
+  font-size: 0.84rem;
+  letter-spacing: 0.04em;
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
+}
+
+.player-actions {
+  gap: 0.35rem;
+  margin-left: auto;
+}
+
+.player-actions button {
+  padding: 0.2rem 0.45rem;
+  font-size: 0.64rem;
+}
+
+/* One square for each team in its colour; the player's own is ringed in gold. */
+.team-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.team-picker button {
+  width: 1.9rem;
+  height: 1.9rem;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.7);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), inset 0 -2px 0 rgba(0, 0, 0, 0.3);
+  transition: transform 120ms, box-shadow 120ms;
+}
+
+.team-picker button:hover:not(:disabled) {
+  border-color: var(--menu-accent-bright);
+  transform: translateY(-2px);
+}
+
+.team-picker button[aria-pressed='true'] {
+  outline: 2px solid var(--menu-accent-bright);
+  outline-offset: 2px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.team-picker button:disabled {
+  cursor: default;
+  opacity: 0.3;
 }
 
 /* A setting: what it is called, the control, and under it what the choice means. */
 .field {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 0.3rem;
+  gap: 0.35rem;
 }
 
 .field label,
 .field-row > span,
 .field-row > label {
-  font-size: 0.85rem;
+  color: var(--menu-muted);
+  font-size: 0.86rem;
   font-weight: 600;
+  letter-spacing: 0.04em;
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
 }
 
 .field select {
-  box-sizing: border-box;
   width: 100%;
-  padding: 0.3rem;
+  padding: 0.5rem 0.6rem;
+}
+
+.mode-summary {
+  margin: 0;
+  color: var(--menu-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
 /* A label, and what it is for on the same line. */
 .field-row {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.6rem;
 }
 
 .field-row input {
-  box-sizing: border-box;
-  min-width: 0;
   flex: 1;
+  min-width: 0;
+}
+
+.rules {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.rule-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  font-size: 0.88rem;
+}
+
+.rule-row[hidden] {
+  display: none;
+}
+
+.rule-row input[type='number'] {
+  width: 4.5rem;
+  flex: none;
+  text-align: right;
+}
+
+.game-activity {
+  margin: 0;
+  color: var(--menu-ready);
+  font-size: 0.85rem;
 }
 
 .chat-panel h2 {
@@ -323,85 +764,115 @@ body:has(#lobby-panel:not([hidden])) > main > h1 {
   min-height: 0;
   overflow-y: auto;
   margin: 0;
-  padding: 0.5rem 0.65rem;
+  padding: 0.6rem 0.75rem;
   list-style: none;
-  background: #fff;
-  border: 1px solid #d5dad5;
+  background: var(--menu-field);
+  border: 1px solid var(--menu-line);
 }
 
 #chat-messages li {
-  padding: 0.15rem 0;
-  font-size: 0.85rem;
-  line-height: 1.3;
+  padding: 0.18rem 0;
+  font-size: 0.86rem;
+  line-height: 1.35;
   overflow-wrap: anywhere;
 }
 
 #chat-messages li strong {
+  color: var(--menu-accent);
   font-weight: 600;
 }
 
 .chat-input-row {
   display: flex;
-  gap: 0.35rem;
+  gap: 0.4rem;
 }
 
 .chat-input-row input {
-  box-sizing: border-box;
-  max-width: none;
-  min-width: 0;
   flex: 1;
+  min-width: 0;
 }
 
 .lobby-footer {
-  min-height: 2.4rem;
-  padding-top: 0.9rem;
-  border-top: 1px solid #cfd6cf;
+  min-height: 4.6rem;
+  border-top: 1px solid var(--menu-accent-dim);
 }
 
 .lobby-status {
   display: grid;
   gap: 0.2rem;
   min-width: 0;
+  font-size: 0.88rem;
 }
 
 .lobby-status p {
   margin: 0;
 }
 
+.mode-warning {
+  color: var(--menu-warning);
+}
+
+.last-result {
+  color: var(--menu-muted);
+}
+
 .lobby-actions {
   display: flex;
   flex: none;
-  gap: 0.5rem;
+  align-items: center;
+  gap: 0.75rem;
 }
 
 #start-button {
-  padding: 0.45rem 1.4rem;
-  font-weight: 600;
+  min-width: 14rem;
 }
 
 #lobby-message.is-error,
 #message.is-error {
-  color: #a02828;
+  color: var(--menu-danger);
 }
 
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
+/* On a narrow window the lobby is one column that scrolls, the chat last. */
+@media (max-width: 60rem) {
+  body:has(#lobby-panel:not([hidden])) {
+    height: auto;
+  }
+
+  body:has(#lobby-panel:not([hidden])) .brand {
+    position: static;
+    padding: 0.8rem 16px 0;
+    line-height: 1.2;
+  }
+
+  .lobby-header {
+    flex-wrap: wrap;
+    padding: 0.6rem 16px;
+  }
+
+  .lobby-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    padding: 1rem 16px;
+  }
+
+  .chat-panel {
+    min-height: 20rem;
+  }
+
+  .lobby-footer {
+    flex-wrap: wrap;
+    padding: 0.8rem 16px;
+  }
 }
 
-/* Once champion select or a game is open the page is only that screen: no margins or headings. */
+/* ------------------------------------------------------------------------------------------------ champion select */
+
+/* Once champion select or a game is open the page is only that screen. */
 body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) {
-  max-width: none;
-  margin: 0;
-  padding: 0;
   overflow: hidden;
 }
 
-body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
+body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > .brand {
   display: none;
 }
 
@@ -413,203 +884,735 @@ body:has(#game-panel:not([hidden]), #select-panel:not([hidden])) > main > h1 {
   background: #101827;
 }
 
+/* Champion select: your team down the left, the other teams down the right, and between them the champions, and under them the one
+   picked, standing on a pedestal, with what it can do. Along the bottom, the button that locks it in. */
 #select-panel {
   overflow-y: auto;
-  color: #d9e6f2;
+  color: var(--menu-text);
+  background: var(--menu-backdrop);
 }
 
-.select-layout {
-  box-sizing: border-box;
+.select-screen {
   display: grid;
-  gap: 1rem;
-  width: min(72rem, 100%);
-  margin: 0 auto;
-  padding: 1.5rem 1rem 2rem;
+  grid-template-areas:
+    'top top top'
+    'own center others'
+    'bottom bottom bottom';
+  grid-template-columns: 17rem minmax(0, 1fr) 17rem;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 0 1.5rem;
+  height: 100%;
+  min-height: 40rem;
+  padding: 0 1.5rem;
 }
 
-.select-layout h2 {
+.select-top {
+  grid-area: top;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.3rem 1rem;
+  margin-bottom: 1rem;
+  padding: 1rem 0 0.7rem;
+  border-bottom: 1px solid var(--menu-line);
+}
+
+.select-top h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   margin: 0;
+  font-family: var(--menu-display);
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-variant-caps: small-caps;
+  white-space: nowrap;
+  color: var(--menu-accent-bright);
 }
 
-.select-body {
+.select-progress {
+  margin: 0;
+  color: var(--menu-muted);
+  font-size: 0.9rem;
+  letter-spacing: 0.04em;
+  font-family: var(--menu-display);
+  font-style: italic;
+}
+
+.select-side {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+#select-own-team {
+  grid-area: own;
+}
+
+#select-other-teams {
+  grid-area: others;
+}
+
+.team-block + .team-block {
+  margin-top: 1.1rem;
+}
+
+.team-banner {
+  margin: 0;
+  padding: 0.45rem 0.7rem;
+  color: var(--menu-text);
+  background: color-mix(in srgb, var(--team, var(--menu-accent)) 20%, var(--menu-panel));
+  border-left: 3px solid var(--team, var(--menu-accent));
+  font-family: var(--menu-display);
+  font-size: 0.96rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-variant-caps: small-caps;
+}
+
+.team-slots {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
-  gap: 1.5rem;
-  align-items: start;
+  gap: 0.45rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
 }
 
-.champion-grid,
-.select-players {
+.slot {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.45rem;
+  background: var(--menu-panel);
+  border: 1px solid var(--menu-line);
+}
+
+.slot.is-you {
+  background: color-mix(in srgb, var(--menu-accent) 12%, var(--menu-panel));
+  border-color: var(--menu-accent-dim);
+}
+
+.slot.is-locked {
+  border-color: color-mix(in srgb, var(--menu-ready) 45%, var(--menu-line));
+}
+
+/* The other teams mirror yours: their portraits on the outside edge, to the right. */
+#select-other-teams .team-banner {
+  text-align: right;
+  background: color-mix(in srgb, var(--team, var(--menu-accent)) 20%, var(--menu-panel));
+  border-right: 3px solid var(--team, var(--menu-accent));
+  border-left: 0;
+}
+
+#select-other-teams .slot {
+  flex-direction: row-reverse;
+  text-align: right;
+}
+
+.slot-portrait,
+.card-portrait {
+  position: relative;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 38%, color-mix(in srgb, var(--accent, #4a3a2a) 55%, transparent), transparent 72%),
+    #18120e;
+}
+
+.slot-portrait img,
+.card-portrait img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.portrait-initial {
+  color: color-mix(in srgb, var(--accent, #c49a52) 60%, #fff);
+  font-family: var(--menu-display);
+  font-size: 1.8rem;
+  font-weight: 700;
+  opacity: 0.7;
+}
+
+.slot-portrait {
+  flex: none;
+  width: 3.4rem;
+  height: 3.4rem;
+  border: 1px solid var(--menu-accent-dim);
+}
+
+/* No champion yet: an empty frame that breathes while they choose. */
+.slot-portrait:empty::after {
+  content: '?';
+  color: #5a4a38;
+  font-family: var(--menu-display);
+  font-size: 1.4rem;
+}
+
+.slot.is-picking .slot-portrait {
+  animation: slot-choosing 1.6s ease-in-out infinite;
+}
+
+@keyframes slot-choosing {
+  50% {
+    border-color: var(--menu-accent);
+    box-shadow: none;
+  }
+}
+
+.slot-text {
+  display: grid;
+  flex: 1;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.slot-player {
+  overflow: hidden;
+  font-size: 0.9rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.slot-you {
+  margin: 0 0.4rem;
+  padding: 0 0.3rem;
+  color: var(--menu-accent);
+  border: 1px solid var(--menu-accent-dim);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
+  vertical-align: 0.12em;
+}
+
+.slot-champion {
+  overflow: hidden;
+  color: var(--menu-accent);
+  font-family: var(--menu-display);
+  font-size: 0.94rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-variant-caps: small-caps;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.slot.is-picking .slot-champion {
+  color: var(--menu-muted);
+}
+
+.slot-state {
+  flex: none;
+  color: var(--menu-ready);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
+}
+
+.team-none {
+  margin: 0;
+  color: var(--menu-muted);
+  font-size: 0.85rem;
+  text-align: right;
+}
+
+.select-center {
+  grid-area: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  min-width: 0;
+  min-height: 0;
+}
+
+.select-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.role-tabs {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.role-tabs button {
+  padding: 0.35rem 0.85rem;
+  color: var(--menu-muted);
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  box-shadow: none;
+}
+
+.role-tabs button:hover:not(:disabled) {
+  color: var(--menu-text);
+  border-color: transparent;
+  border-bottom-color: var(--menu-accent-dim);
+  box-shadow: none;
+}
+
+.role-tabs button[aria-pressed='true'] {
+  color: var(--menu-accent-bright);
+  border-bottom-color: var(--menu-accent);
+}
+
+#select-search {
+  width: 14rem;
+}
+
+.champion-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(5.6rem, 1fr));
+  gap: 0.55rem;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-/* Four champions across, however many there are. */
-.champion-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0.75rem;
+.champion-grid li[hidden] {
+  display: none;
 }
 
 .champion-card {
+  position: relative;
   display: grid;
-  gap: 0.35rem;
   width: 100%;
-  height: 100%;
-  padding: 0.75rem;
-  color: inherit;
-  background: var(--ui-bg-row);
-  border: 2px solid #314862;
+  padding: 0;
+  color: var(--menu-text);
+  background: #18120e;
+  border: 1px solid var(--menu-line-strong);
   font: inherit;
-  text-align: left;
-  cursor: pointer;
+  letter-spacing: normal;
+  text-transform: none;
+  transition: transform 120ms, border-color 120ms, box-shadow 120ms;
+}
+
+.champion-card .card-portrait {
+  aspect-ratio: 1;
+}
+
+.card-portrait img {
+  transition: transform 160ms, filter 160ms;
+}
+
+.card-name {
+  overflow: hidden;
+  padding: 0.3rem 0.2rem 0.32rem;
+  background: #1d1612;
+  border-top: 1px solid var(--menu-line);
+  font-family: var(--menu-display);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  font-variant-caps: small-caps;
+  text-align: center;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.champion-card:hover:not(:disabled) {
+  color: var(--menu-accent-bright);
+  border-color: var(--menu-accent);
+  box-shadow: none;
+  transform: translateY(-2px);
+}
+
+.champion-card:hover:not(:disabled) .card-portrait img {
+  transform: scale(1.06);
+}
+
+.champion-card.is-selected,
+.champion-card.is-selected:hover:not(:disabled) {
+  color: var(--menu-accent-bright);
+  border-color: var(--menu-accent-bright);
+  box-shadow: inset 0 0 0 1px var(--menu-accent-bright);
+}
+
+.champion-card.is-taken .card-portrait img {
+  filter: grayscale(0.7) brightness(0.65);
 }
 
 .champion-card:disabled {
   cursor: default;
-  opacity: 0.7;
 }
 
-.champion-card.is-selected {
-  border-color: #79dfb1;
-  background: #1d3a3a;
-  opacity: 1;
+/* Once locked in, the others step back. */
+#select-panel.is-locked .champion-card:not(.is-selected) {
+  opacity: 0.35;
 }
 
-/* Under the pointer a card is a shade lighter, and still dark enough for its text; the picked one stays as it is. */
-.champion-card:hover:not(:disabled) {
-  background: var(--ui-bg-hover);
-  border-color: #4b6485;
+/* Who else picked it, across the top of the portrait. */
+.champion-picks {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  overflow: hidden;
+  padding: 0.12rem 0.25rem;
+  color: #ffd59a;
+  background: rgba(0, 0, 0, 0.72);
+  font-size: 0.6rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-.champion-card.is-selected:hover:not(:disabled) {
-  background: #1d3a3a;
-  border-color: var(--ui-accent);
+.champion-picks[hidden] {
+  display: none;
 }
 
-/* The other buttons on the dark screens (back, lock in, return to the lobby): light text on a dark button, and the main one in
-   the accent colour with dark text, as the results screen's is. */
-#select-panel button:not(.champion-card),
+.champion-details {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(13rem, 21rem) minmax(0, 1fr);
+  min-height: 17rem;
+  background: var(--menu-studs), var(--menu-panel);
+  border: 1px solid var(--menu-line-strong);
+  box-shadow: none;
+}
+
+/* Inside the panel's inner rule, so the rule and its studs show round the stage too. */
+.details-stage {
+  position: relative;
+  min-height: 0;
+  margin: 8px 0 8px 8px;
+  background: #17120e;
+  border-right: 1px solid var(--menu-line);
+}
+
+.stage-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+
+.stage-canvas:active {
+  cursor: grabbing;
+}
+
+.stage-hint {
+  position: absolute;
+  right: 0;
+  bottom: 0.4rem;
+  left: 0;
+  margin: 0;
+  color: #6a5c48;
+  font-size: 0.74rem;
+  letter-spacing: 0.04em;
+  text-align: center;
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
+  pointer-events: none;
+}
+
+.details-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1rem 1.25rem;
+}
+
+.details-empty {
+  margin: auto;
+  color: var(--menu-muted);
+}
+
+.details-role {
+  margin: 0;
+  color: color-mix(in srgb, var(--accent, var(--menu-accent)) 75%, #fff);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
+}
+
+.details-name {
+  margin: 0;
+  color: var(--menu-accent-bright);
+  font-family: var(--menu-display);
+  font-size: 1.85rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.05;
+  font-variant-caps: small-caps;
+}
+
+.details-blurb {
+  margin: 0;
+  color: #cdbfa3;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.details-stats {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: 0.28rem 0.8rem;
+  align-items: center;
+  max-width: 26rem;
+  margin: 0.15rem 0;
+}
+
+.details-stats dt {
+  color: var(--menu-muted);
+  font-size: 0.84rem;
+  letter-spacing: 0.04em;
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
+}
+
+.details-stats dd {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0;
+}
+
+.stat-bar {
+  flex: 1;
+  height: 0.38rem;
+  background: #1a140f;
+  border: 1px solid #33281d;
+}
+
+.stat-fill {
+  display: block;
+  height: 100%;
+  background: var(--menu-accent);
+}
+
+.stat-value {
+  width: 2.6rem;
+  color: var(--menu-text);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.ability-tabs {
+  display: flex;
+  gap: 0.45rem;
+  margin-top: 0.2rem;
+}
+
+.ability-tab {
+  position: relative;
+  width: 2.9rem;
+  height: 2.9rem;
+  padding: 0;
+  background: var(--menu-field);
+  border: 1px solid var(--menu-line-strong);
+}
+
+.ability-tab > .ability-icon {
+  position: absolute;
+  inset: 2px;
+}
+
+.ability-tab.is-active,
+.ability-tab.is-active:hover:not(:disabled) {
+  border-color: var(--menu-accent-bright);
+  box-shadow: inset 0 0 0 1px var(--menu-accent-bright);
+}
+
+.ability-key {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  padding: 0 0.22rem;
+  color: var(--menu-accent-bright);
+  background: rgba(0, 0, 0, 0.8);
+  font-size: 0.6rem;
+  line-height: 1.3;
+  letter-spacing: 0;
+}
+
+.passive-icon {
+  color: color-mix(in srgb, var(--accent, #c49a52) 60%, #fff);
+  background: color-mix(in srgb, var(--accent, #c49a52) 30%, #130e0a);
+  font-family: var(--menu-display);
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.ability-detail {
+  display: grid;
+  gap: 0.25rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--menu-line);
+}
+
+.ability-detail p {
+  margin: 0;
+}
+
+.ability-detail-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.ability-detail-head strong {
+  color: var(--menu-accent-bright);
+  font-family: var(--menu-display);
+  font-size: 1rem;
+  letter-spacing: 0.05em;
+}
+
+.ability-detail-key {
+  color: var(--menu-muted);
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
+}
+
+.ability-detail-text {
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
+.ability-detail-facts {
+  color: var(--menu-muted);
+  font-size: 0.76rem;
+}
+
+.select-bottom {
+  grid-area: bottom;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 0.9rem;
+  padding: 0.8rem 0 1rem;
+  border-top: 1px solid var(--menu-line);
+}
+
+#select-back-button {
+  justify-self: start;
+}
+
+.select-lock {
+  display: grid;
+  justify-items: end;
+  gap: 0.35rem;
+}
+
+#lock-button {
+  min-width: 16rem;
+  padding: 0.8rem 2rem;
+  font-size: 1.1rem;
+}
+
+/* Locked in: the button says so, in the colour of being ready, and is not a button any more. */
+#select-panel.is-locked #lock-button:disabled {
+  color: var(--menu-ready);
+  background: color-mix(in srgb, var(--menu-ready) 10%, transparent);
+  border-color: var(--menu-ready);
+  box-shadow: none;
+}
+
+#select-message {
+  min-height: 1.1em;
+  margin: 0;
+  color: var(--menu-muted);
+  font-size: 0.82rem;
+}
+
+#select-message.is-error {
+  color: var(--menu-danger);
+}
+
+/* On a narrow window it is one column that scrolls: the champions and the one picked, then the teams, then the button. */
+@media (max-width: 70rem) {
+  .select-screen {
+    grid-template-areas:
+      'top'
+      'center'
+      'own'
+      'others'
+      'bottom';
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    gap: 1rem;
+    height: auto;
+    padding: 0 16px;
+  }
+
+  .champion-details {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .details-stage {
+    height: 18rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--menu-line);
+  }
+
+  #select-other-teams .slot {
+    flex-direction: row;
+    text-align: left;
+  }
+
+  #select-other-teams .team-banner {
+    text-align: left;
+  }
+
+  .select-bottom {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+  }
+
+  #select-back-button {
+    justify-self: center;
+  }
+
+  #lock-button {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .select-tools {
+    flex-wrap: wrap;
+  }
+
+  #select-search {
+    width: 100%;
+  }
+}
+
+/* The loading screen of a game, over its arena until everyone is ready. */
 #game-loading button {
   padding: 0.45rem 1rem;
   color: var(--ui-text);
   background: var(--ui-bg-raised);
   border: 1px solid var(--ui-line);
+  font-size: 0.85rem;
+  letter-spacing: normal;
+  text-transform: none;
+  box-shadow: none;
 }
 
-#select-panel button:not(.champion-card):hover:not(:disabled),
 #game-loading button:hover:not(:disabled) {
+  color: var(--ui-text);
   background: var(--ui-bg-hover);
-}
-
-#select-panel button:not(.champion-card):disabled,
-#game-loading button:disabled {
-  color: var(--ui-muted);
-  background: var(--ui-bg-row);
-  cursor: default;
-}
-
-#select-panel #lock-button:not(:disabled) {
-  color: var(--ui-track);
-  font-weight: 700;
-  background: var(--ui-accent);
-  border-color: var(--ui-accent);
-}
-
-#select-panel #lock-button:hover:not(:disabled) {
-  background: #96ebc6;
-}
-
-.champion-card span {
-  font-size: 0.8rem;
-  line-height: 1.3;
-}
-
-.champion-picks {
-  color: #f2b66d;
-}
-
-.champion-details {
-  padding: 0.75rem 1rem;
-  background: var(--ui-bg-row);
-  border: 1px solid #314862;
-}
-
-.champion-details h3,
-.champion-details h4,
-.champion-details p {
-  margin: 0.25rem 0 0.5rem;
-}
-
-.champion-details dl {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 0.15rem 1rem;
-  margin: 0 0 0.75rem;
-  font-size: 0.85rem;
-}
-
-.champion-details dd {
-  margin: 0;
-  text-align: right;
-}
-
-.champion-details ul {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  font-size: 0.85rem;
-}
-
-.champion-details li {
-  display: grid;
-  margin-bottom: 0.4rem;
-}
-
-.select-players li {
-  padding: 0.2rem 0;
-}
-
-.select-players li.is-locked {
-  color: #79dfb1;
-}
-
-/* A team's players under a heading with its colour; the heading is not a player. */
-.select-players li.team-group {
-  padding: 0.3rem 0;
-}
-
-.select-players .team-heading {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: #aaa;
-}
-
-.select-players .team-group ul {
-  margin: 0;
-  padding: 0 0 0 1.2rem;
-  list-style: none;
-}
-
-.select-actions {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-}
-
-#select-message.is-error {
-  color: #ff9d9d;
-}
-
-/* On a narrow window the details go under the grid, which keeps all of the width for the four across. */
-@media (max-width: 56rem) {
-  .select-body {
-    grid-template-columns: 1fr;
-  }
+  border-color: var(--ui-line);
+  box-shadow: none;
 }
 
 #game-container {
@@ -1260,17 +2263,6 @@ button.hud-item:hover {
 
 .hud-slot-icons > .is-colour {
   clip-path: inset(calc(100% * (1 - var(--filled, 1))) 0 0 0);
-}
-
-.ability-title {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-}
-
-.ability-title .ability-icon {
-  width: 1.6rem;
-  height: 1.6rem;
 }
 
 [hidden] {
