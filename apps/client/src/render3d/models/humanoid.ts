@@ -20,6 +20,7 @@ import {
   type MeshStandardMaterial,
   type Object3D,
 } from 'three'
+import { reportOnce } from '../../guard.ts'
 import { colour, lerp } from '../space.ts'
 import { jitter } from '../terrain-mesh.ts'
 import type { VisionShading } from '../vision-shading.ts'
@@ -31,6 +32,19 @@ import { approach, ease, easeOut, joint, Model, type FxContext, type PoseInput }
 // A champion: one figure, dressed and armed as its look says (see looks.ts), and posed each frame for what it is doing. It is all
 // in the champion's own colours: which side it is on is for its name tag, and for the red edge an enemy is drawn with (see
 // `Model.setOutline`).
+
+// A champion's figure: in full detail if its look has one, or, if that cannot be built, the plain figure, so the champion is still
+// there to see and play (see guard.ts).
+export function championFigure(vision: VisionShading, radius: number, look: Look, championId: string): HumanoidModel {
+  if (!look.detail) return new HumanoidModel(vision, radius, look, championId)
+  try {
+    return new HumanoidModel(vision, radius, look, championId)
+  } catch (error) {
+    reportOnce(`The detailed model of ${championId}`, error)
+    const { detail: _detail, ...plain } = look
+    return new HumanoidModel(vision, radius, plain, championId)
+  }
+}
 
 // The figure is built about 1.78 units high and half a unit across, and scaled to the champion.
 const BUILT_RADIUS = 0.5
@@ -100,7 +114,8 @@ export class HumanoidModel extends Model {
   private empower = 0
   private readonly empowerGlows: Array<{ mesh: Mesh; material: MeshBasicMaterial }> = []
   // A champion built in full detail (see `Look.detail`) moves its own loose parts (a cape, a plume) once it has been posed.
-  private readonly animateDetail?: (frame: DetailFrame) => void
+  // (Should it go wrong, they are left still from then on: see `pose`.)
+  private animateDetail: ((frame: DetailFrame) => void) | undefined
   private walkWeight = 0
   private actionWeight = 0
   private phase = 0
@@ -355,7 +370,14 @@ export class HumanoidModel extends Model {
     if (this.offHand) holdAngle(this.offHand, this.offHold, pose.shoulderL.x + pose.elbowL)
     for (const { part, amount } of this.swayers) part.rotation.x = amount * (0.15 + 0.35 * w) + Math.sin(t * 2.5 + amount) * 0.04
     if (this.skirt) this.skirt.rotation.set(Math.cos(this.phase * 2) * 0.03 * w + 0.04 * w, 0, Math.sin(this.phase) * 0.05 * w)
-    this.animateDetail?.({ t, dt, walk: w, phase: this.phase, hipL: pose.hipL, hipR: pose.hipR, dead: input.dead, gathering, burst })
+    if (this.animateDetail) {
+      try {
+        this.animateDetail({ t, dt, walk: w, phase: this.phase, hipL: pose.hipL, hipR: pose.hipR, dead: input.dead, gathering, burst })
+      } catch (error) {
+        reportOnce(`The moving parts of ${this.championId}`, error)
+        this.animateDetail = undefined
+      }
+    }
 
     // Dead: it falls back and lies there.
     if (input.dead) {

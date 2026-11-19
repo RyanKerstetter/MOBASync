@@ -107,9 +107,10 @@ export abstract class Model {
       const solid: Mesh[] = []
       this.root.traverse((object) => {
         if (!(object instanceof Mesh)) return
-        const paint = object.material as Material
+        // A part can be painted with one material or one per side (a cape's); it is solid only if all of them are.
+        const paints: Material[] = Array.isArray(object.material) ? object.material : [object.material]
         // (A see-through part that is the body itself, such as a slime's, says so with `userData.outline`.)
-        if ((paint.transparent && paint.userData.outline !== true) || paint.userData.glow === true) return
+        if (paints.some((paint) => (paint.transparent && paint.userData.outline !== true) || paint.userData.glow === true)) return
         solid.push(object)
       })
       for (const part of solid) {

@@ -14,6 +14,7 @@ import {
 } from 'three'
 import { GAME_VIEW_HEIGHT, GAME_VIEW_WIDTH, type Vector2 } from '../../../../packages/shared/src/index.ts'
 import type { RenderedCharacter } from '../game-state.ts'
+import { guarded } from '../guard.ts'
 import { CharacterLayer } from '../render/character-layer.ts'
 import { DEFAULT_EFFECTS, type EffectSettings } from '../render/effect-settings.ts'
 import { FloatingNumberLayer } from '../render/floating-number-layer.ts'
@@ -224,13 +225,14 @@ export class WorldRenderer3D implements GameRenderer {
     for (const character of unseen) everyone.set(character.id, character)
 
     const localTeam = everyone.get(frame.localCharacterId ?? -1)?.team
-    this.characters.update(characters, unseen, now, dt, fx, {
+    // Each layer on its own, so one that goes wrong leaves the others drawn (see guard.ts); a batch that was begun is always ended.
+    guarded('The 3D characters', () => this.characters.update(characters, unseen, now, dt, fx, {
       // A monster that is after someone faces them while it stands.
       targetOf: (character) => {
         const target = character.monster?.targetId === undefined ? undefined : everyone.get(character.monster.targetId)
         return target?.position
       },
-    }, localTeam)
+    }, localTeam))
 
     this.lights.begin()
     this.effectPaint.begin()
@@ -245,15 +247,15 @@ export class WorldRenderer3D implements GameRenderer {
       characters: everyone,
       models: this.characters,
     }
-    this.effectsLayer.update(entities, effectContext)
-    this.characterFx.update(characters, this.characters.takeReleases(), effectContext)
+    guarded('The 3D effects', () => this.effectsLayer.update(entities, effectContext))
+    guarded('The 3D character effects', () => this.characterFx.update(characters, this.characters.takeReleases(), effectContext))
     this.effectPaint.end()
     this.effectLight.end()
     this.lights.end()
 
     this.paint.begin()
     this.light.begin()
-    this.overlays.update({
+    guarded('The 3D overlays', () => this.overlays.update({
       now,
       characters,
       unseen,
@@ -269,18 +271,20 @@ export class WorldRenderer3D implements GameRenderer {
       debug: this.debug,
       ...(frame.debugPath ? { debugPath: frame.debugPath } : {}),
       walls: this.ground.walls,
-    }, this.paint, this.light)
+    }, this.paint, this.light))
     this.paint.end()
     this.light.end()
 
-    this.glow.update(dt)
-    this.puff.update(dt)
-    this.renderer.render(this.scene, this.camera)
+    guarded('The 3D particles', () => {
+      this.glow.update(dt)
+      this.puff.update(dt)
+    })
+    guarded('Rendering the 3D world', () => this.renderer.render(this.scene, this.camera))
 
     // The names, bars and numbers, over where the models now are on screen.
-    this.nameplates.update(characters, frame.localCharacterId, frame.localAttackCooldown, now, unseen)
-    this.numbers.update(characters, now)
-    this.rewards.update(frame.rewards ?? [], now)
+    guarded('The nameplates', () => this.nameplates.update(characters, frame.localCharacterId, frame.localAttackCooldown, now, unseen))
+    guarded('The damage numbers', () => this.numbers.update(characters, now))
+    guarded('The kill rewards', () => this.rewards.update(frame.rewards ?? [], now))
   }
 
   destroy(): void {

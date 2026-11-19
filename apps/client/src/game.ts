@@ -49,6 +49,7 @@ import { createScoreboardView } from './ui/scoreboard-view.ts'
 import { createShopView } from './ui/shop-view.ts'
 import { decodeSnapshot } from './snapshot-codec.ts'
 import { spriteFileKey, spriteOverridesFrom } from './sprite-overrides.ts'
+import { guarded, reportOnce } from './guard.ts'
 
 type GameOptions = {
   container: HTMLElement
@@ -707,6 +708,7 @@ export async function startGame({
   // The only raw messages the server sends are gzipped snapshots. They are unzipped one at a time, so
   // two that arrive together are still applied in the order they came.
   let snapshotQueue: Promise<void> = Promise.resolve()
+  // (One that fails to apply is told and skipped: the chain goes on, or every snapshot after it would be dropped too.)
   channel.onRaw((data) => {
     snapshotQueue = snapshotQueue.then(async () => {
       let decoded: unknown
@@ -724,7 +726,7 @@ export async function startGame({
       }
       if (!applySnapshot(parsed.data).applied) return
       onStatus('Game state synchronized.')
-    })
+    }).catch((error: unknown) => reportOnce('A snapshot from the server', error))
   })
 
   reliableMessenger.listenFor('game:order', 'game:order-delivery-ack', (data) => {
@@ -838,7 +840,7 @@ export async function startGame({
     const seenEntities = sight.visibleEntities(allEntities)
     // The attacks that went off or landed this frame, heard from where the champion is (or the camera, while it is dead). Only what the
     // team sees is heard.
-    if (sounds.audible) {
+    if (sounds.audible) guarded('The sounds', () => {
       const listener = local && !local.dead ? local.position : cameraCenter
       const heard = {
         now,
@@ -853,8 +855,8 @@ export async function startGame({
         sounds.play(cue.sound[cue.part], { ...placement, gain: placement.gain * (cue.sound.level ?? 1) }, cue.delay)
       }
       for (const cue of abilitySounds.update(heard)) sounds.play(cue.recipe, placeSound(cue.at, listener, cue.own), cue.delay)
-    }
-    world.update({
+    })
+    guarded('Drawing the world', () => world.update({
       now,
       // What is not seen is not drawn, nor are its names and bars: the darkness is over everything else.
       characters: seenCharacters,
@@ -877,10 +879,19 @@ export async function startGame({
       // The setting is in percent of the marker's own size.
       lockMarkerScale: settings.attackMarkerSize / 100,
       ...(inspected ? { selectedId: inspected.id } : {}),
+    }))
+    guarded('The inspect panel', () => {
+      const inspection = inspected ? gameState.getInspection(inspected, now) : undefined
+      inspect.update(inspection ? inspectView(inspection) : undefined)
     })
-    const inspection = inspected ? gameState.getInspection(inspected, now) : undefined
-    inspect.update(inspection ? inspectView(inspection) : undefined)
     app.canvas.style.cursor = hovered ? 'crosshair' : ''
+    guarded('The HUD', () => updateHud(now, local, dead, mode))
+    guarded('The mode display', () => modeHud.update(mode, local ? { id: local.id, team: local.team } : undefined, endedAtSeconds ?? gameState.getGameSeconds(now)))
+    guarded('The scoreboard', () => scoreboard.update(gameState.getLeaderboard(), gameState.getKillFeed(now)))
+  }
+
+  // The abilities, health, level, stats and items along the bottom, and the shop.
+  const updateHud = (now: number, local: ReturnType<ClientGameState['getCharacters']>[number] | undefined, dead: boolean, mode: ReturnType<ClientGameState['getModeView']>): void => {
     // The cooldowns refresh every frame so they fill smoothly.
     const progress = gameState.getLocalProgress(now)
     const stats = gameState.getLocalStats(now)
@@ -913,18 +924,17 @@ export async function startGame({
         (slot) => (abilityKeys[slot] === undefined ? String(slot + 1) : keyLabel(abilityKeys[slot])),
       ),
     })
-    modeHud.update(mode, local ? { id: local.id, team: local.team } : undefined, endedAtSeconds ?? gameState.getGameSeconds(now))
-    scoreboard.update(gameState.getLeaderboard(), gameState.getKillFeed(now))
   }
 
+  // Each step on its own, so one that goes wrong is skipped for this frame and the rest still happen (see guard.ts).
   app.ticker.add(() => {
     if (!started || disconnected) return
     const now = performance.now()
-    debugOverlay.frame(now, () => gameState.getDebugInfo())
-    giveHeldCommand(now)
-    castBuffered(now)
-    resumeSteering(now)
-    drawFrame(now)
+    guarded('The diagnostics', () => debugOverlay.frame(now, () => gameState.getDebugInfo()))
+    guarded('A held command', () => giveHeldCommand(now))
+    guarded('A buffered cast', () => castBuffered(now))
+    guarded('Steering', () => resumeSteering(now))
+    guarded('Drawing the frame', () => drawFrame(now))
   })
 
   return () => {

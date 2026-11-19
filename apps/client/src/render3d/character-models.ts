@@ -1,12 +1,13 @@
 import { AdditiveBlending, Group, Mesh, MeshBasicMaterial, OctahedronGeometry } from 'three'
 import { getTeam, type Vector2 } from '../../../../packages/shared/src/index.ts'
 import type { RenderedCharacter } from '../game-state.ts'
+import { guarded } from '../guard.ts'
 import { AIRBORNE_LIFT, INVISIBLE_ALPHA } from '../render/character-layer.ts'
 import { EMPOWERING, GROUND_MARKS } from './character-fx.ts'
 import { layoutCorpse } from '../render/corpse.ts'
 import { layoutStackPips } from '../render/stack-pips.ts'
 import { GolemModel, SlimeModel, WolfModel } from './models/creatures.ts'
-import { HumanoidModel } from './models/humanoid.ts'
+import { championFigure, HumanoidModel } from './models/humanoid.ts'
 import { championLook } from './models/looks.ts'
 import { RELEASE_SECONDS, type FxContext, type Model } from './models/model.ts'
 import { CoreModel, HealingZoneModel, StructureModel, TurretModel } from './models/structures.ts'
@@ -111,7 +112,8 @@ export class CharacterModels3D {
       actor.model.dispose()
       this.actors.delete(id)
     }
-    for (const character of everyone) {
+    // Each on its own: one whose model goes wrong is left as it was, and the rest are still drawn (see guard.ts).
+    for (const character of everyone) guarded(`The model of ${character.champion.id}`, () => {
       const actor = this.actors.get(character.id) ?? this.add(character)
       const { model } = actor
       const position = character.position
@@ -196,7 +198,7 @@ export class CharacterModels3D {
       this.updatePips(actor, character, t, seenNow && !character.dead)
       this.updateStars(actor, character, t, seenNow && !character.dead && character.stunned)
       if (seenNow && !character.dead) this.statusEffects(actor, character, fx, dt)
-    }
+    })
   }
 
   dispose(): void {
@@ -341,6 +343,6 @@ function buildModel(character: RenderedCharacter, vision: VisionShading): Model 
     if (id === 'wolf') return new WolfModel(vision, radius)
     return radius >= 36 ? new GolemModel(vision, radius) : new WolfModel(vision, radius)
   }
-  return new HumanoidModel(vision, radius, championLook(character.champion), id)
+  return championFigure(vision, radius, championLook(character.champion), id)
 }
 

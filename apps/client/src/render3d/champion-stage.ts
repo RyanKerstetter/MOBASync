@@ -17,7 +17,8 @@ import {
   WebGLRenderer,
 } from 'three'
 import type { Champion } from '../../../../packages/shared/src/index.ts'
-import { HumanoidModel } from './models/humanoid.ts'
+import { guarded } from '../guard.ts'
+import { championFigure, type HumanoidModel } from './models/humanoid.ts'
 import { championLook } from './models/looks.ts'
 import { RELEASE_SECONDS } from './models/model.ts'
 import { VisionShading } from './vision-shading.ts'
@@ -62,7 +63,7 @@ function glowTexture(): CanvasTexture {
 }
 
 function championModel(vision: VisionShading, champion: Champion): HumanoidModel {
-  const model = new HumanoidModel(vision, champion.radius, championLook(champion), champion.id)
+  const model = championFigure(vision, champion.radius, championLook(champion), champion.id)
   // In a game a champion is about 3.6 times its radius tall; here every one is drawn at about 1.8 (times its look's `tall`), so the
   // camera is the same for all of them, and a broad or a tall champion still shows as broad or tall.
   model.root.scale.multiplyScalar(0.5 / champion.radius)
@@ -157,7 +158,7 @@ export class ChampionStage {
       this.frame = requestAnimationFrame(tick)
       const dt = Math.min(0.1, (now - this.last) / 1000)
       this.last = now
-      this.draw(dt)
+      guarded('The champion select stage', () => this.draw(dt))
     }
     this.frame = requestAnimationFrame(tick)
   }
@@ -230,17 +231,23 @@ export function drawChampionPortraits(champions: readonly Champion[], size: numb
       renderer.forceContextLoss()
       return
     }
-    const model = championModel(vision, champion)
-    // A tall champion is framed by its face all the same.
-    const tall = championLook(champion).tall
-    model.root.position.y = (1 - tall) * 1.4
-    model.pose({ t: 0.8, dt: 0, moving: false, speed: 0, dead: false, deadFor: 0, stunned: false })
-    model.root.rotation.y = 0.32
-    scene.add(model.root)
-    renderer.render(scene, camera)
-    onPortrait(champion.id, renderer.domElement.toDataURL('image/png'))
-    model.root.removeFromParent()
-    model.dispose()
+    // One that cannot be drawn is left without a portrait, and the rest are still drawn.
+    guarded(`The portrait of ${champion.id}`, () => {
+      const model = championModel(vision, champion)
+      try {
+        // A tall champion is framed by its face all the same.
+        const tall = championLook(champion).tall
+        model.root.position.y = (1 - tall) * 1.4
+        model.pose({ t: 0.8, dt: 0, moving: false, speed: 0, dead: false, deadFor: 0, stunned: false })
+        model.root.rotation.y = 0.32
+        scene.add(model.root)
+        renderer.render(scene, camera)
+        onPortrait(champion.id, renderer.domElement.toDataURL('image/png'))
+      } finally {
+        model.root.removeFromParent()
+        model.dispose()
+      }
+    })
     requestAnimationFrame(next)
   }
   requestAnimationFrame(next)
