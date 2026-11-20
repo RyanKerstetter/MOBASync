@@ -22,6 +22,8 @@ const OWN_STACKS: Array<[key: string, color: string]> = [
   ['plating', '#9fb0c3'],
   // Monk's Flurry: the autos left, three at the most, a warm orange. They are the carrier's own, whoever gave them.
   ['flurry', '#ff7a45'],
+  // The Grenadier primed: his next ability is, until he throws it. Ember orange.
+  ['primed', '#ff9a2e'],
 ]
 // Marks other champions place on it, read by them:
 const MARKS: Array<[key: string, color: string]> = [

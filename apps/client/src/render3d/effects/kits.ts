@@ -44,7 +44,7 @@ import { glowMaterial, ShotHeight, Visual, type EffectContext } from './visual.t
 
 // ---------------------------------------------------------------------------------------------- helpers
 
-type Point3 = { x: number; y: number; z: number }
+export type Point3 = { x: number; y: number; z: number }
 
 // Light let out in every direction from a point.
 export function burst(ctx: EffectContext, at: Point3, options: { count: number; speed: number; color: Color; colorEnd?: Color; size: number; life: number; up?: number; gravity?: number; puff?: boolean; alpha?: number; spread?: number }): void {
@@ -74,24 +74,24 @@ export function burst(ctx: EffectContext, at: Point3, options: { count: number; 
 }
 
 // How high a lobbed shot is: up in an arc over its flight, highest half way.
-function lobHeight(entity: RenderedEntity, peak: number): number {
+export function lobHeight(entity: RenderedEntity, peak: number): number {
   if (entity.lifetimeTicks === undefined) return 30
   return 14 + Math.sin(Math.PI * entity.progress) * peak
 }
 
 // The way it is flying, as a turn about the vertical.
-function headingOf(entity: RenderedEntity): number {
+export function headingOf(entity: RenderedEntity): number {
   const v = entity.velocity
   if (Math.hypot(v.x, v.y) > 1e-6) return yawToward(v.x, v.y)
   const f = entity.facing ?? { x: 1, y: 0 }
   return yawToward(f.x, f.y)
 }
 
-const lit = (css: string, params: Partial<{ emissive: string; emissiveIntensity: number; metalness: number; roughness: number }> = {}): MeshStandardMaterial =>
+export const lit = (css: string, params: Partial<{ emissive: string; emissiveIntensity: number; metalness: number; roughness: number }> = {}): MeshStandardMaterial =>
   new MeshStandardMaterial({ color: css, roughness: params.roughness ?? 0.6, metalness: params.metalness ?? 0, ...(params.emissive ? { emissive: params.emissive, emissiveIntensity: params.emissiveIntensity ?? 1 } : {}) })
 
 // A shot: a model that flies where its entity is, at shot height or in a lob, turned the way it goes, with a trail.
-abstract class ShotVisual extends Visual {
+export abstract class ShotVisual extends Visual {
   protected readonly height: ShotHeight | undefined
   protected readonly body = new Group()
   protected last?: Point3
@@ -1286,7 +1286,7 @@ function saplingGeometry(seed: number): { wood: BufferGeometry; leaves: BufferGe
 // ---------------------------------------------------------------------------------------------- shapes
 
 // A star of `points` points, flat in its own XY, `depth` thick.
-function starGeometry(outer: number, inner: number, points: number, depth: number): BufferGeometry {
+export function starGeometry(outer: number, inner: number, points: number, depth: number): BufferGeometry {
   const shape = new Shape()
   for (let index = 0; index <= points * 2; index += 1) {
     const turn = index / (points * 2) * Math.PI * 2 - Math.PI / 2

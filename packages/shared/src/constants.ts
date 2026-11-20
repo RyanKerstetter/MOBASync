@@ -56,10 +56,14 @@ export const GAME_STRUCTURE_EJECT_DEPTH = 0.5
 // otherwise, the tiles of the map.
 export const GAME_ART_SCALE = 3
 export const GAME_TPS = 60
+// How many ticks before a champion's own dash ends it can act again: cast, or start an attack, while the dash carries it the rest of the way, so the end of a dash is not
+// time spent waiting. A dash shorter than this can be acted out of from its first step. Not a jump (a dash over a set time, which comes down when it comes down), and not
+// one that is done to a champion (a pull, a knock back), which holds it to the end. 0 is none.
+export const GAME_DASH_FREE_TICKS = 6
 // How much faster (or slower) than they are written everything walks: every champion's and every monster's move speed, and what an item adds to it, is multiplied by this, in
 // the one place a walking speed is worked out (`walkingSpeed`, in stats.ts). 1 leaves the game as it is written; 1.25 is a quarter faster. It is for tuning the feel of the
 // game without touching a champion, a monster or an item. Dashes, blinks, knockbacks and shots are not walking and have speeds of their own, so they do not change with it.
-export const GAME_MOVE_SPEED_MULTIPLIER = 1.12
+export const GAME_MOVE_SPEED_MULTIPLIER = 1.08
 // A burning character takes its burn's damage on every tick that is a multiple of this, so twice a
 // second. Whole numbers of health only, so a burn lands in chunks rather than a fraction per tick.
 export const GAME_BURN_PULSE_TICKS = GAME_TPS / 2

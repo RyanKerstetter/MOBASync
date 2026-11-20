@@ -80,7 +80,8 @@ export class AbilitySoundDirector {
     for (const entity of frame.entities) {
       if (entity.id.startsWith(ATTACK_SOURCE_PREFIX)) continue
       present.add(entity.id)
-      const sounds = ENTITY_SOUNDS[entity.defId]
+      // (A primed throw of the Grenadier's sounds as the plain one does.)
+      const sounds = ENTITY_SOUNDS[entity.defId] ?? ENTITY_SOUNDS[entity.defId.replace(/-primed$/, '')]
       const visible = frame.visibleEntityIds.has(entity.id)
       const own = entity.ownerId === frame.localCharacterId
       const hits = entity.hitIds.length
@@ -100,7 +101,7 @@ export class AbilitySoundDirector {
       if (present.has(id)) continue
       this.entities.delete(id)
       // Gone before its time, having struck no one yet that was heard: it struck someone as it went.
-      if (entity.seen && !entity.struck && entity.progress < STRUCK_BEFORE) play(ENTITY_SOUNDS[entity.defId]?.hit, entity.at, entity.own)
+      if (entity.seen && !entity.struck && entity.progress < STRUCK_BEFORE) play((ENTITY_SOUNDS[entity.defId] ?? ENTITY_SOUNDS[entity.defId.replace(/-primed$/, '')])?.hit, entity.at, entity.own)
     }
     this.primed = true
     return cues

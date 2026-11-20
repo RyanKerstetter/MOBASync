@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { guarded } from '../apps/client/src/guard.ts'
 import { DETAILS } from '../apps/client/src/render3d/models/detail/index.ts'
+import { GRAPHICS_PRESET_NAMES, GRAPHICS_PRESETS } from '../apps/client/src/render/graphics-quality.ts'
+import { cutFor } from '../apps/client/src/render3d/models/detail/shapes.ts'
 import { championFigure, HumanoidModel } from '../apps/client/src/render3d/models/humanoid.ts'
 import { CHAMPION_LOOKS } from '../apps/client/src/render3d/models/looks.ts'
 import type { PoseInput } from '../apps/client/src/render3d/models/model.ts'
@@ -37,13 +39,15 @@ function errorsWhile(run: () => void): unknown[] {
   return told
 }
 
-for (const [id, look] of Object.entries(CHAMPION_LOOKS)) {
-  test(`${id}'s model can be built, posed every way, outlined, faded, empowered and taken away`, () => {
+// With each preset's graphics: cut and lit as the preset says (see graphics-quality.ts), as it is built in a game.
+for (const [id, look] of Object.entries(CHAMPION_LOOKS)) for (const preset of GRAPHICS_PRESET_NAMES) {
+  test(`${id}'s model can be built, posed every way, outlined, faded, empowered and taken away, on the ${preset} preset`, () => {
     const champion = champions.get(id)
     assert.ok(champion, `${id} is a champion`)
     const told = errorsWhile(() => {
       // Built as it is, not through `championFigure`, which would build the plain figure in place of a detailed one that fails.
-      const model = new HumanoidModel(new VisionShading(), champion.radius, look, id)
+      const graphics = GRAPHICS_PRESETS[preset]
+      const model = cutFor(graphics.models, () => new HumanoidModel(new VisionShading(graphics), champion.radius, look, id))
       POSES.forEach((pose, frame) => model.pose({ ...pose, t: frame / 10 }))
       model.setOutline(true)
       model.setOutline(false)
@@ -97,4 +101,54 @@ test('what goes wrong in a guarded step is told once, however often it goes wron
   })
   assert.equal(after, 5)
   assert.equal(told.length, 1)
+})
+
+// ---------------------------------------------------------------------------- how much is drawn
+
+// Triangles and meshes of a model, as drawn.
+function cost(model: { root: { traverseVisible(visit: (object: unknown) => void): void } }): { triangles: number; meshes: number } {
+  let triangles = 0
+  let meshes = 0
+  model.root.traverseVisible((object) => {
+    const mesh = object as { isMesh?: boolean; geometry?: { index: { count: number } | null; getAttribute(name: string): { count: number } } }
+    if (!mesh.isMesh || !mesh.geometry) return
+    meshes += 1
+    triangles += (mesh.geometry.index?.count ?? mesh.geometry.getAttribute('position').count) / 3
+  })
+  return { triangles, meshes }
+}
+
+// (Every champion built in detail: one with no detailed build is the plain figure, cut the same on every preset.)
+const DETAILED = Object.entries(CHAMPION_LOOKS).filter(([, look]) => look.detail !== undefined)
+
+test('each preset down from High draws every champion built in detail with fewer triangles, and in no more meshes', () => {
+  for (const [id, look] of DETAILED) {
+    const champion = champions.get(id)
+    assert.ok(champion)
+    const built = (['high', 'medium', 'low'] as const).map((preset) => championFigure(new VisionShading(GRAPHICS_PRESETS[preset]), champion.radius, look, id))
+    const [high, medium, low] = built.map(cost)
+    assert.ok(medium.triangles < high.triangles, `${id}: ${medium.triangles} triangles on Medium, ${high.triangles} on High`)
+    assert.ok(low.triangles < medium.triangles, `${id}: ${low.triangles} triangles on Low, ${medium.triangles} on Medium`)
+    assert.ok(medium.meshes <= high.meshes && low.meshes <= medium.meshes, `${id}: ${low.meshes}, ${medium.meshes} and ${high.meshes} meshes`)
+    for (const model of built) model.dispose()
+  }
+})
+
+test("a champion's still pieces are drawn bent by its joints, not a mesh to each joint: far fewer meshes than joints with pieces on them", () => {
+  for (const [id, look] of DETAILED) {
+    const champion = champions.get(id)
+    assert.ok(champion)
+    const model = championFigure(new VisionShading(), champion.radius, look, id)
+    let skinned = 0
+    const bones = new Set<unknown>()
+    model.root.traverse((object) => {
+      const mesh = object as { isSkinnedMesh?: boolean; skeleton?: { bones: unknown[] } }
+      if (!mesh.isSkinnedMesh || !mesh.skeleton) return
+      skinned += 1
+      for (const bone of mesh.skeleton.bones) bones.add(bone)
+    })
+    assert.ok(skinned > 0, `${id} has skinned meshes`)
+    assert.ok(skinned < bones.size, `${id}: ${skinned} skinned meshes over ${bones.size} joints`)
+    model.dispose()
+  }
 })

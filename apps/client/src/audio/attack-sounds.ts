@@ -119,6 +119,32 @@ export const WEAPON_SOUNDS: Readonly<Record<Weapon, AttackSound>> = {
       tone(v, { type: 'triangle', freq: 230, freqEnd: 215, dur: 0.12, gain: 0.07, vibrato: { rate: 34, depth: 7 }, delay: 0.01 })
     },
   },
+  // A bow of crystal: the twang rings like glass, and the arrow strikes with a chime.
+  crystalBow: {
+    launch: (v) => {
+      tone(v, { type: 'triangle', freq: 220, freqEnd: 205, dur: 0.22, gain: 0.3 })
+      tone(v, { type: 'sine', freq: 1760, dur: 0.25, gain: 0.05, attack: 0.01 })
+      noise(v, { dur: 0.02, gain: 0.25, filter: 'highpass', freq: 3000 })
+      swish(v, { low: 2200, high: 4600, dur: 0.12, gain: 0.16, delay: 0.02 })
+    },
+    impact: (v) => {
+      metalHit(v, { gain: 0.12, pitch: 3100, ring: 0.3 })
+      thud(0.3, 200, 90)(v)
+    },
+  },
+  // A crossbow: the hard clack of the trigger and the prod slamming forward, and the bolt punching in.
+  crossbow: {
+    launch: (v) => {
+      noise(v, { dur: 0.03, gain: 0.45, filter: 'bandpass', freq: 1800, q: 2, attack: 0.001 })
+      tone(v, { type: 'triangle', freq: 150, freqEnd: 120, dur: 0.12, gain: 0.35 })
+      metalHit(v, { gain: 0.07, pitch: 1300, ring: 0.12, delay: 0.01 })
+      swish(v, { low: 1800, high: 3800, dur: 0.1, gain: 0.16, delay: 0.02 })
+    },
+    impact: (v) => {
+      woodHit(v, { gain: 0.6, size: 1.2 })
+      thud(0.45, 190, 70)(v)
+    },
+  },
   // A rifle: the crack and boom of the shot and its echo, and the slug hitting home.
   rifle: {
     launch: (v) => {

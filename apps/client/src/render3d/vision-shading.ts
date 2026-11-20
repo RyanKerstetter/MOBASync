@@ -1,6 +1,7 @@
 import { DataTexture, LinearFilter, RGBAFormat, UnsignedByteType, Vector2 as ThreeVector2, Vector3, type Material } from 'three'
 import type { VisionMask } from '../../../../packages/shared/src/index.ts'
 import { FOG_ALPHA, FogPicture } from '../render/fog.ts'
+import { GRAPHICS_PRESETS, type GraphicsOptions } from '../render/graphics-quality.ts'
 
 // How what the team cannot see looks in 3D: the same mask as the 2D darkness (`FogPicture`, which rounds off the steps of its
 // edge), but instead of a sheet laid over the world, every material looks it up where it is drawn, so a wall, a tree and the
@@ -16,6 +17,10 @@ export class VisionShading {
     uVisionTint: { value: new Vector3(0.012, 0.02, 0.05) },
   }
   private picture: { fog: FogPicture; texture: DataTexture; cell: number; revision: number } | undefined
+
+  // `graphics` is how much the world draws (see graphics-quality.ts), which everything that is shaded is told with this: how finely a model
+  // is cut, how it is lit, how the ground and the scenery are made. As High if not given.
+  constructor(readonly graphics: Readonly<GraphicsOptions> = GRAPHICS_PRESETS.high) {}
 
   update(mask: VisionMask | undefined): void {
     this.uniforms.uVisionOn.value = mask ? 1 : 0

@@ -12,18 +12,29 @@ export type AbilitySlotView = {
   ready: boolean
   // The time left, such as "3.4" or "12", and nothing when it is ready.
   secondsLeft: string
+  // The next ability is primed (the Grenadier's passive), so every slot glows with it.
+  primed: boolean
+  // How many charges it has, for one that spends charges that come back over time (the Sniper's scans, Blade's knives). Left out for any other.
+  charges?: number
+  // It cannot be cast for want of what it needs (the Hunter's full focus, a knife), so it is shown as on cooldown, grey; with a time only when what it
+  // needs comes back by itself.
+  locked: boolean
 }
 
 // One slot per ability on a key: what is on the key right now, how full its cooldown is, and how
 // long is left. A cooldown that is somehow longer than the ability's own (a refund can never make it
 // so, but a clock can be ahead) fills to nothing rather than below it.
 export function abilitySlotViews(
-  cooldowns: ReadonlyArray<{ slot: number; abilityId: string; ticksRemaining: number; cooldownTicks: number }>,
+  cooldowns: ReadonlyArray<{ slot: number; abilityId: string; ticksRemaining: number; cooldownTicks: number; primed?: boolean; charges?: number; locked?: boolean }>,
   keyLabel: (slot: number) => string,
 ): AbilitySlotView[] {
-  return cooldowns.map(({ slot, abilityId, ticksRemaining, cooldownTicks }) => {
+  return cooldowns.map(({ slot, abilityId, ticksRemaining, cooldownTicks, primed, charges, locked }) => {
     const remaining = Math.max(0, ticksRemaining)
-    const ready = remaining === 0
+    // Locked with nothing coming back by itself, it is all grey, with no time on it.
+    if (locked && remaining === 0) {
+      return { key: keyLabel(slot), abilityId, cooldownTicks, filled: 0, ready: false, secondsLeft: '', primed: primed === true, locked: true, ...(charges === undefined ? {} : { charges }) }
+    }
+    const ready = remaining === 0 && !locked
     const seconds = remaining / GAME_TPS
     return {
       key: keyLabel(slot),
@@ -33,6 +44,9 @@ export function abilitySlotViews(
       ready,
       // Under ten seconds a tenth is worth showing; above, whole seconds are plenty.
       secondsLeft: ready ? '' : seconds < 10 ? seconds.toFixed(1) : String(Math.ceil(seconds)),
+      primed: primed === true,
+      locked: locked === true,
+      ...(charges === undefined ? {} : { charges }),
     }
   })
 }

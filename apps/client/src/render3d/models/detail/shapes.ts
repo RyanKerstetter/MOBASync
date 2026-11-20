@@ -12,17 +12,37 @@ import {
 // (`cutFinely`). Fewer sides is fewer triangles drawn for each champion, for its shadow and for its outline.
 const GAME_EDGE = 0.045
 const FINE_EDGE = 0.008
+// With models on Medium and on Low (the graphics menu; see graphics-quality.ts), in a game: on Low a head is a few sides, and a ring or a
+// finger as few as it can be.
+const MEDIUM_EDGE = 0.07
+const COARSE_EDGE = 0.1
 let edge = GAME_EDGE
 
-// Builds what `build` makes with the shapes cut finely, for a champion seen up close.
-export function cutFinely<T>(build: () => T): T {
+function cutAt<T>(cut: number, build: () => T): T {
   const was = edge
-  edge = FINE_EDGE
+  edge = cut
   try {
     return build()
   } finally {
     edge = was
   }
+}
+
+// Builds what `build` makes with the shapes cut finely, for a champion seen up close.
+export function cutFinely<T>(build: () => T): T {
+  return cutAt(FINE_EDGE, build)
+}
+
+// Builds what `build` makes with the shapes cut coarsely, for models on Low.
+export function cutCoarsely<T>(build: () => T): T {
+  return cutAt(COARSE_EDGE, build)
+}
+
+// Builds what `build` makes with the shapes cut as the models setting says: as made for a game on High, and more coarsely on Medium and Low.
+export function cutFor<T>(models: 'high' | 'medium' | 'low', build: () => T): T {
+  if (models === 'low') return cutAt(COARSE_EDGE, build)
+  if (models === 'medium') return cutAt(MEDIUM_EDGE, build)
+  return build()
 }
 
 // The sides round a circle of radius `r`: as many as `most` at most, as few as `least` at least.

@@ -4,14 +4,18 @@ import {
   Group,
   Mesh,
   MeshBasicMaterial,
+  MeshLambertMaterial,
   MeshStandardMaterial,
+  SkinnedMesh,
   Vector3,
   type BufferGeometry,
   type ColorRepresentation,
   type Material,
+  type MeshLambertMaterialParameters,
   type MeshStandardMaterialParameters,
   type Object3D,
 } from 'three'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import type { ParticleSystem } from '../particles.ts'
 import type { VisionShading } from '../vision-shading.ts'
 
@@ -114,7 +118,8 @@ export abstract class Model {
         solid.push(object)
       })
       for (const part of solid) {
-        const edge = new Mesh(part.geometry, material)
+        // A part bent by the joints it is on (see `Plates` in detail/kit.ts) has an edge that is bent by them alike.
+        const edge = part instanceof SkinnedMesh ? skinnedLike(part, material) : new Mesh(part.geometry, material)
         edge.castShadow = false
         edge.receiveShadow = false
         part.add(edge)
@@ -130,14 +135,15 @@ export abstract class Model {
     const outlined = new Set(this.outline?.meshes)
     this.root.traverse((object) => {
       if (object instanceof Mesh && !outlined.has(object)) (object.geometry as BufferGeometry).dispose()
+      if (object instanceof SkinnedMesh) object.skeleton.dispose()
     })
     for (const material of this.owned) material.dispose()
     this.outline?.material.dispose()
   }
 
-  // A lit surface of this model.
+  // A lit surface of this model. With simple lighting (the graphics menu) it is lit simply (`lowSurface`).
   protected surface(color: ColorRepresentation, params: MeshStandardMaterialParameters = {}): MeshStandardMaterial {
-    const material = this.vision.shade(new MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.05, ...params }))
+    const material = this.vision.shade(this.vision.graphics.lighting === 'simple' ? lowSurface(color, params) : new MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.05, ...params }))
     material.userData.baseOpacity = params.opacity ?? 1
     this.owned.push(material)
     return material
@@ -152,6 +158,48 @@ export abstract class Model {
     return material
   }
 
+  // Merges the parts directly on `parent` that are made of the same material into one mesh each, as each mesh drawn costs the browser
+  // time every frame. Only for a group whose parts are never moved, turned, hidden or changed once made (a tower's stones): a part with
+  // parts of its own is left as it is.
+  protected mergeStill(parent: Object3D): void {
+    const groups = new Map<Material, Mesh[]>()
+    for (const child of parent.children) {
+      if (!(child instanceof Mesh) || child instanceof SkinnedMesh || Array.isArray(child.material) || child.children.length > 0) continue
+      const group = groups.get(child.material) ?? []
+      group.push(child)
+      groups.set(child.material, group)
+    }
+    for (const [material, parts] of groups) {
+      if (parts.length < 2) continue
+      const pieces = parts.map((part) => {
+        part.updateMatrix()
+        const piece = (part.geometry as BufferGeometry).clone().applyMatrix4(part.matrix)
+        if (!piece.index) piece.setIndex(Array.from({ length: piece.getAttribute('position').count }, (_, index) => index))
+        for (const name of Object.keys(piece.attributes)) if (name !== 'position' && name !== 'normal' && name !== 'uv') piece.deleteAttribute(name)
+        return piece
+      })
+      if (pieces.some((piece) => !piece.hasAttribute('uv'))) for (const piece of pieces) piece.deleteAttribute('uv')
+      const merged = mergeGeometries(pieces, false)
+      for (const piece of pieces) piece.dispose()
+      if (!merged) continue
+      for (const part of parts) {
+        part.removeFromParent()
+        ;(part.geometry as BufferGeometry).dispose()
+      }
+      this.part(parent, merged, material, 0, 0, 0, parts.some((part) => part.castShadow))
+    }
+  }
+
+  // `mergeStill` on every joint of the model: for a model whose parts only ever move with the joint they are on (a wolf's legs swing,
+  // and the paws on them swing with them).
+  protected mergeStillOnEveryJoint(): void {
+    const joints: Object3D[] = []
+    this.root.traverse((object) => {
+      if (!(object instanceof Mesh)) joints.push(object)
+    })
+    for (const joint of joints) this.mergeStill(joint)
+  }
+
   // A mesh of this model that casts and takes shadows, added to `parent`, at a place.
   protected part(parent: Object3D, geometry: BufferGeometry, material: Material, x = 0, y = 0, z = 0, shadow = true): Mesh {
     const mesh = new Mesh(geometry, material)
@@ -161,6 +209,27 @@ export abstract class Model {
     parent.add(mesh)
     return mesh
   }
+}
+
+// A copy of a skinned part in another material, on the same skeleton, for putting on the part (its place is the part's own).
+function skinnedLike(part: SkinnedMesh, material: Material): SkinnedMesh {
+  const copy = new SkinnedMesh(part.geometry, material)
+  copy.bind(part.skeleton, part.bindMatrix)
+  if (part.boundingSphere) copy.boundingSphere = part.boundingSphere.clone()
+  return copy
+}
+
+// A surface lit simply, for simple lighting: diffuse light only, with no shine, which is much cheaper to draw on weak graphics. It takes what
+// a lit surface is made with (its colour, glow, picture, see-through-ness, sides, facets) and leaves what it has no use for (how rough and
+// how metal it is). It is handed back as a lit surface, since the rest of a model sets nothing on it that this has not got, or that
+// matters if it is lost.
+export function lowSurface(color: ColorRepresentation, params: MeshStandardMaterialParameters = {}): MeshStandardMaterial {
+  const { roughness: _roughness, metalness: _metalness, envMap: _envMap, envMapIntensity: _envMapIntensity, roughnessMap: _roughnessMap, metalnessMap: _metalnessMap, ...kept } = params
+  const material = new MeshLambertMaterial({ color, ...kept } as MeshLambertMaterialParameters)
+  // Metal shows little of its colour in diffuse light (the rest of its look is its shine, which this has not got), so without darkening
+  // polished steel would be white.
+  material.color.multiplyScalar(1 - 0.65 * Math.min(1, params.metalness ?? 0))
+  return material as unknown as MeshStandardMaterial
 }
 
 // A smooth ease from 0 to 1.

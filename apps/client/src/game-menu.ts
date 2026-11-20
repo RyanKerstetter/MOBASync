@@ -11,6 +11,15 @@ import {
   UNCAPPED_FPS,
 } from './game-settings.ts'
 import { EFFECT_KEYS, type EffectKey } from './render/effect-settings.ts'
+import {
+  GRAPHICS_CHOICES,
+  GRAPHICS_KEYS,
+  GRAPHICS_PRESET_NAMES,
+  GRAPHICS_PRESETS,
+  presetOf,
+  type GraphicsOptions,
+  type GraphicsPreset,
+} from './render/graphics-quality.ts'
 import { RENDERER_KINDS, type RendererKind } from './render/renderer-kind.ts'
 import { element } from './ui/dom.ts'
 
@@ -56,6 +65,52 @@ export const CAST_MODE_LABELS: Readonly<Record<CastMode, string>> = {
 
 // What each way of drawing the world is called in the graphics menu.
 export const RENDERER_LABELS: Readonly<Record<RendererKind, string>> = { '3d': '3D', '2d': '2D' }
+
+// What each graphics preset is called in the graphics menu.
+export const GRAPHICS_PRESET_LABELS: Readonly<Record<GraphicsPreset, string>> = { low: 'Low', medium: 'Medium', high: 'High' }
+
+// Each graphics setting in the graphics menu, in its order there: its name, a line on what it does, and what each of its values is called.
+export const GRAPHICS_ROWS: { [K in keyof GraphicsOptions]: { label: string; description?: string; values?: Record<string, string> } } = {
+  shadows: { label: 'Shadows', values: { high: 'High', low: 'Low', off: 'Off' } },
+  smoothEdges: { label: 'Smooth edges', description: 'Anti-aliasing. Takes effect in full next game.' },
+  resolution: { label: 'Resolution', description: 'High is sharper on high-density screens.', values: { high: 'High', standard: 'Standard' } },
+  dynamicResolution: { label: 'Dynamic resolution', description: 'Lowers the resolution while the frame rate drops.' },
+  lighting: { label: 'Lighting', description: 'Simple has no shine.', values: { detailed: 'Detailed', simple: 'Simple' } },
+  spellLights: { label: 'Spell lights', description: 'Spells light up the ground around them.' },
+  ground: { label: 'Ground', values: { textured: 'Textured', plain: 'Plain' } },
+  scenery: { label: 'Scenery', description: 'Trees, rocks and bushes. Low keeps only the trees by the open ground.', values: { high: 'High', medium: 'Medium', low: 'Low' } },
+  grass: { label: 'Grass' },
+  models: { label: 'Model detail', values: { high: 'High', medium: 'Medium', low: 'Low' } },
+  particles: { label: 'Particles', values: { full: 'Full', reduced: 'Reduced', minimal: 'Minimal' } },
+}
+
+// Whether a graphics setting is on or off (a switch), and not one with values of its own (a choice).
+function isGraphicsSwitch(key: keyof GraphicsOptions): boolean {
+  return typeof GRAPHICS_CHOICES[key][0] === 'boolean'
+}
+
+// The row for one graphics setting: a switch for one that is on or off, and a choice for one with values of its own.
+function graphicsRow<K extends keyof GraphicsOptions>(
+  key: K,
+  get: () => Readonly<GraphicsOptions>,
+  set: (graphics: GraphicsOptions) => void,
+): MenuItem {
+  const row = GRAPHICS_ROWS[key]
+  const change = (value: GraphicsOptions[K]): void => set({ ...get(), [key]: value })
+  const described = row.description ? { description: row.description } : {}
+  const values = GRAPHICS_CHOICES[key] as unknown as readonly GraphicsOptions[K][]
+  if (typeof values[0] === 'boolean') {
+    return { kind: 'toggle', label: row.label, ...described, get: () => get()[key] as boolean, set: (on) => change(on as GraphicsOptions[K]) }
+  }
+  return {
+    kind: 'choice',
+    label: row.label,
+    ...described,
+    options: values.map((value) => ({ value: String(value), label: row.values?.[String(value)] ?? String(value) })),
+    get: () => String(get()[key]),
+    set: (value) => change(value as GraphicsOptions[K]),
+  }
+}
 
 // What a frame rate on the graphics menu says: the number, or that there is no limit.
 export const frameRateLabel = (fps: number): string => (fps === UNCAPPED_FPS ? 'Uncapped' : `${fps} fps`)
@@ -104,6 +159,9 @@ export function menuTabs(actions: {
   // Whether the world is drawn in 3D or 2D. Left out when it cannot be changed.
   getRenderer?: () => RendererKind
   setRenderer?: (kind: RendererKind) => void
+  // How much the 3D world draws, setting by setting (see graphics-quality.ts). Left out when it cannot be changed.
+  getGraphics?: () => Readonly<GraphicsOptions>
+  setGraphics?: (graphics: GraphicsOptions) => void
   // How loud the game's sounds are, in percent. Left out when the page cannot make sound.
   getSoundVolume?: () => number
   setSoundVolume?: (volume: number) => void
@@ -131,6 +189,24 @@ export function menuTabs(actions: {
   // How the world is drawn, when the page can change it.
   const getRenderer = actions.getRenderer
   const setRenderer = actions.setRenderer
+  // How much the 3D world draws, when the page can change it: a preset, which sets every setting under it, and each setting on its own. With a
+  // setting changed from every preset's, no preset is lit.
+  const getGraphics = actions.getGraphics
+  const setGraphics = actions.setGraphics
+  const quality: MenuSection[] = getGraphics && setGraphics
+    ? [{
+      title: 'Quality',
+      items: [{
+        kind: 'choice',
+        label: 'Preset',
+        description: presetOf(getGraphics()) ? 'Low is for integrated graphics and school computers.' : 'Custom: changed below.',
+        options: GRAPHICS_PRESET_NAMES.map((name) => ({ value: name, label: GRAPHICS_PRESET_LABELS[name] })),
+        get: () => presetOf(getGraphics()) ?? '',
+        set: (value) => setGraphics({ ...GRAPHICS_PRESETS[value as GraphicsPreset] }),
+      // The settings with values of their own together, and then the switches together.
+      }, ...[...GRAPHICS_KEYS.filter((key) => !isGraphicsSwitch(key)), ...GRAPHICS_KEYS.filter(isGraphicsSwitch)].map((key): MenuItem => graphicsRow(key, getGraphics, setGraphics))],
+    }]
+    : []
   const view: MenuSection[] = getRenderer && setRenderer
     ? [{
       title: 'View',
@@ -171,7 +247,7 @@ export function menuTabs(actions: {
     {
       id: 'graphics',
       label: 'Graphics',
-      sections: [...view, {
+      sections: [...view, ...quality, {
         title: 'Frame rate',
         items: [{
           kind: 'choice',
@@ -315,6 +391,8 @@ export function createGameMenu({ container, tabs, footer }: GameMenuOptions) {
   container.append(overlay)
 
   let currentTab: string | undefined
+  // The page drawn last, and whose it is, for where it was scrolled to.
+  let shownPage: { tab: string | undefined; element: HTMLElement } | undefined
 
   // A button of the menu. Each control carries a key that says which it is, so the one that has the keyboard still has it when the menu is drawn again.
   const button = (key: string, className: string, ...children: Array<Node | string>): HTMLButtonElement => {
@@ -423,19 +501,44 @@ export function createGameMenu({ container, tabs, footer }: GameMenuOptions) {
     strip.setAttribute('role', 'tablist')
     strip.setAttribute('aria-orientation', 'vertical')
 
+    // Each section's rows in order, with the switches that come one after another kept together in a block of their own (two across, where there
+    // is room), so they read as one set and not as rows among the choices.
+    const rowsOf = (section: MenuSection): HTMLElement[] => {
+      const made: HTMLElement[] = []
+      let switches: HTMLElement[] = []
+      const endSwitches = (): void => {
+        if (switches.length > 0) made.push(element('div', 'game-menu-switches', ...switches))
+        switches = []
+      }
+      for (const item of section.items) {
+        const drawn = row(item, `${tab?.id}/${section.title ?? ''}/${item.label}`, render)
+        if (item.kind === 'toggle') {
+          switches.push(drawn)
+          continue
+        }
+        endSwitches()
+        made.push(drawn)
+      }
+      endSwitches()
+      return made
+    }
     const body = element('div', 'game-menu-page', ...(tab?.sections ?? []).map((section) => element(
       'div',
       'game-menu-section',
       ...(section.title ? [element('h4', '', section.title)] : []),
-      ...section.items.map((item) => row(item, `${tab?.id}/${section.title ?? ''}/${item.label}`, render)),
+      ...rowsOf(section),
     )))
     body.setAttribute('role', 'tabpanel')
+    // A long page scrolls, and is drawn again at the same place after a change, not back at its top. (Another tab starts at its top.)
+    const scrolled = shownPage && shownPage.tab === tab?.id ? shownPage.element.scrollTop : 0
+    shownPage = { tab: tab?.id, element: body }
 
     // The tabs run down the left, with what is under them whichever is open (Leave game) right after them, so it stays where it is as pages of different heights are opened
     // beside them; the page is on the right.
     const bottom = footer().map((item) => row(item, `footer/${item.label}`, render))
     const side = element('div', 'game-menu-side', strip, ...(bottom.length > 0 ? [element('div', 'game-menu-footer', ...bottom)] : []))
     panel.replaceChildren(element('h3', '', 'Menu'), element('div', 'game-menu-layout', side, body), element('p', 'game-menu-hint', 'Press Escape to close.'))
+    body.scrollTop = scrolled
 
     if (focused !== undefined) {
       for (const control of panel.querySelectorAll<HTMLElement>('[data-menu-key]')) {

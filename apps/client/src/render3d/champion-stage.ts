@@ -18,10 +18,11 @@ import {
 } from 'three'
 import type { Champion } from '../../../../packages/shared/src/index.ts'
 import { guarded } from '../guard.ts'
+import { GRAPHICS_PRESETS, type GraphicsOptions } from '../render/graphics-quality.ts'
 import { cutFinely } from './models/detail/shapes.ts'
-import { championFigure, type HumanoidModel } from './models/humanoid.ts'
+import { championModel } from './models/champion-model.ts'
 import { championLook } from './models/looks.ts'
-import { RELEASE_SECONDS } from './models/model.ts'
+import { RELEASE_SECONDS, type Model } from './models/model.ts'
 import { VisionShading } from './vision-shading.ts'
 
 // Champion select's 3D: the picked champion standing on a lit pedestal and turning slowly (it can be dragged round), and a portrait of
@@ -63,9 +64,10 @@ function glowTexture(): CanvasTexture {
   return texture
 }
 
-function championModel(vision: VisionShading, champion: Champion): HumanoidModel {
+function stagedModel(vision: VisionShading, champion: Champion, fine = true): Model {
   // Seen up close here, so cut finely (see shapes.ts).
-  const model = cutFinely(() => championFigure(vision, champion.radius, championLook(champion), champion.id))
+  const build = (): Model => championModel(vision, champion)
+  const model = fine ? cutFinely(build) : build()
   // In a game a champion is about 3.6 times its radius tall; here every one is drawn at about 1.8 (times its look's `tall`), so the
   // camera is the same for all of them, and a broad or a tall champion still shows as broad or tall.
   model.root.scale.multiplyScalar(0.5 / champion.radius)
@@ -76,11 +78,11 @@ export class ChampionStage {
   private readonly renderer: WebGLRenderer
   private readonly scene = new Scene()
   private readonly camera = new PerspectiveCamera(28, 1, 0.1, 50)
-  private readonly vision = new VisionShading()
+  private readonly vision: VisionShading
   private readonly ring: Mesh<RingGeometry, MeshBasicMaterial>
   private readonly glow: Mesh<CircleGeometry, MeshBasicMaterial>
   private readonly underLight = new PointLight('#ffffff', 6, 4)
-  private model: HumanoidModel | undefined
+  private model: Model | undefined
   private shownId: string | undefined
   private pickedAt = -Infinity
   private yaw = 0
@@ -89,9 +91,12 @@ export class ChampionStage {
   private clock = 0
   private drag: { x: number; yaw: number } | undefined
 
-  constructor(private readonly canvas: HTMLCanvasElement) {
-    this.renderer = new WebGLRenderer({ canvas, antialias: true, alpha: true })
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+  // As the graphics settings say (see graphics-quality.ts): its edges smoothed or not, drawn at the screen's density or at one pixel to the
+  // page's, and the champion lit as in a game, and cut finely only with models on High (on Medium and Low, as it is in a game).
+  constructor(private readonly canvas: HTMLCanvasElement, private readonly graphics: Readonly<GraphicsOptions> = GRAPHICS_PRESETS.high) {
+    this.vision = new VisionShading(graphics)
+    this.renderer = new WebGLRenderer({ canvas, antialias: graphics.smoothEdges, alpha: true })
+    this.renderer.setPixelRatio(graphics.resolution === 'high' ? Math.min(window.devicePixelRatio, 2) : 1)
     this.renderer.toneMapping = ACESFilmicToneMapping
     this.renderer.toneMappingExposure = 1.1
     this.renderer.setClearColor(0x000000, 0)
@@ -137,7 +142,7 @@ export class ChampionStage {
     this.shownId = champion.id
     this.model?.dispose()
     this.model?.root.removeFromParent()
-    this.model = championModel(this.vision, champion)
+    this.model = stagedModel(this.vision, champion, this.graphics.models === 'high')
     this.scene.add(this.model.root)
     const accent = championLook(champion).accent
     this.ring.material.color.set(accent)
@@ -235,7 +240,7 @@ export function drawChampionPortraits(champions: readonly Champion[], size: numb
     }
     // One that cannot be drawn is left without a portrait, and the rest are still drawn.
     guarded(`The portrait of ${champion.id}`, () => {
-      const model = championModel(vision, champion)
+      const model = stagedModel(vision, champion)
       try {
         // A tall champion is framed by its face all the same.
         const tall = championLook(champion).tall

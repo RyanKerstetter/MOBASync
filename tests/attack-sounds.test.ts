@@ -99,7 +99,7 @@ test('a shot is heard as it leaves and as it strikes, from its own weapon', () =
   director.update(frame([archer]))
   const fired = director.update(frame([archer], [shot('p1:1', 1)]))
   assert.deepEqual(parts(fired), ['launch'])
-  assert.equal(fired[0]?.sound, WEAPON_SOUNDS.bow)
+  assert.equal(fired[0]?.sound, WEAPON_SOUNDS.crossbow)
   assert.deepEqual(director.update(frame([archer], [shot('p1:1', 1, { x: 90, y: 0 })])), [], 'nothing while it flies')
   const struck = director.update(frame([archer]))
   assert.deepEqual(parts(struck), ['impact'])

@@ -39,7 +39,7 @@ export function createDebugOverlay(container: HTMLElement) {
       const position = info.localPosition
       root.textContent = [
         `FPS: ${fps === undefined ? '—' : fps.toFixed(1)}`,
-        `RTT: ${info.lastRttMs === undefined ? '—' : `${info.lastRttMs.toFixed(1)} ms`} (avg ${info.averageRttMs.toFixed(1)} ms, n=${info.rttSampleCount})`,
+        `Ping: ${info.lastRttMs === undefined ? '—' : `${info.lastRttMs.toFixed(1)} ms`} (avg ${info.averageRttMs.toFixed(1)} ms, n=${info.rttSampleCount})`,
         `Tick: ${info.estimatedTick.toFixed(1)} (server ${info.serverTick}, update ${info.tickAnchorAgeMs.toFixed(0)} ms ago)`,
         `Pending orders: ${info.pendingOrderCount}${info.oldestPendingOrderAgeMs === undefined ? '' : ` (oldest ${info.oldestPendingOrderAgeMs.toFixed(0)} ms)`}`,
         `Local position: ${position ? `${position.x.toFixed(1)}, ${position.y.toFixed(1)}` : 'unavailable'}`,

@@ -315,14 +315,15 @@ export class ServerGameState {
 
   // Ends the game with its results, from the score as the commit tick has it: no late order can still change
   // it, so no one is told of a win that is then taken back.
-  private finish(reason: GameResult['reason']): GameResult | undefined {
+  // A forfeit is won by `forfeitedTo`, the one team left.
+  private finish(reason: GameResult['reason'], forfeitedTo?: number): GameResult | undefined {
     if (this.status !== GameStatusSchema.enum.running) return undefined
     const objective = this.simulator.at(this.simulator.commitTick).getObjective()
     const scores = objectiveScores(objective)
     const teams = [...new Set([...this.startTeams, ...Object.keys(scores).map(Number)])]
       .map((team) => ({ team, score: scores[String(team)] ?? 0 }))
       .sort((left, right) => right.score - left.score || left.team - right.team)
-    const winner = reason === 'limit' ? winningTeam(this.simulator.mode, objective) : leadingTeam(scores)
+    const winner = reason === 'limit' ? winningTeam(this.simulator.mode, objective) : reason === 'forfeit' ? forfeitedTo : leadingTeam(scores)
     const players = [
       ...[...this.simulator.characters.values()].filter((character) => !character.isNpc).map((character) => ({
         name: character.player?.name ?? `Player ${character.id}`,
@@ -381,7 +382,17 @@ export class ServerGameState {
     }
     if (this.status !== GameStatusSchema.enum.running) return undefined
     const objective = this.simulator.at(this.simulator.commitTick).getObjective()
-    return winningTeam(this.simulator.mode, objective) === undefined ? undefined : this.finish('limit')
+    if (winningTeam(this.simulator.mode, objective) !== undefined) return this.finish('limit')
+    // A game that began with players on more than one team is over, won by the last team, once every other team's players have left it.
+    // One that began with one team (a player practising alone, or a team on its own) goes on as long as anyone is in it.
+    const staying = this.teamsWithPlayers()
+    if (this.startTeams.length > 1 && staying.length === 1) return this.finish('forfeit', staying[0])
+    return undefined
+  }
+
+  // The teams that still have a player in the game (monsters and turrets are no one's).
+  private teamsWithPlayers(): number[] {
+    return [...new Set([...this.simulator.characters.values()].filter((character) => !character.isNpc).map((character) => character.team))]
   }
 
   getCharacterId(playerId: string): number | undefined {

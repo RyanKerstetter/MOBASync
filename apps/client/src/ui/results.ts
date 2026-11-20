@@ -24,6 +24,14 @@ export function resultHeadline(result: GameResult, localTeam: number | undefined
       ? { title: 'Victory', subtitle, tone: 'win' }
       : { title: 'Defeat', subtitle, tone: 'loss' }
   }
+  // Every other team left: the team that stayed wins.
+  if (result.reason === 'forfeit' && result.winner !== undefined) {
+    const subtitle = `${teamName(result.winner)} wins. Everyone else left.`
+    if (localTeam === undefined) return { title: `${teamName(result.winner)} wins`, subtitle, tone: 'neutral' }
+    return localTeam === result.winner
+      ? { title: 'Victory', subtitle, tone: 'win' }
+      : { title: 'Defeat', subtitle, tone: 'loss' }
+  }
   return {
     title: 'Game ended',
     subtitle: result.winner === undefined
@@ -42,6 +50,8 @@ export function scoreLine(result: GameResult): string {
 export function lobbySummary(result: GameResult): string {
   const how = result.reason === 'limit' && result.winner !== undefined
     ? `${teamName(result.winner)} won`
+    : result.reason === 'forfeit' && result.winner !== undefined
+    ? `${teamName(result.winner)} won, everyone else left`
     : result.winner !== undefined ? `ended early, ${teamName(result.winner)} ahead` : 'ended early'
   return `Last game: ${getGameMode(result.mode).name}, ${how} (${scoreLine(result)})`
 }

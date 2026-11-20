@@ -98,7 +98,7 @@ menu, aiming an ability, dying, or letting go of the button (anywhere) stops it.
 Space attacks the enemy closest to the mouse cursor, near or far, and not the one closest to your champion (one out of
 reach is walked up to, as when it is right-clicked). **B** is Back (see "Back", below).
 
-**WASD movement** (a switch in the menu's Controls tab, off to begin with) steers the champion with W, A, S and D, and moves
+**WASD movement** (a switch in the menu's Controls tab, on to begin with) steers the champion with W, A, S and D, and moves
 its abilities to Q, E and R (`abilityKeyCodes` in `apps/client/src/movement-keys.ts`; the HUD, the champion select and the
 status line show the keys in use). The page sends the direction the keys make, a unit vector, and not the keys: a `steer`
 order, given only when that direction changes (a key held down sends nothing more), and a stop (`{0, 0}`) when the last key
@@ -192,11 +192,45 @@ The world is drawn in **3D** by default, and can be drawn in **2D** as before: *
 escape menu switches between them while the game runs (and is remembered), and `?renderer=2d` in the address asks for 2D. Only how
 the world is drawn changes: the game, the HUD, the menus and what is drawn over each character (its name, bars and numbers) are the
 same in both. `game.ts` talks to either through `GameRenderer` (`render/game-renderer.ts`): it hands it the same `WorldFrame` each
-frame, tells it where the camera follows (`follow`), and asks it what point of the world is under the mouse (`screenToWorld`). The 2D
+frame, tells it where the camera follows (`follow`), and asks it what point of the world is under the mouse (`screenToWorld`: in 3D, the
+middle of a body the mouse is over, for picking whoever it points at) and what ground is (`screenToGround`, whatever stands in front of it,
+which an ability aimed at a point or in a direction goes to, so it is never snapped under an enemy: see `CastAim` in `game-state.ts`). The 2D
 renderer is `FlatRenderer`, the `WorldRenderer` it always was. The 3D one is `WorldRenderer3D` (`render3d/`), drawn with three.js on a
 canvas of its own under the Pixi canvas, which is see-through and goes on drawing the names, bars and numbers, each placed over the
 top of its character's model (the `anchor` of `CharacterLayer`, `FloatingNumberLayer` and `KillRewardLayer`; in 2D there is none).
 A browser that cannot draw in 3D is given 2D.
+
+**Quality.** How much the 3D world draws is the **Quality** section of the Graphics tab, under View: a **Preset** (High, Medium or Low, the high end first as on every setting), which
+sets every setting under it at once, and then each setting on its own (`GraphicsOptions` in `render/graphics-quality.ts`, kept as `graphics`,
+each setting read back on its own, so a damaged one costs only itself). With a setting changed from every preset's, no preset is lit and it
+says Custom. A browser that has stored nothing begins on Medium (`DEFAULT_GRAPHICS_PRESET`). Changing any of them makes the 3D world again
+(`switchRenderer('3d', true)` in `game.ts`), since most of it is fixed when it is made. They reach everything through `VisionShading.graphics`,
+which every model and the ground are given. The settings, and what Low, Medium and High set them to (`GRAPHICS_PRESETS`):
+
+| Setting | What it does | High | Medium | Low |
+|---|---|---|---|---|
+| Shadows | The sun's shadows: soft on a large map, rougher on a smaller one, or none | High | Low | Off |
+| Smooth edges | Anti-aliasing (for the names and bars over the world, from the next game) | On | On | Off |
+| Resolution | On a high-density screen, drawn sharper than one pixel to the page's (up to 1.5), or at one | High | Standard | Standard |
+| Dynamic resolution | The picture drawn smaller, and stretched, while the frame rate is short of the limit (or 60), down to half the pixels across, and sharper again when there is time (`adaptResolution`) | Off | On | On |
+| Lighting | Lit with shine, or simply (`MeshLambertMaterial`, by `lowSurface` in `models/model.ts`, with metal darkened as it would be without its reflections) | Detailed | Detailed | Simple |
+| Spell lights | Effects that light the ground round them (`LightPool`, each light costing every lit pixel on the screen) | On | Off | Off |
+| Ground | Painted from textures, or a colour at each point of a coarser grid, worked out as the shader would paint it from each texture's average colour (`groundColours` in `terrain-mesh.ts`) | Textured | Textured | Plain |
+| Scenery | Trees, boulders and bushes as made (High); a few simple shapes each, in larger tiles (Medium, `SCENERY_TILE`); or only the trees along the open ground (`BARE_FOREST_DEPTH`), each one four-sided spike, no boulders or wall shrubs, and the bushes (which hide champions) one shape each (Low) | High | Medium | Low |
+| Grass | Tufts of grass on the open ground | On | Off | Off |
+| Model detail | How many sides the champions' round shapes have (`cutFor` in `models/detail/shapes.ts`); champion select cuts them finely only on High | High | Medium | Low |
+| Particles | How many of the particles let go are made, a little bigger when fewer (`PARTICLES` in `world-renderer-3d.ts`) | Full | Reduced | Minimal |
+
+Whatever the settings, what costs every frame is kept down: a champion's still pieces are one skinned mesh for each kind of surface, bent by the joints
+they are on as its bones (`Plates` in `models/detail/kit.ts`), and plain surfaces that differ only in colour are one, each piece keeping its colour;
+a structure's stones and a wolf's parts are merged where they never move apart (`Model.mergeStill`); the shapes of a detailed model have as many
+sides as their size wants (`models/detail/shapes.ts`); the scenery is drawn a tile of the map at a time, so what is off the screen is not drawn; a
+character far off the screen, or hidden from the team, is not posed; cloth turns its normals as it bends rather than working them out again; and
+only living particles are moved, sent and drawn.
+
+**Zoom.** The mouse wheel zooms the camera in and out, in 3D and in 2D, from `MIN_ZOOM` (further out) to `MAX_ZOOM` (closer in), as a multiple of
+the usual view (`render/zoom.ts`, which are the numbers to change for more or less of either). The zoom is kept with the settings (`zoom`), and the
+3D sun's shadows reach further round when it is out.
 
 - **The camera** (`moba-camera.ts`) looks down from the south at 56 degrees with a narrow field of view, as other MOBAs do, with
   the champion a little below the middle of the screen. At the point it looks at, the screen shows as much of the world up and
@@ -733,6 +767,12 @@ player back to the lobby page (`POST /api/lobbies/:code/leave-game`) and the gam
 champion is taken out of it (a flag it carried is dropped), their kills stay on the results, and the lobby shows who is
 still `In game` and how many are playing. A game that has begun and has no one left in it **shuts down**, whether it
 was running or over, and the lobby can start another. A player who left cannot rejoin that game.
+
+A game that began with players on more than one team is **forfeited** once every team but one has no player left in it (they all
+left, or lost their connection): on the next tick it is over, won by the team that stayed (`reason: 'forfeit'`, in `advanceTick` in
+`apps/server/src/game-state.ts`), with the results screen as for any win ("Everyone else left."). With three teams or more it goes on
+while two still have players. A game that began with one team (a player practising alone, or a team on its own) is never forfeited:
+it goes on as long as anyone is in it.
 
 The leader's **End game** button in the lobby (`POST /api/lobbies/:code/end`) ends a running game for everyone, with the
 score as it stands (the team ahead wins, if one is, and that is kept on the lobby as the last result). Its point is to
@@ -1462,7 +1502,7 @@ Leave button is what leaves the lobby). It hangs from near the top of the screen
 opened beside them, and it remembers the tab it was left on while the page is open. On a narrow screen (under 36rem) there is no room for a column of
 tabs beside the page, and they go back to a row along the top.
 
-- **Graphics** has a **Frame rate** section (below) and an **Effects** section: a switch for each effect drawn over the ground, each off until it is turned on, and each
+- **Graphics** has a **View** section, with the **Renderer**, a **Quality** section, with the preset and each graphics setting (see "The 3D view"), a **Frame rate** section (below) and an **Effects** section: a switch for each effect drawn over the ground, each off until it is turned on, and each
   showing only itself. **Turret attack range** is the ring round each turret and core that shows how far it shoots
   (`TurretRangeLayer`), **Your attack range** is the ring round your own champion (`IndicatorLayer`; the ring of an ability being aimed is
   not part of it, and is always drawn) and **Shop glow** is the green tint over each shop (`ShopAreaLayer`). Under **Markers**, **Attack marker size** is a slider
@@ -1477,7 +1517,7 @@ tabs beside the page, and they go back to a row along the top.
   stunned, knocked up, feared or silenced) is held by the page and cast, aimed at the mouse, the frame it can be (`ClientGameState.castMustWait`, and the held cast
   in `game.ts`). A held cast is dropped after a little over a second, or on Escape. A cooldown or a missing target is not held: it is refused as before. With it
   off, such a press is refused at once. It changes only when the page sends the order, not what the game does with it. Under
-  **Moving**, **WASD movement** (off to begin with: see "WASD movement",
+  **Moving**, **WASD movement** (on to begin with: see "WASD movement",
   above) and two switches for what a walk does to a windup under way, **Moving doesn't cancel attacks** (off to begin with) and **Moving doesn't cancel abilities**
   (on to begin with), which are carried on each move and steer order as `keepAuto` and `keepCast`, so the simulator does the same on every peer (a windup that is kept
   is finished, and the walk begins after it; Back is ended by a walk whatever they say); and under **Targeting** the **click radius**, a slider
@@ -1511,7 +1551,7 @@ What a player chooses is kept in the browser by `game-settings.ts` (`loadSetting
 defaulted if missing or odd, each effect on its own, so settings stored before an effect was added keep what they had and have the new one off). A
 browser that has stored its settings before keeps what it stored, so a player who had the effects on sees them on until they turn them off: the defaults are for
 a browser that has stored nothing (or whose stored settings are cleared). A setting is
-a field of `GameSettings`: the cast mode, the `effects`, the `clickRadius`, the windup switches and `movementKeys`, `castKeepsAttack`, `bufferAbilities`, the `renderer`, the `soundVolume`, the `attackMarkerSize`, whether
+a field of `GameSettings`: the cast mode, the `effects`, the `clickRadius`, the windup switches and `movementKeys`, `castKeepsAttack`, `bufferAbilities`, the `renderer`, the `graphics` quality, the `zoom`, the `soundVolume`, the `attackMarkerSize`, whether
 the `diagnostics` are shown and the `maxFps`. The debug view is not kept, as P never was.
 The renderer is told by `WorldRenderer.effects`, which `game.ts` sets from the settings when the game begins and again each time a switch is turned.
 
@@ -1617,7 +1657,7 @@ list for its kind.
 Per-unit stats live on a `Champion` (`packages/shared/src/champions.ts`): max
 HP, move speed, radius, attack damage, speed, range, windup (a share of the attack, below), and an ability kit in
 Q/W/E/R slot order, plus a description and passive text for champion select.
-Characters have no shield of their own. There are sixteen champions: Cursebearer, Archer, Swordsman, Capricorn, Soldier, Grenadier, Trinketmaster, Ninja, Hammer, Chain, Cloak, Sage, Monk, Fire Mage, Aurel, and Ent (all below).
+Characters have no shield of their own. There are twenty-five champions: Cursebearer, Archer (shown as the Crossbowman), Swordsman, Capricorn, Soldier, Grenadier, Trinketmaster, Ninja, Hammer, Chain, Cloak, Sage, Monk, Fire Mage, Aurel, Ent, Hellhound, Stone, Blade, Vulture, Sanguine, Hunter, Crystal, Sorin and Sniper (all below).
 Health and damage are whole numbers in the hundreds. To add a champion, add another
 `new Champion({...})` to the list in `champions.ts`; the select screen lists every
 champion in that map, four across. Arena size, tick rate, and network timing remain global
@@ -1753,9 +1793,11 @@ Miasma, leaves a stationary field where it was cast that hastes the caster and s
 enemies inside. E, Hex, is a line shot that slows and adds two stacks; against a
 target already at five stacks it pops them for damage and haste instead.
 
-**Archer** is a mobile marksman. Its passive takes one second off Leap's cooldown with
+**Archer** (its id; it is called the **Crossbowman**, and fights with a crossbow) is a mobile marksman. Its passive takes one second off Leap's cooldown with
 every auto (`reduceCooldown('leap', ticks)`, which shares the event `refundCooldown`
-uses). Q, Leap, is a point-targeted dash of up to 280 px at 900 px/s. W, Focus, adds
+uses). Q, Leap, is a point-targeted dash of up to 120 px at 600 px/s. It resets the auto timer, so the next auto can go at once, and readies
+that auto (`empowerAttack`, for 5 seconds) to deal half its attack damage again (`LEAP_BONUS_SCALING`): 150% in all. It must be aimed at
+least `LEAP_MIN_RANGE` (80 px) away, so it cannot be cast on the spot for the reset and the bonus alone. W, Focus, adds
 40% attack speed and 120 attack range for four seconds. E, Snare, lobs a canister to
 the target point and leaves a small trap there (70 radius) for one second. The trap roots each
 enemy for 1.5 seconds the moment its body touches it, whether it lands on them or they walk into
@@ -1840,7 +1882,10 @@ elapsed share of its lifetime, plus the tick its expiry effects fire on). Its `o
 are the eruption itself: damage and slow on whoever is inside on that tick, then a short flash
 entity. Everything about the hit happens at expiry, which is why dodging works.
 
-**Soldier** is a ranged fighter with no passive: its auto is a plain attack. Q, Stim, costs 150 health and for five seconds
+**Soldier** is a ranged fighter. His passive gives him more attack speed the lower his health is (`lowHealthAttackSpeed`, worked out
+in `Champion.lowHealthSpeedBonus`): none at full health, and in proportion to the share he is missing, up to `SOLDIER_LOW_HEALTH_SPEED`
+(30%) and `SOLDIER_LOW_HEALTH_SPEED_PER_LEVEL` (1.15%) more for each level, as a share more attack speed with what his items give. His
+attack timing and the stats the HUD shows both include it. His auto is a plain attack. Q, Stim, costs 150 health and for five seconds
 adds 50% attack speed, 30% move speed, and 30% damage resistance. W, Bolt, is a piercing shot
 that slows and deals 80 plus a fifth of the target's missing health (`missingHealth()`, which
 reads `SimReader.healthOf` as the tick began). E, Medic, gives a 250 shield and summons a bot
@@ -1881,11 +1926,16 @@ position and velocity travel in checkpoints with the rest of the entity. The cli
 position from the frame, so the bot moves in whole-tick steps rather than being smoothed between
 ticks like the champions.
 
-**Grenadier** is a ranged bomber. Its passive is its `onAttackHit`: each auto puts a `sighted`
-marker on its target (shown as a red diamond), and the auto that would be the third on the same
-enemy within five seconds pops them instead and gives the Grenadier 50% move speed that fades to
-nothing over three seconds. The markers sit on each enemy separately, so the count is per enemy,
-and autos at others neither add to it nor reset it. All three abilities are lobs to a point, like
+**Grenadier** is a ranged bomber. His passive primes his next ability once he has gone quiet: `PRIMED_QUIET_TICKS` (12 s, less
+`PRIMED_QUIET_TICKS_PER_LEVEL`, a quarter of a second, for each level past the first) without dealing or taking damage or starting a cast
+(`activeTick` on his frame; `ChampionDef.primesWhenQuiet`, run in the simulator's `primeTheQuiet`). Then he carries a `primed`
+marker, which a fight does not take away: the next ability he throws spends it, and is thrown primed (a `-primed` entity, drawn and
+heard as the plain one is, at its size). A primed throw reaches `PRIMED_RANGE` times as far (`rangeWhenMarked`, which the cast check,
+the aim and the range ring all read through `castRangeFor`), bursts `PRIMED_SIZE` times as wide, does `PRIMED_DAMAGE` times the damage,
+holds what it stuns, blinds, slows or burns `PRIMED_CC` times as long (the fire lasts that much longer), and a grenade throws what it
+catches `PRIMED_LAUNCH` times as far. While he is primed every ability slot glows ember orange under a **Primed** tag, his launcher
+glows the same in 3D, and in 2D it is a pip. (His old passive, three autos on one enemy for move speed, is gone; its `sighted` marks
+are kept for the tests' own champions.) All three abilities are lobs to a point, like
 Snare: they take longer the farther they go (distance over speed, fitted to whole ticks) and do
 their work in the entity's `onExpire`, on the tick after they land. Q, Grenade, explodes in a
 110 radius. Everyone in the blast is thrown 150 px straight away from its centre, and enemies
@@ -1938,10 +1988,12 @@ again coming back, for damage and a slow. Only walking over the stick refunds Q.
 to silence its target for 1.5 s, and resets his auto timer. It has no windup and no target, so it
 goes between autos. E, Warp, blinks the Trinketmaster to the stick,
 wherever it is: it is there on the next frame, standing on the stick, so the stick is walked over and
-Q is left a second to wait. Warp has no range limit. With no stick anywhere, on the ground, in the air
+Q is left a second to wait. A stick still in the air on its way out (`stick-shot`, which Warp's `requires` takes as well through
+`orEntities`) is gone to just the same: he blinks to where it is in its flight and catches it, and Q is left as long to wait
+(`STICK_RESET_TICKS`) as for one walked over. Warp has no range limit. With no stick anywhere, on the ground, in the air
 going out, or in the air coming back, but Q still on cooldown, Warp has nothing to blink to and
-gives Q back instead, all of its cooldown, at the cost of its own; with Q ready and no stick out, or a
-stick in the air, it cannot be cast.
+gives Q back instead, all of its cooldown, at the cost of its own; with Q ready and no stick out, or only a
+stick coming back, it cannot be cast.
 
 This needed a few things the engine did not have. **Blink** is an effect, `blink(anchor)`, that moves
 a unit to a point as the tick ends: unlike a dash it has nothing in between, a root does not hold it,
@@ -1991,6 +2043,14 @@ through: true })`): the dash on the frame carries the flag, and while it does no
 apart from the dasher, where an ordinary dash (Leap, a knockback) shoves the characters in its way
 along. A dash can go `toward` an anchor (`ownEntity('shadow')`) instead of the aim, and its
 `maxDistance` can be `Infinity`, for a dash that goes all the way.
+
+A dash has as many ticks as its way takes at its speed, unheld (`endTick` on the frame's dash), and is over at the end of the last
+wherever it has got to: one held back by someone it shoves along stops there, and does not go on pushing (it once could take half as
+long again, with the champion unable to act). And the end of a dash is not time spent waiting: for the last `GAME_DASH_FREE_TICKS`
+ticks of a champion's own dash (`freeTick`), it can cast and start an attack while it is carried the rest of the way (`dashHolds` in the
+simulator, which the page's held casts ask too). Not a jump (a dash over a set time, such as Hammer Drop), which comes down when it
+comes down, and not a dash done to someone else (a pull, a knock back), which holds them to the end. The model stops running the
+moment its dash ends.
 
 A dash can also have effects of its own, run as it goes: `dash(..., { on: dashDef })` with a
 `DashDef` (`effects.ts`) of `onHit` (for each enemy the dasher's body reaches, with that enemy as the
@@ -2207,6 +2267,60 @@ he is healed as by a burst (the amount is worked out when the spore was planted)
 **runs out of time does not burst**: it is just gone. Spore plants a fresh one after it bursts the old, and its cooldown is a
 little shorter than a spore lasts, so Spore after Spore bursts each time. It is tested in `tests/ent.test.ts`.
 
+The nine newest champions are drawn as generic figures from their looks (`looks.ts`), without detailed models of their own, except the Hellhound, who is a hound on four legs
+(`models/hound.ts`, chosen in `models/champion-model.ts`). Their abilities' effects are in `render3d/effects/kits-melee.ts` and `kits-ranged.ts`, and they are tested in `tests/new-champions.test.ts`.
+
+**Hellhound** is a melee hunter who makes his prey bleed and runs it down. P: his autos make the enemy bleed (`HOUND_BLEED_KEY`, one marker at most: it is bleeding or it is not, with no stacks), his autos
+hit a bleeding enemy harder (`HOUND_BLEEDING_BONUS`), each hit on one speeds him after it for a moment (`HOUND_HASTE`, his chase), and it leaves a blood trail. Q, **Rake**, is up to three slashes,
+one cast at a time: the first stops on the first enemy it reaches, and a hit gives one more slash (two against an enemy already bleeding, which the first slash otherwise makes bleed). Each further
+slash is a recast within `RAKE_WINDOW_TICKS`, which winds up as the first does and cannot be begun until `RAKE_GAP_TICKS` after the slash before went off, and has to hit to give the next; the third hurts more and roots. Each slash leaves a mark of what it struck, only to be seen and heard: `rake-hit`, `rake-hit-bleed`
+on an enemy already bleeding, and `rake-final-hit` for the third. W, **Howl**, silences and slows every enemy in a cone (its `howl-wave` is only to be seen). E, **Pounce**, leaps to a point,
+hurting, slowing and making bleed the enemies landed on.
+
+**Stone** is a melee guardian. P: each of his abilities that puts crowd control on an enemy (a push, a slow, a root) shields him a little (`STONE_SHIELD`, more each level). Q, **Shove**, resets his
+auto and readies the next to hurt more and knock the enemy away. W, **Rampart**, dashes him to a teammate, slows the enemies round where he lands and shields them both; cast on himself it only slows and
+shields. E, **Tether**, is a line that catches the first champion it touches: an enemy is hurt and rooted, and he dashes behind it.
+
+**Blade** is a melee knife fighter. P: he gains a knife (`KNIFE_KEY`) every `KNIFE_EVERY_TICKS`, up to `KNIFE_MAX`, starting with all of them (`ChampionDef.gainsOverTime`), and each makes his autos hit
+harder. The knives he has float in a ring over his head, for everyone who sees him, and their count is on his Q. Q, **Throw Knife**, needs a knife and spends it (`needsStacks`, so the page shows how many he has on the key, and the key as on cooldown until the next with none): thrown at a point, as far as it is
+aimed, it flies through every enemy in its way, hurting, slowing and **shredding** each (`SHRED_KEY`: his autos and abilities do `SHRED_BONUS` more for one, two or three shreds), and lies where it lands for
+`GROUND_KNIFE_TICKS`. W, **Blade Dash**, dashes to a point, cuts every enemy within `BLADE_DASH_RADIUS` of where he lands, and calls every lying knife back to him (`fromEachOwnEntity`), through whoever is in the way: the more knives
+hit one enemy the harder it is slowed (`RECALL_SLOW`), the fourth roots, and two on one enemy give the dash back. E, **Frenzy**, gives back two knives, and move and attack speed for a while.
+
+**Vulture** is a melee scavenger who marks his prey with carrion (`CARRION_KEY`). Q, **Spider Mine**, lays a mine near him after a long windup (`WINDUP_TICKS.placing`), which gives an enemy where it is
+aimed the time to step away. Everyone sees it for `MINE_SHOWN_TICKS`, and then it burrows and only his team does (`EntityDef.ownTeamOnly` with `afterTicks`). When an enemy steps on it, its spider
+springs out and runs that enemy down (a homing `mine-spider`, which gives up after `MINE_CHASE_TICKS`): it stuns an enemy that carries carrion and slows and marks one that does not, and whatever it reaches is
+revealed to his team (`REVEAL_KEY`) with sight round it for `MINE_REVEAL_TICKS`. W, **Carrion Strike**, resets his auto and readies the next: on a marked enemy it pops the mark and roots, on any other it hurts,
+slows and marks. E, **Swoop**, dashes onto an enemy; against a marked one it reaches farther (`rangeAgainst` with a marker) and slows, and spends the mark.
+
+**Sanguine** is a ranged blood mage. P: each hit of her abilities heals her a little (`SANGUINE_HEAL`). Q, **Blood Shot**, is a glob of blood shot at once (no windup) through every enemy in a line, which gives her
+a little speed when it hits; one cast gives two more within `BLOODSHOT_WINDOW_TICKS`, each `BLOODSHOT_GAP_TICKS` after the last, all as strong as the first. W, **Blood Pact**, ties an enemy to her: it hurts at
+once and every `PACT_PULSE_TICKS`, breaks if they are ever farther apart than `PACT_RANGE`, and if it holds all of `PACT_TICKS` it bursts for a lot and roots. E, **Coagulate**, is a shield that bursts into
+shards round her when it is broken (by damage, or by her recasting the key); one that simply runs out does not burst (`EntityDef.onStayEnd`).
+
+**Hunter** is a ranged archer who builds focus. P: each auto gives a focus stack (`FOCUS_KEY`, up to `FOCUS_MAX`), each `FOCUS_ATTACK_SPEED` more attack speed, and at the most `FOCUS_RANGE` more reach
+(`attackRangeBonus` with `named`, so it is renewed and not stacked). Q, **Volley**, can only be cast at full focus (`AbilityDef.needsStacks`): it resets his auto, and his next `VOLLEY_SHOTS` autos each loose
+`VOLLEY_EXTRA` more arrows, as they land, at the enemies nearest the one hit, among those within his reach or `VOLLEY_NEAR` of it, each doing `VOLLEY_SHARE` of his auto. W, **Disengage**, shoots an arrow that roots
+the first enemy it hits, as he leaps back `DISENGAGE_LEAP` the other way. E, **Arrow Rain**, hurts and slows every enemy in a circle a moment after the cast (its `arrow-rain-impact` is only to be seen and heard).
+While he has too little focus for Volley, the page shows its key as on cooldown.
+
+**Crystal** is a ranged archer with a bow of crystal. P: every ability she casts resets her auto (`onCast: [resetAutoTimer()]`). Q, **Crystal Bolt**, cracks the first enemy it hits (`CRACK_KEY`); a hit gives a recast,
+**Shatter**, which hurts every cracked enemy by a share of the health it is missing (each bursting as `shatter-burst`). W, **Glide**, is a short dash. E, **Shardstorm**, readies her next `SHARD_SHOTS` autos: each does `SHARD_BONUS` more to
+what it hits and bursts into shards that do `SHARD_SPLASH` of her attack damage to every other enemy within `SHARD_RADIUS`.
+
+**Sorin** is a melee paladin of light. P: **light**, a resource (`ChampionDef.resource`) from none to `LIGHT_MAX`, which does not fill by itself: it comes `LIGHT_PER_AUTO` with each auto and
+`LIGHT_PER_KILL` with each champion killed. What would overfill it heals him (`LIGHT_OVERFLOW_HEAL` of his health a point: 5% light is 2% health). It is drawn as the bar under his health, with a line across it at what Dawnstep and Dawn Beam cost (`ChampionResourceDef.marks`). Q, **Dawn
+Beam**, is `unstoppable`: with `BEAM_COST` light he spends it on a beam down a long line, which hurts and slows every enemy in it and gives back `BEAM_REFUND` light for each, and on a shield; with less he
+only gains a smaller shield. W, **Smite**, resets his auto and readies the next `SMITE_SHOTS`: each hurts more and gives `SMITE_LIGHT` more light, and the last stuns (each leaves a `smite-hit` to be seen and
+heard, the last a `smite-final`). E, **Dawnstep**, dashes to a point and
+hurts the enemies where he lands; with `DAWNSTEP_COST` light he spends it and gets `DAWNSTEP_REFUND` of the cooldown back.
+
+**Sniper** is a ranged marksman. P: he sees `SNIPER_VISION_BONUS` farther than anyone (`ChampionDef.visionRange`). Q, **Steady Aim**, is held (`AbilityDef.held`): as the key goes down he starts drawing a
+bead, free to move, and as it comes up the page casts its recast, `steadyfire`, at the pointer, which shoots it. The longer he held, the farther and harder it hits, from the least to the most over
+`CHARGE_FULL_TICKS`, a step at a time (`CHARGE_BANDS`); it slows what it hits. Held for `CHARGE_HOLD_TICKS`, the page lets it go for him. W, **Tumble**, rolls to a point,
+**invulnerable** while he rolls. E, **Scan**, sweeps an area for a few seconds: his team sees into it (`EntityDef.sight`), and every enemy in it is **revealed** (`REVEAL_KEY`), invisible or in a bush, until a
+second after it leaves. He holds `SCAN_CHARGES` scans, gaining one every `SCAN_RECHARGE_TICKS` up to that (his `gainsOverTime`), and each cast spends one (`needsStacks`).
+
 The engine got a few things for them, each usable by any champion:
 
 - **Burns and bleeds by name.** `burn(dps, ticks, to, { named })` makes the burn the owner's one status of that name, whatever cast or entity lights it, so the patches of one trail, or every ability of a
@@ -2226,6 +2340,23 @@ The engine got a few things for them, each usable by any champion:
   the page both measure it.
 - **Gone means gone.** An entity that a cast or an attack has taken out of the world this tick (`removeEntities`: a fireball set off, a stick called back) does nothing more on that tick: it does not
   get to hit, be picked up or go off before it goes. So a fireball set off on the very tick it would have hit blows up once.
+- **A resource.** `ChampionDef.resource: { max, everyTicks?, onKill, overflowHeal, color, marks? }` gives a champion a number of its own in its frame (`GameFrameCharacter.resource`): it gains a point every
+  `everyTicks` (if it says; Sorin's does not) and `onKill` for each champion it kills, and `gainResource(amount)` / `spendResource(amount)` change it (a `resource` event), held between none and `max`; what would go over heals it,
+  `overflowHeal` of its most health a point. `resource()` reads it as an amount, and `SimReader.resourceOf` for a condition. The page draws it on the meter bar in `color`, with a line across it at each of `marks` (what its abilities cost), bright once it is reached.
+- **Stacks to cast.** `AbilityDef.needsStacks: { key, count }` lets an ability be cast only while the caster has that many of its own markers of `key` on itself; with fewer, the order is dropped as an unmet
+  `requires` is, and the page says why.
+- **Invulnerable.** `invulnerable(ticks)` gives the status `'invulnerable'`: while it lasts no damage, crowd control, burn, bleed, poison, spore or push from an enemy lands on the unit.
+- **Unstoppable windups.** The windup of an `unstoppable` ability is not cancelled by a stun, a knock-up, a fear or an interrupt: it goes off.
+- **Revealing.** A `REVEAL_KEY` marker an enemy has put on a unit lets that enemy's side aim at it while it is invisible, and the page draws it for that team, in a bush or the dark too
+  (`RenderedCharacter.revealedBy`). An entity with `sight` lets its owner's team see round it, and a champion with `visionRange` sees that far in place of `GAME_VISION_RANGE`.
+- **Ids per target.** Effects run once for each of several units that each spawn an entity have to give each its own id, or the second replaces the first (Volley's extra arrows do: `aimedAtSubject`, and
+  `perSubject` does it for anything).
+- **Held abilities.** `AbilityDef.held: { ticks, full, reach }` makes the key cast the ability as it goes down and its `recast` as it comes up, aimed where the pointer is then; nothing is aimed in between, a
+  click does not end it, and the page draws how far the recast would reach now (`reach` of the ticks held) on the way to its most (`CastPreview.charge`). The page lets it go after `ticks`.
+- **Seen, then hidden.** `EntityDef.ownTeamOnly: { afterTicks }` lets everyone see an entity for a moment before only its owner's team does (`hiddenFromOthers` in team-vision.ts).
+- **Marks of a hit.** An effect that only shows what struck what (a claw mark, a hammer of light) is a short `flash` entity laid on the subject (`hitMark`), which the page draws and sounds by its id.
+- **Charges on the key.** For an ability that `needsStacks` of the key its champion `gainsOverTime`, the HUD shows how many it has, and with none, the key as on cooldown until the next comes; one that
+  needs stacks gained any other way looks as on cooldown until it has them (`AbilityCooldown.charges` and `locked`).
 
 One key doing two things is the ability's `recast`. Stick names `recast: 'recall'`, and `recall` is an
 ability in full, with its own cooldown, that the key becomes while it can be cast. What can be cast

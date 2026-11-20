@@ -1,11 +1,12 @@
-import { abilityDefs, BACK_ABILITY_ID, beyondMinCastRange, castRangeAgainst, meetsRequirement, readyKey, withinCastRange, type AbilityDef } from './abilities.js'
+import { abilityDefs, BACK_ABILITY_ID, beyondMinCastRange, castRangeAgainst, castRangeFor, hasNeededStacks, meetsRequirement, readyKey, withinCastRange, type AbilityDef } from './abilities.js'
 import { boxTouchesCircle, clamp, DIRECTION_LENGTH_TOLERANCE, directionTo, distanceBetween, distanceToSegment, isValidSteerDirection, normalize } from './geometry.js'
 import { think, type AiBody, type AiOrder, type AiOther } from './ai.js'
-import { DEFAULT_CHAMPION_ID, getChampion, type Champion } from './champions.js'
+import { DEFAULT_CHAMPION_ID, getChampion, type Champion, type ChampionResourceDef } from './champions.js'
 import {
   GAME_BURN_PULSE_TICKS,
   GAME_CAST_ORIGIN_TOLERANCE,
   GAME_COLLISION_STIFFNESS,
+  GAME_DASH_FREE_TICKS,
   GAME_MONSTER_TEAM,
   GAME_RESPAWN_TICKS,
   GAME_RESPAWN_TICKS_PER_LEVEL,
@@ -15,6 +16,8 @@ import {
 } from './constants.js'
 import {
   areEnemies,
+  CROWD_CONTROL_KINDS,
+  REVEAL_KEY,
   ATTACK_SOURCE_PREFIX,
   getDashDef,
   getEntityDef,
@@ -268,6 +271,12 @@ export class CharacterTickSnapshot {
     return this.state.dash !== undefined
   }
 
+  // Whether a dash keeps it from acting (casting, starting an attack) on this tick: one under way, unless it is in the last few ticks of its own
+  // dash (see `GAME_DASH_FREE_TICKS`).
+  dashHolds(tick: number): boolean {
+    return dashHolds(this.state, tick)
+  }
+
   // Where the character is currently heading, whether walking or dashing. One that is steered is heading a little way along its direction from wherever it is.
   getMoveTarget(): Vector2 | undefined {
     if (this.state.dash) return { ...this.state.dash.target }
@@ -335,6 +344,16 @@ export class CharacterTickSnapshot {
 
   getMarkers(): Marker[] {
     return this.state.markers.map((marker) => ({ ...marker }))
+  }
+
+  // How much of its resource it has (`ChampionDef.resource`): 0 for none.
+  getResource(): number {
+    return this.state.resource ?? 0
+  }
+
+  // Whether it has the stacks of its own an ability `needsStacks` to be cast (see `hasNeededStacks`).
+  hasStacksFor(def: AbilityDef): boolean {
+    return hasNeededStacks(def, this.state.markers, this.state.characterId, this.tick)
   }
 
   // What a monster is up to: idle, after someone, or walking home. Nothing for a character that is not one.
@@ -427,6 +446,7 @@ class TickContext implements SimContext {
     speed: number
     through: boolean
     contact?: { defId: string; origin: Vector2; sourceId: string; orderId: string }
+    free: boolean
   }> = []
   readonly blinkWrites: Array<{ unitId: number; target: Vector2 }> = []
   readonly orderWrites: Array<{ unitId: number; order: CharacterOrder }> = []
@@ -492,6 +512,10 @@ class TickContext implements SimContext {
     return health ? { hp: health.hp, maxHp: health.maxHp } : undefined
   }
 
+  resourceOf(unitId: number): number {
+    return this.states.get(unitId)?.resource ?? 0
+  }
+
   statusesOn(unitId: number): Status[] {
     return (this.states.get(unitId)?.statuses ?? []).map((status) => ({ ...status }))
   }
@@ -534,6 +558,7 @@ class TickContext implements SimContext {
     options: {
       through?: boolean
       contact?: { defId: string; origin: Vector2; sourceId: string; orderId: string }
+      free?: boolean
     } = {},
   ): void {
     this.dashWrites.push({
@@ -541,6 +566,7 @@ class TickContext implements SimContext {
       target: { ...target },
       speed,
       through: options.through === true,
+      free: options.free === true,
       ...(options.contact ? { contact: { ...options.contact, origin: { ...options.contact.origin } } } : {}),
     })
   }
@@ -1004,7 +1030,11 @@ export class Simulator {
         const step = stepToward(prior.position, state.dash.target, state.dash.speed / GAME_TPS, radius, this.ground)
         const stopped = state.dash.through ? undefined : this.stoppedByStructure(prior.position, step, radius, previous)
         state.position = stopped ?? step
-        const finished = stopped !== undefined || (state.position.x === state.dash.target.x && state.position.y === state.dash.target.y)
+        // It is over where it meets a structure, on reaching its end, or on its last tick wherever it has got to (held back by someone it shoves along, it does
+        // not go on pushing).
+        const finished = stopped !== undefined
+          || (state.position.x === state.dash.target.x && state.position.y === state.dash.target.y)
+          || tick >= state.dash.endTick
         if (state.dash.contact) {
           dashSteps.push({ characterId, from: { ...prior.position }, contact: state.dash.contact, finished })
         }
@@ -1272,6 +1302,7 @@ export class Simulator {
       if (state.action && state.action.launchTick <= tick) state.action = undefined
     }
     const deaths = this.applyWrites(context, states, entities, tick)
+    this.primeTheQuiet(states, tick)
     this.anchorStructures(states)
     const objective = this.advanceObjective(previous, states, tick, deaths)
 
@@ -1281,6 +1312,48 @@ export class Simulator {
       entities,
       ...(objective ? { objective } : {}),
     }, context.events, deaths)
+  }
+
+  // Whether the two are of teams that fight each other (and are not one and the same).
+  private isEnemyOf(oneId: number, otherId: number): boolean {
+    const one = this.characters.get(oneId)
+    const other = this.characters.get(otherId)
+    return oneId !== otherId && one !== undefined && other !== undefined && areEnemies(one, other)
+  }
+
+  // A champion that is readied by going quiet (`ChampionDef.primesWhenQuiet`, the Grenadier) and has gone long enough without dealing or taking damage or starting
+  // a cast is readied: the marker goes on it, and stays until an ability spends it, fight or no fight.
+  private primeTheQuiet(states: ReadonlyMap<number, GameFrameCharacter>, tick: number): void {
+    for (const state of states.values()) {
+      // A champion with a resource that fills by itself (Sorin's light) gains a point of it every so often while it is alive.
+      const kind = this.characters.get(state.characterId)?.champion.resource
+      if (kind?.everyTicks && isAlive(state) && tick % kind.everyTicks === 0) addResource(state, kind, 1)
+      // A champion that gains a stack every so often (Blade's knives) gains one on each such tick of the game, up to its cap.
+      const gains = this.characters.get(state.characterId)?.champion.gainsOverTime
+      if (gains && isAlive(state) && tick % gains.everyTicks === 0 && state.markers.filter((marker) => marker.key === gains.key).length < gains.cap) {
+        state.markers = [...state.markers, {
+          id: `${state.characterId}:${gains.key}:${tick}`,
+          key: gains.key,
+          rootId: `${state.characterId}:${gains.key}`,
+          ownerId: state.characterId,
+          startTick: tick,
+          endTick: Number.MAX_SAFE_INTEGER,
+        }]
+      }
+      const primes = this.characters.get(state.characterId)?.champion.primesWhenQuiet
+      if (!primes || !isAlive(state) || state.markers.some((marker) => marker.key === primes.key)) continue
+      const quietFor = Math.max(1, primes.ticks - primes.ticksPerLevel * (levelOfState(state) - 1))
+      if (tick - (state.activeTick ?? 0) < quietFor) continue
+      state.markers = [...state.markers, {
+        id: `${state.characterId}:primed:${tick}`,
+        key: primes.key,
+        rootId: `${state.characterId}:primed`,
+        ownerId: state.characterId,
+        startTick: tick,
+        endTick: Number.MAX_SAFE_INTEGER,
+        cap: 1,
+      }]
+    }
   }
 
   // The hill, the flags or the kills after this tick, with everyone where the tick left them: the deaths it
@@ -1353,7 +1426,7 @@ export class Simulator {
         home: character.initialPosition,
         hp: state.health.hp,
         maxHp: state.health.maxHp,
-        busy: isWindingUp(state, tick) || state.dash !== undefined || isStunned(state.statuses),
+        busy: isWindingUp(state, tick) || dashHolds(state, tick) || isStunned(state.statuses),
         silenced: isSilenced(state.statuses),
         attacking: state.attackTarget?.targetId,
         moving: state.movement !== undefined,
@@ -1699,7 +1772,7 @@ export class Simulator {
     const targetState = target ? states.get(target.id) : undefined
     if (!target || !targetState || !areEnemies(character, target) || !isAlive(targetState) || !isAlive(state)) return
     // An enemy that cannot be seen cannot be gone after.
-    if (isInvisible(targetState.statuses)) return
+    if (isHiddenFromAim(targetState)) return
     if (target.structure && this.shieldedBy((id) => { const other = states.get(id); return other !== undefined && isAlive(other) }).has(target.id)) return
     state.attackTarget = { targetId: order.targetId, orderId: order.id }
     state.movement = undefined
@@ -1729,7 +1802,7 @@ export class Simulator {
       // A target that has gone, or is not the side the lock is for (an enemy, or for an ability made for allies, a teammate), or has gone out of sight (invisible: an
       // enemy only) is no longer one.
       const wrongSide = target !== undefined && (cast?.targetsAllies ? areEnemies(character, target) || target.structure : areEnemies(character, target) === false)
-      if (!target || !targetState || !isAlive(state) || !isAlive(targetState) || wrongSide || (!cast?.targetsAllies && isInvisible(targetState.statuses))) {
+      if (!target || !targetState || !isAlive(state) || !isAlive(targetState) || wrongSide || (!cast?.targetsAllies && isHiddenFromAim(targetState))) {
         state.attackTarget = undefined
         continue
       }
@@ -1740,10 +1813,10 @@ export class Simulator {
         state.movement = undefined
         continue
       }
-      if (isWindingUp(state, tick) || state.dash || isStunned(state.statuses)) continue
+      if (isWindingUp(state, tick) || dashHolds(state, tick) || isStunned(state.statuses)) continue
 
       const inReach = cast
-        ? withinCastRange(state.position, targetState.position, castRangeAgainst(cast, targetState.statuses))
+        ? withinCastRange(state.position, targetState.position, castRangeAgainst(cast, targetState.statuses, targetState.markers))
         : distanceBetween(state.position, targetState.position) <= character.champion.attackRangeWith(state.statuses, itemTotals(state.items).attackRange ?? 0)
       if (!inReach) {
         state.movement = { target: { ...targetState.position } }
@@ -1777,7 +1850,7 @@ export class Simulator {
     tick: number,
   ): void {
     // The windup is a share of the whole attack, so it is as long as the attack speed it has now makes it.
-    const launchTick = tick + character.champion.attackWindupTicksWith(state.statuses, levelOfState(state), itemTotals(state.items).attackSpeed ?? 0, itemAttackSpeedBonus(state.items))
+    const launchTick = tick + character.champion.attackWindupTicksWith(state.statuses, levelOfState(state), itemTotals(state.items).attackSpeed ?? 0, itemAttackSpeedBonus(state.items), state.health)
     state.action = {
       kind: 'attack',
       orderId: lock.orderId,
@@ -1802,7 +1875,7 @@ export class Simulator {
       && character.champion.hasAbility(def.id)
       && isAlive(state)
       && (!isWindingUp(state, tick) || isBacking(state, tick))
-      && !state.dash
+      && !dashHolds(state, tick)
       // An unstoppable ability (a cleanse) is cast through what would stop any other: a stun, a knock-up, a fear or a silence.
       && (!isStunned(state.statuses) || def.unstoppable === true)
       && (!isSilenced(state.statuses) || def.universal === true || def.unstoppable === true)
@@ -1813,17 +1886,20 @@ export class Simulator {
         (defId) => context.entitiesOf(character.id, defId).length > 0,
         (abilityId) => (state.cooldowns[abilityId] ?? 0) > tick,
       )
+      && hasNeededStacks(def, state.markers, character.id, tick)
       && (state.cooldowns[def.id] ?? 0) <= tick
       && distanceBetween(order.origin, state.position) <= GAME_CAST_ORIGIN_TOLERANCE
       && this.isValidCastTarget(character, def, order, states),
     )
     if (!valid || !def) return
+    // Starting a cast is being busy (see `activeTick`).
+    state.activeTick = tick
 
     // An ability aimed at an enemy out of its reach is not dropped: the character goes after the enemy, as it would to attack it, and casts on
     // reaching it (see `driveAttacks`). Walking anywhere else, or being told to attack, ends that.
     if (order.target.mode === 'unit') {
       const unitState = states.get(order.target.unitId)
-      if (unitState && !withinCastRange(order.origin, unitState.position, castRangeAgainst(def, unitState.statuses))) {
+      if (unitState && !withinCastRange(order.origin, unitState.position, castRangeAgainst(def, unitState.statuses, unitState.markers))) {
         state.attackTarget = { targetId: order.target.unitId, orderId: order.id, abilityId: def.id }
         state.movement = undefined
         return
@@ -1874,9 +1950,12 @@ export class Simulator {
     switch (target.mode) {
       case 'none':
         return true
-      case 'point':
-        return withinCastRange(order.origin, target.point, def.range)
+      case 'point': {
+        // Its reach can be longer while the caster carries the marker that lengthens it (`castRangeFor`).
+        const markers = states.get(character.id)?.markers ?? []
+        return withinCastRange(order.origin, target.point, castRangeFor(def, (key) => markers.some((marker) => marker.key === key)))
           && beyondMinCastRange(order.origin, target.point, def.minRange)
+      }
       case 'direction':
         return Math.abs(target.dir.x * target.dir.x + target.dir.y * target.dir.y - 1)
           <= DIRECTION_LENGTH_TOLERANCE
@@ -1893,7 +1972,7 @@ export class Simulator {
           && unitState
           && areEnemies(character, unit)
           && isAlive(unitState)
-          && !isInvisible(unitState.statuses),
+          && !isHiddenFromAim(unitState),
         )
       }
     }
@@ -1923,11 +2002,11 @@ export class Simulator {
     if (action.kind === 'attack') {
       // An attack whose target died or left (or went out of sight) during windup is cancelled, not spent.
       const targetState = states.get(action.targetId)
-      if (!this.characters.has(action.targetId) || !targetState || !isAlive(targetState) || isInvisible(targetState.statuses)) {
+      if (!this.characters.has(action.targetId) || !targetState || !isAlive(targetState) || isHiddenFromAim(targetState)) {
         state.action = undefined
         return
       }
-      state.nextAttackTick = action.startTick + character.champion.attackCooldownTicksWith(state.statuses, levelOfState(state), itemTotals(state.items).attackSpeed ?? 0, itemAttackSpeedBonus(state.items))
+      state.nextAttackTick = action.startTick + character.champion.attackCooldownTicksWith(state.statuses, levelOfState(state), itemTotals(state.items).attackSpeed ?? 0, itemAttackSpeedBonus(state.items), state.health)
       state.attackLaunchTick = tick
       // Striking shows an invisible attacker, before the blow (so what it does on being seen is in place for it).
       this.revealed(context, character, state, tick, action.orderId)
@@ -2044,7 +2123,10 @@ export class Simulator {
         entity.position = next
       }
       const position = entityPosAt(entity, tick)
-      if (def.stayWhile && !def.stayWhile(context, entitySource(entity, tick, 'stay', position))) continue
+      if (def.stayWhile && !def.stayWhile(context, entitySource(entity, tick, 'stay', position))) {
+        if (def.onStayEnd) runEffects(def.onStayEnd, context, entitySource(entity, tick, 'stay-end', position))
+        continue
+      }
       // Where the entity stops, for effects that care how much of its travel is left. A chaser's
       // path bends, so it has no such point.
       const travelEnd = entity.lifetimeTicks === undefined || def.homing
@@ -2314,11 +2396,13 @@ export class Simulator {
     for (const { unitId, status } of context.statusWrites) {
       const state = states.get(unitId)
       if (!state || !isAlive(state) || isStructure(unitId)) continue
+      // An untouchable unit (see `invulnerable`) takes no crowd control, burn, bleed, poison or spore from an enemy.
+      if (HARMFUL_KINDS.has(status.kind) && hasStatus(state.statuses, 'invulnerable') && this.isEnemyOf(status.ownerId, unitId)) continue
       // Reapplying the same provenance ID refreshes the status instead of stacking it.
       state.statuses = replaceById(state.statuses, status)
       // A stun (or a knock-up, which is one) interrupts a windup that has not launched yet; nothing is spent. So does a fear, which also makes it drop whoever it was going after
       // and where it was walking: it is running from someone now.
-      if ((status.kind === 'stun' || status.kind === 'airborne' || status.kind === 'fear') && state.action && state.action.launchTick > tick) state.action = undefined
+      if ((status.kind === 'stun' || status.kind === 'airborne' || status.kind === 'fear') && interruptible(state, tick)) state.action = undefined
       if (status.kind === 'fear') {
         state.attackTarget = undefined
         state.movement = undefined
@@ -2334,15 +2418,21 @@ export class Simulator {
       markedStates.add(state)
     }
     for (const state of markedStates) state.markers = settleStacks(state.markers)
-    for (const { unitId, target, speed, through, contact } of context.dashWrites) {
+    for (const { unitId, target, speed, through, contact, free } of context.dashWrites) {
       const state = states.get(unitId)
       const character = this.characters.get(unitId)
       if (!state || !character || !isAlive(state) || character.structure) continue
+      // A dash goes over walls, so it can end behind one, but not in one, and not in a structure: it lands on the nearest
+      // place the character can stand.
+      const end = this.standableSpot(target, character.champion.radius, states, state.position)
+      // It moves from the next tick, a step a tick, for as many ticks as its way takes unheld (at least one), and that is all the time it has.
+      const ticks = Math.max(1, Math.ceil(distanceBetween(state.position, end) / (speed / GAME_TPS) - 1e-9))
+      const endTick = tick + ticks
       state.dash = {
-        // A dash goes over walls, so it can end behind one, but not in one, and not in a structure: it lands on the nearest
-        // place the character can stand.
-        target: this.standableSpot(target, character.champion.radius, states, state.position),
+        target: end,
         speed,
+        endTick,
+        ...(free && GAME_DASH_FREE_TICKS > 0 ? { freeTick: Math.max(tick + 1, endTick - GAME_DASH_FREE_TICKS) } : {}),
         ...(through ? { through: true } : {}),
         ...(contact ? { contact: { ...contact, origin: { ...contact.origin }, hitIds: [] } } : {}),
       }
@@ -2352,9 +2442,16 @@ export class Simulator {
     for (const event of context.events) {
       if (event.type === 'damage') {
         const state = states.get(event.targetId)
+        // Both whoever did it and whoever took it have been in a fight (see `activeTick`).
+        for (const unitId of [event.ownerId, event.targetId]) {
+          const involved = states.get(unitId)
+          if (involved) involved.activeTick = tick
+        }
         // An ability's damage does nothing to a structure (an auto attack's id starts with `ATTACK_SOURCE_PREFIX`), and none does
         // anything while it is protected.
         if (isStructure(event.targetId) && (!event.id.startsWith(ATTACK_SOURCE_PREFIX) || shielded.has(event.targetId))) continue
+        // Nor does an enemy's to an untouchable unit (see `invulnerable`).
+        if (state && hasStatus(state.statuses, 'invulnerable') && this.isEnemyOf(event.ownerId, event.targetId)) continue
         if (state) {
           const hadHealth = (state.health?.hp ?? 0) > 0
           // What the items of whoever did it make of the hit before it lands (more damage, a share of the resistance not met), and what they do after it (heal,
@@ -2422,9 +2519,13 @@ export class Simulator {
       } else if (event.type === 'heal') {
         const state = states.get(event.unitId)
         if (state && !isStructure(event.unitId)) healCharacter(state, event.amount)
+      } else if (event.type === 'resource') {
+        const state = states.get(event.unitId)
+        const kind = this.characters.get(event.unitId)?.champion.resource
+        if (state && kind && isAlive(state)) addResource(state, kind, event.amount)
       } else if (event.type === 'interrupt') {
         const state = states.get(event.unitId)
-        if (state?.action && state.action.launchTick > tick) state.action = undefined
+        if (state && interruptible(state, tick)) state.action = undefined
       } else if (event.type === 'cap-cooldown') {
         const state = states.get(event.unitId)
         const readyTick = state?.cooldowns[event.abilityId]
@@ -2522,6 +2623,13 @@ export class Simulator {
       if (!killer?.champion.resetsCooldownsOnKill || !killerState || !isAlive(killerState) || !this.characters.get(death.victimId)?.player) continue
       for (const abilityId of killer.champion.castableAbilities()) delete killerState.cooldowns[abilityId]
     }
+    // A champion with a resource that a kill fills (Sorin's light) gains it on the tick it kills a champion (a player), if it is still standing.
+    for (const death of deaths) {
+      if (death.killerId === undefined || !this.characters.get(death.victimId)?.player) continue
+      const kind = this.characters.get(death.killerId)?.champion.resource
+      const killerState = states.get(death.killerId)
+      if (kind && kind.onKill > 0 && killerState && isAlive(killerState)) addResource(killerState, kind, kind.onKill)
+    }
     // A player who kills a monster is healed by a share of their own maximum health (`Monster.healOnKill`), on the tick of the kill and in the frame like what the kill pays, so a late
     // order that undoes the kill takes the heal back. It is the player the death names, and the maximum is the one they have now, after any level the kill gave them. One who has died
     // on the same tick, or is not a player, is healed by nothing.
@@ -2587,7 +2695,15 @@ export class Simulator {
       nextAttackTick: 0,
       cooldowns: {},
       statuses: [],
-      markers: [],
+      // A champion that gains stacks over time starts with as many as it says (Blade's knives).
+      markers: Array.from({ length: champion.gainsOverTime?.start ?? 0 }, (_, index) => ({
+        id: `${character.id}:${champion.gainsOverTime?.key}:start:${index}`,
+        key: champion.gainsOverTime?.key ?? '',
+        rootId: `${character.id}:${champion.gainsOverTime?.key}`,
+        ownerId: character.id,
+        startTick: 0,
+        endTick: Number.MAX_SAFE_INTEGER,
+      })),
       queuedOrders: [],
       // After the rest, which is the order a frame read back from a snapshot has its fields in (see `GameFrameCharacterSchema`).
       ...(character.player && this.hasGold ? { gold: GAME_STARTING_GOLD } : {}),
@@ -2655,7 +2771,9 @@ function levelOfState(state: GameFrameCharacter | undefined): number {
 
 // A character's stats at the level its frame has (see `Champion.statsAt`), with what the items it carries add to them (see items.ts).
 function statsOfState(character: SimCharacter | undefined, state: GameFrameCharacter | undefined): ChampionStats | undefined {
-  return character ? withStatBuffs(withItems(character.champion.statsAt(levelOfState(state)), state?.items), state?.statuses) : undefined
+  return character
+    ? withStatBuffs(withItems(character.champion.statsAt(levelOfState(state)), state?.items, undefined, character.champion.lowHealthSpeedBonus(levelOfState(state), state?.health)), state?.statuses)
+    : undefined
 }
 
 // A copy of what a frame's character carries, to change.
@@ -2857,6 +2975,13 @@ function clearActivity(state: GameFrameCharacter): void {
   delete state.wounds
 }
 
+// What an untouchable unit takes from no enemy (see `invulnerable`): crowd control, and the statuses that hurt.
+const HARMFUL_KINDS: ReadonlySet<Status['kind']> = new Set<Status['kind']>([...CROWD_CONTROL_KINDS, 'burn', 'poison', 'bleed', 'spore'])
+
+// Whether a character can be aimed at by its enemies: not while it is invisible, unless one of them has revealed it (a `REVEAL_KEY` marker that has not run out).
+const isHiddenFromAim = (state: GameFrameCharacter): boolean =>
+  isInvisible(state.statuses) && !state.markers.some((marker) => marker.key === REVEAL_KEY)
+
 // Whether any of the statuses is one of these kinds.
 export function hasStatus(statuses: readonly Status[], ...kinds: Array<Status['kind']>): boolean {
   return statuses.some((status) => kinds.includes(status.kind))
@@ -2961,6 +3086,12 @@ function isWindingUp(state: GameFrameCharacter, tick: number): boolean {
   return state.action !== undefined && tick < state.action.launchTick
 }
 
+// Whether a dash keeps the character from acting (casting, starting an attack) on this tick: one under way does, unless it is the last few ticks of
+// the character's own dash (`freeTick`, see `GAME_DASH_FREE_TICKS`), which it can act in while it is carried the rest of the way.
+function dashHolds(state: Pick<GameFrameCharacter, 'dash'>, tick: number): boolean {
+  return state.dash !== undefined && !(state.dash.freeTick !== undefined && tick >= state.dash.freeTick)
+}
+
 // Whether the character is channelling Back: a cast of it that has not gone off yet. Walking, attacking, casting something else, a stun or a fear, and taking damage
 // all end it, and it takes the character to its spawn when it goes off (see `BACK_ABILITY_ID`).
 function isBacking(state: GameFrameCharacter, tick: number): boolean {
@@ -3060,6 +3191,25 @@ function isPlainDeathmatch(setup: ModeSetup): boolean {
   return setup.kind === 'deathmatch' && setup.respawnTicks === undefined && setup.scoreLimit === undefined
 }
 
+// Whether the character is winding up something a stun, a fear or an interrupt can cancel: anything not yet launched, but the windup of an unstoppable ability
+// (`AbilityDef.unstoppable`), which goes off whatever is done to it.
+function interruptible(state: GameFrameCharacter, tick: number): boolean {
+  const action = state.action
+  if (!action || action.launchTick <= tick) return false
+  return action.kind !== 'cast' || abilityDefs.get(action.abilityId)?.unstoppable !== true
+}
+
+// Adds to a champion's resource (or takes from it, for less than 0), held between none and its most. What goes over the most heals it instead, `overflowHeal` of its
+// maximum health for each point (see `ChampionDef.resource`).
+function addResource(state: GameFrameCharacter, kind: ChampionResourceDef, amount: number): void {
+  const total = (state.resource ?? 0) + amount
+  const kept = Math.max(0, Math.min(kind.max, total))
+  if (kept > 0) state.resource = kept
+  else delete state.resource
+  const over = total - kept
+  if (over > 0 && kind.overflowHeal > 0 && state.health) healCharacter(state, Math.round(state.health.maxHp * kind.overflowHeal * over))
+}
+
 function cloneFrameCharacter(character: GameFrameCharacter): GameFrameCharacter {
   const clone: GameFrameCharacter = {
     ...character,
@@ -3074,6 +3224,8 @@ function cloneFrameCharacter(character: GameFrameCharacter): GameFrameCharacter 
       dash: {
         target: { ...character.dash.target },
         speed: character.dash.speed,
+        endTick: character.dash.endTick,
+        ...(character.dash.freeTick !== undefined ? { freeTick: character.dash.freeTick } : {}),
         ...(character.dash.through ? { through: true } : {}),
         ...(character.dash.contact
           ? {
@@ -3094,9 +3246,10 @@ function cloneFrameCharacter(character: GameFrameCharacter): GameFrameCharacter 
     markers: character.markers.map((marker) => ({ ...marker })),
     queuedOrders: character.queuedOrders.map(cloneOrder),
   }
-  // The tick of the last attack's hit, the experience, the gold and the items come last, in the order the schema has them, whenever in a frame's
+  // The last tick it was busy (`activeTick`), the tick of the last attack's hit, the experience, the gold and the items come last, in the order the schema has them, whenever in a frame's
   // life each was first set: a frame is the same data however it got there, and so it is the same text, which is what a frame computed and a frame
   // read back from a snapshot are compared as.
+  delete clone.activeTick
   delete clone.attackLaunchTick
   delete clone.xp
   delete clone.gold
@@ -3104,6 +3257,8 @@ function cloneFrameCharacter(character: GameFrameCharacter): GameFrameCharacter 
   delete clone.level
   delete clone.credit
   delete clone.wounds
+  delete clone.resource
+  if (character.activeTick !== undefined) clone.activeTick = character.activeTick
   if (character.attackLaunchTick !== undefined) clone.attackLaunchTick = character.attackLaunchTick
   if (character.xp !== undefined) clone.xp = character.xp
   if (character.gold !== undefined) clone.gold = character.gold
@@ -3111,6 +3266,7 @@ function cloneFrameCharacter(character: GameFrameCharacter): GameFrameCharacter 
   if (character.level !== undefined) clone.level = character.level
   if (character.credit) clone.credit = { tick: character.credit.tick, by: character.credit.by.map((share) => ({ ...share })) }
   if (character.wounds) clone.wounds = character.wounds.map((wound) => ({ ...wound }))
+  if (character.resource !== undefined) clone.resource = character.resource
   return clone
 }
 

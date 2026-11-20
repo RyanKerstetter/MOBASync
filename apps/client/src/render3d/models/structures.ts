@@ -138,6 +138,8 @@ export class TurretModel extends StructureModel {
       this.part(this.shards, new OctahedronGeometry(r * 0.09, 0), this.crystalMaterial, Math.cos(angle) * r * 0.62, 0, Math.sin(angle) * r * 0.62)
     }
     this.height = top + r * 1.6
+    // Its stones never move once laid: drawn as one mesh for each material.
+    this.mergeStill(s)
   }
 
   // Where its shots start: the crystal.
@@ -219,6 +221,8 @@ export class CoreModel extends StructureModel {
       this.rings.push(ring)
     }
     this.height = r * 2.7
+    // Its stones never move once laid: drawn as one mesh for each material.
+    this.mergeStill(s)
   }
 
   pose(input: PoseInput): void {
@@ -294,6 +298,8 @@ export class HealingZoneModel extends StructureModel {
     this.part(this.cross, new BoxGeometry(r * 0.62, r * 0.18, r * 0.18), this.crossMaterial, 0, 0, 0)
     this.part(this.cross, new IcosahedronGeometry(r * 0.55, 1), this.glow('#5dff9a', 0.22), 0, 0, 0, false)
     this.height = base + r * 2.1
+    // Its stones never move once laid: drawn as one mesh for each material.
+    this.mergeStill(s)
   }
 
   pose(input: PoseInput): void {

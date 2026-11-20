@@ -15,6 +15,8 @@ export interface GameRenderer {
   effects: Readonly<EffectSettings>
   // The debug view: hitboxes, and whatever the map shows for debugging.
   debug: boolean
+  // How far the camera is zoomed, as a multiple of the usual view (see zoom.ts), from the next `follow`.
+  zoom: number
   // Keeps the camera on this point of the world.
   follow(center: Vector2): void
   // The point of the world under a point on the screen (the mouse), in the screen's own pixels.
@@ -31,6 +33,7 @@ export interface GameRenderer {
 // The 2D renderer as a `GameRenderer`: the world renderer in the Pixi stage, under a camera that scales and moves it.
 export class FlatRenderer implements GameRenderer {
   readonly kind = '2d'
+  zoom = 1
   private readonly world: WorldRenderer
   private camera: Camera
 
@@ -64,7 +67,7 @@ export class FlatRenderer implements GameRenderer {
   }
 
   follow(center: Vector2): void {
-    this.camera = computeCamera(this.app.screen, { width: GAME_VIEW_WIDTH, height: GAME_VIEW_HEIGHT }, center)
+    this.camera = computeCamera(this.app.screen, { width: GAME_VIEW_WIDTH / this.zoom, height: GAME_VIEW_HEIGHT / this.zoom }, center)
     this.world.setCamera(this.camera)
   }
 

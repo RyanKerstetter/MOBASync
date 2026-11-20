@@ -6,6 +6,7 @@ import {
   Frustum,
   HemisphereLight,
   Matrix4,
+  PCFShadowMap,
   PCFSoftShadowMap,
   PerspectiveCamera,
   Raycaster,
@@ -35,6 +36,8 @@ import { mobaCameraPose, rayHitsCylinder, rayToGround } from './moba-camera.ts'
 import { ParticleSystem } from './particles.ts'
 import { Terrain3D, type MapGround } from './terrain-mesh.ts'
 import { VisionShading } from './vision-shading.ts'
+import { UNCAPPED_FPS } from '../game-settings.ts'
+import { GRAPHICS_PRESETS, type GraphicsOptions } from '../render/graphics-quality.ts'
 
 const NO_CHARACTERS: readonly RenderedCharacter[] = []
 // The direction the sun shines from: high, from the upper left of the screen, so shadows fall down and to the right.
@@ -43,14 +46,38 @@ const SUN_DIRECTION = new Vector3(-0.55, 1, -0.4).normalize()
 const SHADOW_REACH = 1300
 // How far off the screen a character is still posed, in world units: far enough that its shadow, falling onto the screen, moves.
 const VIEW_MARGIN = 250
-// The most pixels the world is drawn with for each of the page's (see the constructor).
-const MAX_PIXEL_RATIO = 1.5
+// The most pixels the world is drawn with for each of the page's (see the constructor), by the resolution setting (graphics-quality.ts).
+const MAX_PIXEL_RATIO = { high: 1.5, standard: 1 } as const
+// The sun's shadows by the shadows setting: how many pixels across the map they are worked out on, and how their edges are softened.
+const SHADOW_MAP = { high: { size: 2048, type: PCFSoftShadowMap }, low: { size: 1024, type: PCFShadowMap } } as const
+// With dynamic resolution, the picture is drawn smaller (and stretched to the screen) while the frame rate is short of what it should be,
+// and sharper again when there is time to spare (see `adaptResolution`): no smaller than this share of the screen's pixels across, in steps
+// of this much, judged over this many seconds of frames each time.
+const LEAST_RESOLUTION = 0.5
+const RESOLUTION_STEP = 0.1
+const RESOLUTION_WINDOW = 2
+// The frame rate it aims for with dynamic resolution: the page's limit, if it has one lower, and otherwise this.
+const TARGET_FPS = 60
+// By the particles setting: how many there are room for at once, what share of those let go are made, and how much bigger each is so an
+// effect still reads.
+const PARTICLES = {
+  full: { glow: 7000, puff: 5000, keep: 1, grow: 1 },
+  reduced: { glow: 3500, puff: 2500, keep: 0.6, grow: 1.15 },
+  minimal: { glow: 1200, puff: 800, keep: 0.35, grow: 1.3 },
+} as const
+// The lights an effect can light the ground with (a fireball's glow), at once, with spell lights on. Each one costs every lit pixel on the
+// screen, every frame, whether it is lit or not.
+const EFFECT_LIGHTS = 6
 
 export type WorldRenderer3DOptions = {
   // What the game is drawn in: its canvas is put under the page's 2D canvas, which goes on drawing the names and bars over it.
   container: HTMLElement
   app: Application
   ground: MapGround
+  // How much it draws (see graphics-quality.ts). As High if not given.
+  graphics?: Readonly<GraphicsOptions>
+  // The most frames a second the page draws, which dynamic resolution is judged against (`UNCAPPED_FPS` for none). None if not given.
+  maxFps?: number
 }
 
 // The world in 3D, drawn with three.js from the same `WorldFrame` the 2D renderer is given: the map stood up (walls are cliffs
@@ -63,6 +90,11 @@ export class WorldRenderer3D implements GameRenderer {
   readonly kind = '3d'
   effects: Readonly<EffectSettings> = { ...DEFAULT_EFFECTS }
   debug = false
+  // How far the camera is zoomed (see zoom.ts).
+  zoom = 1
+  // The most frames a second the page draws (`UNCAPPED_FPS` for none), for dynamic resolution.
+  maxFps: number
+  readonly graphics: Readonly<GraphicsOptions>
   private readonly renderer: WebGLRenderer
   private readonly scene = new Scene()
   private readonly camera = new PerspectiveCamera(34, 1, 10, 9000)
@@ -72,7 +104,7 @@ export class WorldRenderer3D implements GameRenderer {
   private readonly viewSphere = new Sphere()
   private readonly viewPoint = new Vector3()
   private readonly sun: DirectionalLight
-  private readonly vision = new VisionShading()
+  private readonly vision: VisionShading
   private readonly terrain: Terrain3D
   private readonly characters: CharacterModels3D
   private readonly effectsLayer = new EntityEffects3D()
@@ -82,9 +114,9 @@ export class WorldRenderer3D implements GameRenderer {
   private readonly light: DecalBatch
   private readonly effectPaint: DecalBatch
   private readonly effectLight: DecalBatch
-  private readonly glow = new ParticleSystem(7000, 'add')
-  private readonly puff = new ParticleSystem(5000, 'normal')
-  private readonly lights = new LightPool(6)
+  private readonly glow: ParticleSystem
+  private readonly puff: ParticleSystem
+  private readonly lights: LightPool
   private readonly raycaster = new Raycaster()
   private readonly overlayRoot = new Container()
   private readonly nameplates = new CharacterLayer(new Map())
@@ -102,16 +134,29 @@ export class WorldRenderer3D implements GameRenderer {
   // Where the camera looks instead of at the champion, while developing.
   private devFocus: Vector2 | undefined
   private devZoom = 1
+  // With dynamic resolution: the share of the screen's pixels across the picture is drawn with now, and the frames since that was last judged.
+  private resolution = 1
+  private frames = { count: 0, since: 0 }
 
   constructor(options: WorldRenderer3DOptions) {
     this.app = options.app
     this.ground = options.ground
-    this.renderer = new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
+    const graphics = options.graphics ?? GRAPHICS_PRESETS.high
+    this.graphics = graphics
+    this.maxFps = options.maxFps ?? UNCAPPED_FPS
+    this.vision = new VisionShading(graphics)
+    const particles = PARTICLES[graphics.particles]
+    this.glow = new ParticleSystem(particles.glow, 'add', particles)
+    this.puff = new ParticleSystem(particles.puff, 'normal', particles)
+    this.lights = new LightPool(graphics.spellLights ? EFFECT_LIGHTS : 0)
+    // Smoothed edges and shadows cost weak graphics far more than they show, so each can be turned off.
+    this.renderer = new WebGLRenderer({ antialias: graphics.smoothEdges, powerPreference: 'high-performance' })
     // Sharper than this on a high-density screen costs far more to draw (twice the density is four times the pixels, each lit and
     // shadowed) than it shows, with the edges smoothed as they are.
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO))
-    this.renderer.shadowMap.enabled = true
-    this.renderer.shadowMap.type = PCFSoftShadowMap
+    this.renderer.setPixelRatio(this.pixelRatio())
+    const shadows = graphics.shadows === 'off' ? undefined : SHADOW_MAP[graphics.shadows]
+    this.renderer.shadowMap.enabled = shadows !== undefined
+    this.renderer.shadowMap.type = shadows?.type ?? PCFSoftShadowMap
     this.renderer.toneMapping = ACESFilmicToneMapping
     this.renderer.toneMappingExposure = 1.08
     const canvas = this.renderer.domElement
@@ -124,8 +169,8 @@ export class WorldRenderer3D implements GameRenderer {
     this.scene.background = new Color('#0b1220')
     this.scene.add(new HemisphereLight('#d6e8ff', '#5a4630', 1.35))
     this.sun = new DirectionalLight('#fff0d2', 2.6)
-    this.sun.castShadow = true
-    this.sun.shadow.mapSize.set(2048, 2048)
+    this.sun.castShadow = shadows !== undefined
+    this.sun.shadow.mapSize.set(shadows?.size ?? 512, shadows?.size ?? 512)
     this.sun.shadow.camera.left = -SHADOW_REACH
     this.sun.shadow.camera.right = SHADOW_REACH
     this.sun.shadow.camera.top = SHADOW_REACH
@@ -181,6 +226,9 @@ export class WorldRenderer3D implements GameRenderer {
         set zoom(times: number) {
           renderer.devZoom = times
         },
+        get resolution() {
+          return renderer.resolution
+        },
       }
     }
   }
@@ -193,7 +241,8 @@ export class WorldRenderer3D implements GameRenderer {
     const center = this.devFocus ?? followed
     this.center = { x: center.x, y: center.y }
     this.resize()
-    const pose = mobaCameraPose(this.size, { width: GAME_VIEW_WIDTH / this.devZoom, height: GAME_VIEW_HEIGHT / this.devZoom }, center)
+    const zoom = this.zoom * this.devZoom
+    const pose = mobaCameraPose(this.size, { width: GAME_VIEW_WIDTH / zoom, height: GAME_VIEW_HEIGHT / zoom }, center)
     this.camera.fov = pose.fov
     this.camera.position.set(pose.position.x, pose.position.y, pose.position.z)
     this.camera.lookAt(pose.target.x, pose.target.y, pose.target.z)
@@ -203,6 +252,16 @@ export class WorldRenderer3D implements GameRenderer {
     this.sun.target.position.set(pose.target.x, 0, pose.target.z)
     this.sun.position.set(pose.target.x + SUN_DIRECTION.x * 2000, SUN_DIRECTION.y * 2000, pose.target.z + SUN_DIRECTION.z * 2000)
     this.sun.target.updateMatrixWorld()
+    // Zoomed out, the shadows are worked out further round, to the edge of what is seen.
+    const reach = SHADOW_REACH / Math.min(1, this.zoom)
+    const shadow = this.sun.shadow.camera
+    if (shadow.right !== reach) {
+      shadow.left = -reach
+      shadow.right = reach
+      shadow.top = reach
+      shadow.bottom = -reach
+      shadow.updateProjectionMatrix()
+    }
     // The overlay is sized as the 2D world would be, so names and bars are the size they are in 2D.
     this.overlayRoot.scale.set(this.overlayScale())
   }
@@ -235,6 +294,7 @@ export class WorldRenderer3D implements GameRenderer {
   update(frame: WorldFrame): void {
     const { now, characters, entities } = frame
     const dt = this.lastNow === undefined ? 1 / 60 : Math.min(0.1, Math.max(0, (now - this.lastNow) / 1000))
+    if (this.lastNow !== undefined) this.adaptResolution((now - this.lastNow) / 1000)
     this.lastNow = now
     this.resize()
     const unseen = frame.unseen ?? NO_CHARACTERS
@@ -327,6 +387,31 @@ export class WorldRenderer3D implements GameRenderer {
     this.renderer.dispose()
     this.renderer.forceContextLoss()
     this.renderer.domElement.remove()
+  }
+
+  // The pixels the picture is drawn with for each of the page's: the screen's own density, as far as the resolution setting allows, and with
+  // dynamic resolution, as much of that as the frame rate allows.
+  private pixelRatio(): number {
+    return Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO[this.graphics.resolution]) * this.resolution
+  }
+
+  // With dynamic resolution, every few seconds: the picture is drawn smaller while frames come slower than they should (the page's limit, or
+  // `TARGET_FPS`), and sharper again while they come as fast as they should. A frame that took very long (the tab was hidden, the page
+  // was busy) is not counted.
+  private adaptResolution(seconds: number): void {
+    if (!this.graphics.dynamicResolution || seconds > 0.25) return
+    this.frames.count += 1
+    this.frames.since += seconds
+    if (this.frames.since < RESOLUTION_WINDOW) return
+    const fps = this.frames.count / this.frames.since
+    this.frames = { count: 0, since: 0 }
+    const target = this.maxFps === UNCAPPED_FPS ? TARGET_FPS : Math.min(TARGET_FPS, this.maxFps)
+    let next = this.resolution
+    if (fps < target * 0.85) next = Math.max(LEAST_RESOLUTION, this.resolution - RESOLUTION_STEP)
+    else if (fps > target * 0.95) next = Math.min(1, this.resolution + RESOLUTION_STEP / 2)
+    if (Math.abs(next - this.resolution) < 1e-6) return
+    this.resolution = next
+    this.renderer.setPixelRatio(this.pixelRatio())
   }
 
   // The scale the 2D view would draw the world at on this screen.

@@ -74,6 +74,8 @@ type HudSlot = {
   key: HTMLElement
   name: HTMLElement
   time: HTMLElement
+  // How many charges it has, in its corner, for an ability that has charges.
+  charges: HTMLElement
   // What the slot shows now, which its tooltip is told from.
   view?: AbilitySlotView
 }
@@ -261,8 +263,9 @@ export function createHudView(container: HTMLElement, handlers?: HudHandlers) {
           key: element('span', 'hud-slot-key'),
           name: element('span', 'hud-slot-name'),
           time: element('span', 'hud-slot-time'),
+          charges: element('span', 'hud-slot-charges'),
         }
-        slot.root.append(slot.icons, slot.key, slot.name, slot.time)
+        slot.root.append(slot.icons, slot.key, slot.name, slot.time, slot.charges)
         handlers?.tooltip.bind(slot.root, () => tooltipOf(slot))
         abilities.append(slot.root)
         slots.push(slot)
@@ -281,6 +284,11 @@ export function createHudView(container: HTMLElement, handlers?: HudHandlers) {
           slot.iconAbilityId = view.abilityId
         }
         slot.root.classList.toggle('is-ready', view.ready)
+        slot.root.classList.toggle('is-primed', view.primed)
+        slot.root.classList.toggle('is-locked', view.locked)
+        slot.charges.hidden = view.charges === undefined
+        slot.charges.textContent = view.charges === undefined ? '' : String(view.charges)
+        slot.charges.classList.toggle('is-empty', view.charges === 0)
         // 0 just cast to 1 ready; the stylesheet turns it into how much of the icon is in colour.
         slot.root.style.setProperty('--filled', String(view.filled))
         slot.key.textContent = view.key

@@ -25,6 +25,7 @@ import { colour, lerp } from '../space.ts'
 import { jitter } from '../terrain-mesh.ts'
 import type { VisionShading } from '../vision-shading.ts'
 import { DETAILS } from './detail/index.ts'
+import { cutFor } from './detail/shapes.ts'
 import type { DetailFrame, Hold } from './detail/kit.ts'
 import type { Look, Style } from './looks.ts'
 import { approach, ease, easeOut, joint, Model, type FxContext, type PoseInput } from './model.ts'
@@ -35,7 +36,12 @@ import { approach, ease, easeOut, joint, Model, type FxContext, type PoseInput }
 
 // A champion's figure: in full detail if its look has one, or, if that cannot be built, the plain figure, so the champion is still
 // there to see and play (see guard.ts).
+// It is cut as finely as the models setting says (see detail/shapes.ts).
 export function championFigure(vision: VisionShading, radius: number, look: Look, championId: string): HumanoidModel {
+  return cutFor(vision.graphics.models, () => championFigureAsCut(vision, radius, look, championId))
+}
+
+function championFigureAsCut(vision: VisionShading, radius: number, look: Look, championId: string): HumanoidModel {
   if (!look.detail) return new HumanoidModel(vision, radius, look, championId)
   try {
     return new HumanoidModel(vision, radius, look, championId)
@@ -333,6 +339,8 @@ export class HumanoidModel extends Model {
     const burst = input.release ? 1 - input.release.t : 0
     this.flareGlow.opacity = kind === 'cast' ? Math.max(gathering * 0.75, burst * 0.6) : burst * 0.35
     this.flare.scale.setScalar(0.6 + gathering * 0.8 + burst * 0.6)
+    // Not drawn at all while it cannot be seen, which is most of the time: a mesh drawn clear still costs a draw.
+    this.flare.visible = this.flareGlow.opacity > 0.005
     for (const material of this.glows) {
       material.emissiveIntensity = (material.userData.baseGlow as number) * (1 + Math.sin(t * 3) * 0.12) + gathering * 1.4 + burst * 2.2 + this.empower * 2.5
     }
@@ -438,7 +446,14 @@ export class HumanoidModel extends Model {
         Object.assign(pose, { shoulderR: { x: -0.35, z: 0.2 }, elbowR: -0.8, shoulderL: { x: -0.35, z: -0.2 }, elbowL: -0.8, pitch: 0.08 })
         break
       case 'bow':
+      case 'crystalBow':
         Object.assign(pose, { shoulderL: { x: -0.35, z: -0.2 }, elbowL: -0.35, shoulderR: { x: 0.05, z: 0.15 }, elbowR: -0.3 })
+        break
+      // (Anything carried in both hands is held this way at rest: it points from the right hand through the left, so with the left hand down at the side it
+      // would point back. See `carried`.)
+      case 'crossbow':
+        // Held at the ready in front of the chest: the right hand on the grip and the left under the head of it, so it points ahead and a little down, its bow flat.
+        Object.assign(pose, { shoulderR: { x: 0.2, z: -0.6 }, elbowR: -1.7, shoulderL: { x: -0.9, z: 0.6 }, elbowL: -0.1 })
         break
       case 'rifle':
       case 'launcher':
@@ -972,6 +987,37 @@ export class HumanoidModel extends Model {
         this.part(head, new SphereGeometry(0.17, 12, 8), this.glow(look.accent, look.weapon === 'skullStaff' ? 0.1 : 0.3), 0, 0.02, 0, false)
         return { main, mainHold: 'up', tip: head }
       }
+      case 'crystalBow': {
+        // A bow grown of crystal: its limbs pale and glowing, a gem at the grip, a string of light.
+        const off = joint(this.armL.hand)
+        const bow = joint(off)
+        bow.rotation.y = Math.PI / 2
+        const crystal = this.surface('#d6f6ff', { roughness: 0.1, metalness: 0.3, emissive: colour(look.accent), emissiveIntensity: 0.9 })
+        crystal.userData.baseGlow = 0.9
+        this.glows.push(crystal)
+        this.part(bow, new TorusGeometry(0.55, 0.024, 4, 14, Math.PI * 0.8), crystal, 0.55, 0, 0).rotation.z = Math.PI * 0.6
+        for (const flip of [1, -1]) {
+          const tip = this.part(bow, new OctahedronGeometry(0.05, 0), crystal, 0.2, 0.52 * flip, 0)
+          tip.scale.set(0.7, 1.8, 0.7)
+          tip.rotation.z = -0.5 * flip
+        }
+        this.part(bow, new CylinderGeometry(0.004, 0.004, 0.9, 3), this.glow(look.accent, 0.9), 0.38, 0, 0, false)
+        this.part(bow, new OctahedronGeometry(0.05, 0), crystal, 0, 0, 0)
+        return { main, mainHold: 'free', off, offHold: 'bow', tip: bow, strike: bow, strikeShape: { x: 0.8, y: 2.6, z: 0.8 } }
+      }
+      case 'crossbow': {
+        // A crossbow carried in both hands: a stock, a steel prod across its head, its string drawn back, and a bolt on it.
+        const gun = joint(this.root)
+        this.carried = gun
+        this.part(gun, new BoxGeometry(0.06, 0.5, 0.07), wood, 0, 0.05, 0)
+        this.part(gun, new BoxGeometry(0.05, 0.12, 0.09), m.leather, 0, -0.22, 0.01)
+        this.part(gun, new TorusGeometry(0.28, 0.016, 4, 14, Math.PI * 0.7), m.steel, 0, 0.2, 0).rotation.set(0, 0, Math.PI * 0.15)
+        this.part(gun, new CylinderGeometry(0.003, 0.003, 0.5, 3), this.surface('#e9e4d4', { roughness: 0.5 }), 0, 0.1, -0.02).rotation.z = Math.PI / 2
+        this.part(gun, new CylinderGeometry(0.008, 0.008, 0.36, 5), wood, 0, 0.3, -0.045)
+        this.part(gun, new ConeGeometry(0.018, 0.05, 4), m.steel, 0, 0.5, -0.045)
+        this.part(gun, new BoxGeometry(0.03, 0.04, 0.03), m.team, 0, -0.05, -0.05)
+        return { main, mainHold: 'free', tip: point(gun, 0.5), strike: point(gun, 0.3), strikeShape: { x: 0.7, y: 2, z: 0.7 } }
+      }
       case 'bow': {
         const off = joint(this.armL.hand)
         const bow = joint(off)
@@ -1124,6 +1170,17 @@ function styledPose(style: Style, from: Pose, windup: number, swing: number): Po
       pose.shoulderR.z = arc(from.shoulderR.z, 0.5, 0.3)
       pose.elbowR = arc(from.elbowR, -2.3, -0.9)
       pose.yaw = arc(from.yaw, -0.55, -0.35)
+      break
+    case 'crossbow':
+      // Raised from the ready to the shoulder, level, the left hand under its head, sighted straight ahead; the shot kicks it up.
+      pose.shoulderR.x = lerp(from.shoulderR.x, -0.3, Math.max(windup, swing))
+      pose.shoulderR.z = lerp(from.shoulderR.z, -1.0, Math.max(windup, swing))
+      pose.elbowR = lerp(from.elbowR, -2.0, Math.max(windup, swing))
+      pose.shoulderL.x = lerp(from.shoulderL.x, -1.5, Math.max(windup, swing)) - Math.sin(Math.min(1, swing) * Math.PI) * 0.2
+      pose.shoulderL.z = lerp(from.shoulderL.z, 0.6, Math.max(windup, swing))
+      pose.elbowL = lerp(from.elbowL, -0.1, Math.max(windup, swing))
+      pose.pitch = lerp(from.pitch, -0.12, Math.sin(Math.min(1, swing) * Math.PI))
+      pose.head = lerp(0, 0.1, windup)
       break
     case 'gun':
       // Brought up to the shoulder and aimed, the right hand at the shoulder and the left reaching out along the barrel, and it kicks

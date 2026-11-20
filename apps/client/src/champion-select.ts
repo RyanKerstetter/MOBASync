@@ -138,7 +138,7 @@ export function createChampionSelect({ root, abilityIconUrl, onPick, onLock, onB
   stageCanvas.setAttribute('aria-hidden', 'true')
   let stage: ChampionStage | undefined
   try {
-    stage = new ChampionStage(stageCanvas)
+    stage = new ChampionStage(stageCanvas, loadSettings().graphics)
   } catch {
     stage = undefined
   }

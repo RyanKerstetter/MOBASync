@@ -24,7 +24,9 @@ import {
 } from '../apps/client/src/game-settings.ts'
 import { GAME_TPS } from '../packages/shared/src/index.ts'
 import { DEFAULT_EFFECTS, EFFECT_KEYS, readEffects } from '../apps/client/src/render/effect-settings.ts'
+import { GRAPHICS_PRESET_NAMES, GRAPHICS_PRESETS, presetOf } from '../apps/client/src/render/graphics-quality.ts'
 import { RENDERER_KINDS } from '../apps/client/src/render/renderer-kind.ts'
+import { MAX_ZOOM, MIN_ZOOM } from '../apps/client/src/render/zoom.ts'
 
 function fakeStorage(initial?: string) {
   const store = new Map<string, string>()
@@ -243,7 +245,7 @@ test('the Controls tab has the casting, the moving and the targeting, in section
   const sectionOf = (title: string): MenuTab => ({ ...controls, sections: controls.sections.filter((section) => section.title === title) })
   assert.deepEqual(toggles(sectionOf('Casting')).map((toggle) => toggle.label), ['Keep attacking after casting'])
   assert.deepEqual(toggles(sectionOf('Moving')).map((toggle) => toggle.label), ['WASD movement', 'Moving doesn\'t cancel attacks', 'Moving doesn\'t cancel abilities'])
-  assert.equal(DEFAULT_SETTINGS.movementKeys, false, 'WASD movement is off until it is turned on')
+  assert.equal(DEFAULT_SETTINGS.movementKeys, true, 'WASD movement is on until it is turned off')
   assert.equal(DEFAULT_SETTINGS.castKeepsAttack, true, 'and a cast keeps an attack from the start')
   const switches = toggles(controls)
   const before = switches.map((toggle) => toggle.get())
@@ -345,6 +347,8 @@ test('settings are kept, and a missing, damaged or odd stored value is the defau
     diagnostics: false,
     maxFps: 144,
     renderer: RENDERER_KINDS.find((kind) => kind !== DEFAULT_SETTINGS.renderer) ?? DEFAULT_SETTINGS.renderer,
+    graphics: { ...GRAPHICS_PRESETS[GRAPHICS_PRESET_NAMES.find((name) => presetOf(DEFAULT_SETTINGS.graphics) !== name) ?? 'high'] },
+    zoom: DEFAULT_SETTINGS.zoom === MAX_ZOOM ? MIN_ZOOM : MAX_ZOOM,
     soundVolume: DEFAULT_SETTINGS.soundVolume === 0 ? SOUND_VOLUME_STEP : 0,
   }
   saveSettings(chosen, storage)

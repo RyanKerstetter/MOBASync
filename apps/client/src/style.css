@@ -1,20 +1,20 @@
-/* The screens before a game (the entry page, the lobby and champion select) have a look of their own, like an old book or a tavern
-   board: dark leather panels in a double rule with a bronze stud at each corner, on a faintly grained umber ground; headings in a
-   book serif in small caps; aged bronze for what is picked; the one button that matters on each screen in sealing-wax red; and moss
-   green for being ready. Team banners are pennants. Their colours are the --menu-* properties below; the game and its menus keep
-   the --ui-* ones. */
+/* Every screen has one look, like an old book or a tavern board: dark leather panels in a double rule with a bronze stud at each corner,
+   on a faintly grained umber ground; headings in a book serif in small caps; aged bronze for what is picked; the one button that matters
+   on each screen in sealing-wax red; and moss green for being ready. Team banners are pennants. The screens before a game use the
+   --menu-* properties below; the game's own UI (the HUD, the scoreboard, the shop) uses the --ui-* ones, which are the same leather and
+   bronze, a little darker so the world shows round them. */
 :root {
-  --ui-bg: #121c2c;
-  --ui-bg-raised: #1c2a40;
-  --ui-bg-hover: #26395a;
-  --ui-bg-row: #18263a;
-  --ui-bg-mark: #22324a;
-  --ui-track: #0b1220;
-  --ui-line: #3a4d68;
-  --ui-line-soft: #24344c;
-  --ui-text: #e8f4ff;
-  --ui-muted: #8ea4bd;
-  --ui-accent: #79dfb1;
+  --ui-bg: rgb(28 21 16 / 94%);
+  --ui-bg-raised: #2a2119;
+  --ui-bg-hover: #34291f;
+  --ui-bg-row: #1b140f;
+  --ui-bg-mark: #3a2c1c;
+  --ui-track: #0d0906;
+  --ui-line: #5a4632;
+  --ui-line-soft: #3b2e22;
+  --ui-text: #ece1c8;
+  --ui-muted: #a39279;
+  --ui-accent: #d4a85a;
   --ui-danger: #e5535b;
 
   --menu-bg: #15100c;
@@ -2188,6 +2188,49 @@ button.hud-item:hover {
   border-color: var(--ui-accent);
 }
 
+/* The next ability is primed (the Grenadier's passive): every slot burns ember orange, breathing, so it is plain at a glance. */
+.hud-slot.is-primed {
+  border-color: #ffb347;
+  box-shadow: 0 0 0 1px #ffb347, 0 0 12px 2px rgb(255 140 40 / 70%);
+  animation: hud-primed 1.2s ease-in-out infinite alternate;
+}
+
+/* And over the row of them, a tag that says so in words. */
+.hud-abilities:has(.hud-slot.is-primed) {
+  position: relative;
+}
+
+.hud-abilities:has(.hud-slot.is-primed)::before {
+  content: 'Primed';
+  position: absolute;
+  bottom: calc(100% + 0.35rem);
+  left: 50%;
+  padding: 0.12rem 0.6rem;
+  color: #2a1606;
+  background: linear-gradient(180deg, #ffd27a, #ff9a2e);
+  border: 1px solid #ffe2a8;
+  font-family: var(--menu-display);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  font-variant-caps: small-caps;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  box-shadow: 0 0 10px rgb(255 140 40 / 70%);
+  pointer-events: none;
+}
+
+@keyframes hud-primed {
+  from { box-shadow: 0 0 0 1px #ffb347, 0 0 6px 1px rgb(255 140 40 / 45%); }
+  to { box-shadow: 0 0 0 1px #ffd27a, 0 0 16px 4px rgb(255 140 40 / 85%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-slot.is-primed {
+    animation: none;
+  }
+}
+
 /* The key, the cooldown and the name are plain text on the picture, with nothing behind them, so the art shows through. A hard
    one-pixel edge in the slot's colour (not a blur, not a shadow) is what makes them read over it. */
 .hud-slot-key,
@@ -2212,6 +2255,39 @@ button.hud-item:hover {
   font-size: 1.15rem;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+}
+
+.hud-slot-charges {
+  position: absolute;
+  top: 0.15rem;
+  right: 0.2rem;
+  min-width: 1.05rem;
+  padding: 0 0.2rem;
+  box-sizing: border-box;
+  color: #2a1606;
+  background: linear-gradient(180deg, #ffe7a8, #e0a83c);
+  border: 1px solid #fff2c8;
+  border-radius: 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1.05rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-slot-charges[hidden] {
+  display: none;
+}
+
+.hud-slot-charges.is-empty {
+  color: #f2e6d0;
+  background: #3a2c22;
+  border-color: #6a5440;
+}
+
+/* Waiting on what it needs (full focus, a knife): it looks as it does on cooldown, and its edge stays dark. */
+.hud-slot.is-locked {
+  border-color: var(--ui-line);
 }
 
 .hud-slot-name {
@@ -2298,17 +2374,20 @@ button.hud-item:hover {
   }
 }
 
-/* The escape menu, over the game and its HUD. It hangs from near the top, and is not centred, so the tabs stay where they are as pages of different
-   heights are opened beside them. */
+/* The escape menu, over the game and its HUD, in the look of the screens before a game: a leather panel ruled twice with a bronze stud in each
+   corner, headings in the book serif's small caps with a rule running off after them, buttons that warm to bronze, and aged bronze for what is
+   picked. It hangs from near the top, and is not centred, so the tabs stay where they are as pages of different heights are opened beside them.
+   It is never taller than the screen: a page with more than fits scrolls, beside the tabs. */
 .game-menu {
   position: absolute;
   z-index: 4;
   inset: 0;
   box-sizing: border-box;
   display: grid;
+  grid-template-rows: minmax(0, 1fr);
   place-items: start center;
-  padding-top: 12vh;
-  background: rgb(8 14 24 / 62%);
+  padding: 10vh 1rem 1.5rem;
+  background: radial-gradient(ellipse at 50% 35%, rgb(12 8 5 / 55%), rgb(6 4 2 / 80%));
 }
 
 .game-menu[hidden] {
@@ -2318,17 +2397,54 @@ button.hud-item:hover {
 .game-menu-panel {
   box-sizing: border-box;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 0.9rem;
-  width: min(40rem, calc(100% - 2rem));
-  padding: 1.1rem 1.2rem 1rem;
-  color: var(--ui-text);
-  background: var(--ui-bg);
-  border: 1px solid var(--ui-line);
+  width: min(44rem, 100%);
+  max-height: 100%;
+  padding: 1.15rem 1.3rem 1rem;
+  color: var(--menu-text);
+  font-family: var(--menu-body);
+  font-variant-numeric: lining-nums;
+  background: var(--menu-studs), var(--menu-panel);
+  border: 1px solid var(--menu-line-strong);
+  outline: 1px solid var(--menu-line);
+  outline-offset: -6px;
+  box-shadow: 0 1.2rem 3rem rgb(0 0 0 / 55%);
 }
 
+.game-menu-panel *,
+.game-menu-panel *::before,
+.game-menu-panel *::after {
+  box-sizing: border-box;
+}
+
+/* The title: the book serif, in gold, between two small diamonds, as the name of the game is. */
 .game-menu-panel h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   margin: 0;
-  font-size: 1.1rem;
+  color: var(--menu-accent-bright);
+  font-family: var(--menu-display);
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  font-variant-caps: small-caps;
+}
+
+.game-menu-panel h3::before,
+.game-menu-panel h3::after {
+  content: '\25C6';
+  color: var(--menu-accent);
+  font-size: 0.4em;
+}
+
+.game-menu-panel h3::after {
+  flex: 1;
+  height: 1px;
+  margin-left: 0.3rem;
+  content: '';
+  background: linear-gradient(90deg, var(--menu-line-strong), transparent);
 }
 
 .game-menu-row {
@@ -2340,114 +2456,205 @@ button.hud-item:hover {
 .game-menu-choices {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem;
+  gap: 0.35rem;
 }
 
 .game-menu-panel button {
-  padding: 0.45rem 0.8rem;
-  color: var(--ui-text);
-  background: var(--ui-bg-raised);
-  border: 1px solid var(--ui-line);
-  font: inherit;
+  padding: 0.4rem 0.85rem;
+  color: var(--menu-text);
+  background: #2a2119;
+  border: 1px solid var(--menu-accent-dim);
+  font-family: var(--menu-display);
+  font-size: 0.92rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  font-variant-caps: small-caps;
+  font-variant-numeric: lining-nums;
   cursor: pointer;
+  transition: border-color 120ms, color 120ms, background 120ms;
 }
 
 .game-menu-panel button:hover {
-  background: var(--ui-bg-hover);
+  color: var(--menu-accent-bright);
+  background: #34291f;
+  border-color: var(--menu-accent);
 }
 
-.game-menu-panel button.is-selected {
-  color: var(--ui-track);
-  background: var(--ui-accent);
-  border-color: var(--ui-accent);
+/* What is picked: aged bronze, with a dark inner rule, as a pressed seal is. */
+.game-menu-panel button.is-selected,
+.game-menu-panel button.is-selected:hover {
+  color: #1d150e;
+  background: var(--menu-accent);
+  border-color: var(--menu-accent-bright);
+  outline: 1px solid rgb(0 0 0 / 35%);
+  outline-offset: -3px;
 }
 
+/* Leave game is the one button with consequences: sealing-wax red, as the one that matters on each screen before a game is. */
 .game-menu-panel button.is-danger {
-  border-color: var(--ui-danger);
-  color: #ffb3b7;
+  color: #f6e8c6;
+  background: var(--menu-seal);
+  border-color: var(--menu-seal-edge);
+}
+
+.game-menu-panel button.is-danger:hover {
+  color: #fff3d6;
+  background: var(--menu-seal-bright);
+  border-color: #e08a66;
 }
 
 .game-menu-hint {
   margin: 0;
-  color: #8ea4bd;
+  color: var(--menu-muted);
   font-size: 0.75rem;
+  font-style: italic;
 }
 
-/* The tabs down the left of the menu, with Leave game under them, and the page beside them: sections of rows, each under a small heading. */
+/* The tabs down the left of the menu, with Leave game under them, and the page beside them: sections of rows, each under a heading. The page
+   scrolls when it is taller than there is room for. */
 .game-menu-layout {
   display: grid;
   grid-template-columns: 10rem minmax(0, 1fr);
   gap: 1.2rem;
-  align-items: start;
-  min-height: 18rem;
+  min-height: 0;
 }
 
 .game-menu-side {
   display: grid;
   align-content: start;
-  align-self: stretch;
   gap: 1.2rem;
   padding-right: 1.2rem;
-  border-right: 1px solid var(--ui-line);
+  border-right: 1px solid var(--menu-line);
 }
 
 .game-menu-tabs,
 .game-menu-footer {
   display: grid;
-  gap: 0.35rem;
+  gap: 0.3rem;
 }
 
-.game-menu-tabs button {
+/* A tab is a line of text with a bronze bar down its left when it is the open one, as the role tabs of champion select are underlined. */
+.game-menu-panel .game-menu-tabs button {
+  padding: 0.45rem 0.7rem;
+  color: var(--menu-muted);
   text-align: left;
+  background: transparent;
+  border: 0;
+  border-left: 2px solid transparent;
+}
+
+.game-menu-panel .game-menu-tabs button:hover {
+  color: var(--menu-text);
+  background: rgb(255 255 255 / 3%);
+  border-left-color: var(--menu-accent-dim);
+}
+
+.game-menu-panel .game-menu-tabs button.is-selected,
+.game-menu-panel .game-menu-tabs button.is-selected:hover {
+  color: var(--menu-accent-bright);
+  background: rgb(196 154 82 / 8%);
+  border-left-color: var(--menu-accent);
+  outline: 0;
 }
 
 /* On a narrow screen there is no room for a column of tabs beside the page: they go back to a row along the top, and the page is under them. */
 @media (max-width: 36rem) {
   .game-menu-layout {
     grid-template-columns: minmax(0, 1fr);
-    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr);
   }
 
   .game-menu-side {
     padding: 0 0 0.9rem;
     border-right: 0;
-    border-bottom: 1px solid var(--ui-line);
+    border-bottom: 1px solid var(--menu-line);
   }
 
   .game-menu-tabs {
     grid-auto-flow: column;
     grid-auto-columns: 1fr;
   }
+
+  .game-menu-panel .game-menu-tabs button {
+    text-align: center;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+  }
+
+  .game-menu-panel .game-menu-tabs button.is-selected {
+    border-bottom-color: var(--menu-accent);
+  }
 }
 
 .game-menu-page {
   display: grid;
-  gap: 1rem;
+  gap: 1.15rem;
   align-content: start;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 0.6rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--menu-accent-dim) transparent;
 }
 
 .game-menu-section {
   display: grid;
-  gap: 0.5rem;
+  gap: 0.6rem;
 }
 
+/* A section's heading, as a panel's is in the lobby: small caps in gold, with a rule running off after it. */
 .game-menu-section h4 {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
   margin: 0;
-  color: var(--ui-muted);
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  color: var(--menu-accent-bright);
+  font-family: var(--menu-display);
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-variant-caps: small-caps;
 }
 
-/* A switch is one button, so the whole row is what is pressed: the name and what it does on the left, the switch on the right. */
+.game-menu-section h4::after {
+  flex: 1;
+  height: 1px;
+  content: '';
+  background: var(--menu-line-strong);
+}
+
+/* The switches that come together in a section, in a block of their own, two across where there is room. */
+.game-menu-switches {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  gap: 0.4rem;
+}
+
+/* A switch is one button, so the whole row is what is pressed: the name and what it does on the left, the switch on the right. It is a field
+   of the panel, darker than it, and not raised as a button is. */
 .game-menu-panel button.game-menu-toggle {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.8rem;
   width: 100%;
+  height: 100%;
+  padding: 0.5rem 0.7rem;
+  color: var(--menu-text);
   text-align: left;
+  background: var(--menu-field);
+  border: 1px solid var(--menu-line);
+  font-family: var(--menu-body);
+  font-size: 0.88rem;
+  font-weight: 400;
+  letter-spacing: 0;
+  font-variant-caps: normal;
+}
+
+.game-menu-panel button.game-menu-toggle:hover {
+  color: var(--menu-text);
+  background: #1a130e;
+  border-color: var(--menu-accent-dim);
 }
 
 .game-menu-toggle-text {
@@ -2456,19 +2663,21 @@ button.hud-item:hover {
 }
 
 .game-menu-description {
-  color: var(--ui-muted);
-  font-size: 0.75rem;
+  color: var(--menu-muted);
+  font-size: 0.76rem;
+  line-height: 1.35;
 }
 
+/* The switch: a slot in the leather with a brass knob, which slides over and warms the slot to bronze when it is on. */
 .game-menu-switch {
   position: relative;
   flex: none;
-  box-sizing: border-box;
   width: 2.3rem;
-  height: 1.25rem;
-  background: var(--ui-track);
-  border: 1px solid var(--ui-line);
+  height: 1.2rem;
+  background: #0d0906;
+  border: 1px solid var(--menu-line-strong);
   border-radius: 999px;
+  box-shadow: inset 0 1px 3px rgb(0 0 0 / 60%);
   transition: background 0.12s, border-color 0.12s;
 }
 
@@ -2476,23 +2685,23 @@ button.hud-item:hover {
   content: '';
   position: absolute;
   top: 50%;
-  left: 0.18rem;
+  left: 0.15rem;
   width: 0.8rem;
   height: 0.8rem;
-  background: var(--ui-muted);
+  background: #6f6352;
   border-radius: 50%;
   transform: translateY(-50%);
   transition: left 0.12s, background 0.12s;
 }
 
 .game-menu-toggle[aria-checked='true'] .game-menu-switch {
-  background: var(--ui-accent);
-  border-color: var(--ui-accent);
+  background: var(--menu-accent-dim);
+  border-color: var(--menu-accent);
 }
 
 .game-menu-toggle[aria-checked='true'] .game-menu-switch::after {
-  left: calc(100% - 0.98rem);
-  background: var(--ui-track);
+  left: calc(100% - 0.95rem);
+  background: var(--menu-accent-bright);
 }
 
 /* A slider: the name with its value at the right end, the slider under it, and what it does under that. */
@@ -2504,40 +2713,57 @@ button.hud-item:hover {
 }
 
 .game-menu-slider-value {
-  color: var(--ui-muted);
-  font-variant-numeric: tabular-nums;
+  color: var(--menu-accent);
+  font-variant-numeric: tabular-nums lining-nums;
 }
 
 .game-menu-row input[type='range'] {
   width: 100%;
+  max-width: none;
   margin: 0;
-  accent-color: var(--ui-accent);
+  accent-color: var(--menu-accent);
 }
 
-/* A dropdown looks like the buttons: one row, as wide as its row. */
+/* A dropdown is a field of the panel, as the lobby's are. */
 .game-menu-row select {
-  box-sizing: border-box;
   width: 100%;
-  padding: 0.45rem 0.8rem;
-  color: var(--ui-text);
-  background: var(--ui-bg-raised);
-  border: 1px solid var(--ui-line);
+  padding: 0.45rem 0.6rem;
+  color: var(--menu-text);
+  background: var(--menu-field);
+  border: 1px solid var(--menu-line-strong);
   font: inherit;
   cursor: pointer;
 }
 
 .game-menu-row select:hover {
-  background: var(--ui-bg-hover);
+  border-color: var(--menu-accent-dim);
+}
+
+.game-menu-row select option {
+  color: var(--menu-text);
+  background: #1a140f;
 }
 
 .game-menu-panel button:focus-visible,
 .game-menu-row select:focus-visible,
 .game-menu-row input[type='range']:focus-visible {
-  outline: 2px solid var(--ui-accent);
+  outline: 2px solid var(--menu-accent-bright);
   outline-offset: 2px;
 }
 
+/* (The game's own focus ring is green, and a field's is drawn on any focus: here they are bronze, as the lobby's are.) */
+#game-panel .game-menu-panel :focus-visible {
+  outline-color: var(--menu-accent-bright);
+}
+
+.game-menu-row select:focus {
+  border-color: var(--menu-accent);
+  outline: 1px solid var(--menu-accent);
+  outline-offset: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .game-menu-panel button,
   .game-menu-switch,
   .game-menu-switch::after {
     transition: none;
@@ -3449,4 +3675,86 @@ button.hud-item:hover {
 
 .item-tooltip-note[data-tone='muted'] {
   color: var(--ui-muted);
+}
+
+/* The game's own UI in the look of every other screen. The panels along the bottom, the mode and the scoreboard along the top, the
+   diagnostics and who was picked are leather ruled twice, in the body face, with their headings in the book serif's small caps; the
+   level and the experience are bronze. The colours that mean something in play (health, shields, teams) are their own. */
+#game-panel {
+  font-family: var(--menu-body);
+  font-variant-numeric: lining-nums;
+}
+
+.hud-panel,
+.game-mode-hud,
+.leaderboard,
+.game-inspect,
+.game-debug-overlay {
+  outline: 1px solid var(--ui-line-soft);
+  outline-offset: -5px;
+  box-shadow: 0 0.4rem 1.2rem rgb(0 0 0 / 45%);
+}
+
+/* The bigger panels have the bronze studs in their corners too. */
+.hud-panel,
+.game-mode-hud {
+  background: var(--menu-studs), var(--ui-bg);
+}
+
+.game-hud,
+.game-mode-hud,
+.game-scoreboard {
+  font-family: var(--menu-body);
+}
+
+.mode-title {
+  color: var(--menu-accent-bright);
+  font-family: var(--menu-display);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: none;
+  font-variant-caps: small-caps;
+}
+
+.mode-clock {
+  font-family: var(--menu-display);
+  font-size: 1.05rem;
+}
+
+.scoreboard-name {
+  font-family: var(--menu-display);
+  letter-spacing: 0.02em;
+}
+
+.kill-feed li {
+  background: var(--ui-bg);
+  border-color: var(--ui-line);
+}
+
+/* The diagnostics stay in a typewriter face, which lines their numbers up, in parchment on the leather. */
+.game-debug-overlay {
+  color: var(--menu-muted);
+}
+
+.hud-stat-label {
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.03em;
+}
+
+.hud-level {
+  color: var(--menu-accent-bright);
+  border-color: var(--menu-accent);
+  font-family: var(--menu-display);
+}
+
+.hud-xp-fill {
+  background: linear-gradient(0deg, var(--menu-accent-dim), var(--menu-accent));
+}
+
+.hud-shop-button {
+  font-family: var(--menu-display);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.04em;
 }

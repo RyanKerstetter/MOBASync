@@ -84,7 +84,8 @@ test('every ability is well-formed and belongs to a champion or a monster', () =
     if (def.recast !== undefined) {
       const recast = abilityDefs.get(def.recast)
       assert.ok(recast, `${def.id}'s recast exists`)
-      assert.equal(recast.targeting === 'none' || recast.targeting === def.targeting, true, `${def.id}'s recast can be aimed`)
+      // (A held one's is aimed as its key is let go, whatever the press was: see `AbilityDef.held`.)
+      assert.equal(recast.targeting === 'none' || recast.targeting === def.targeting || def.held !== undefined, true, `${def.id}'s recast can be aimed`)
     }
     assert.ok(Number.isInteger(def.windUpTicks) && def.windUpTicks >= 0, `${def.id} windup`)
     // An ability has no windup, or one of the kinds there are (`WINDUP_TICKS`), or is Back, which is a channel of its own; and none has a backswing.
@@ -173,6 +174,8 @@ test('every ability launches and plays out without errors', () => {
     for (const abilityId of castable(champion)) {
       const def = abilityDefs.get(abilityId)
       assert.ok(def)
+      // One that needs stacks the champion builds by fighting (the Hunter's Volley) is tried in its own champion's tests.
+      if (def.needsStacks) continue
       let duel: Simulator
       let tick = 1
       if (def.requires?.out === true) {
@@ -389,6 +392,7 @@ test('every champion\'s auto attack lands and deals damage', () => {
       : 0
     const frame = simulator.at(1 + champion.attackWindupTicks + flightTicks + 1)
     assert.ok((frame.get(2)?.getHealth() ?? opponent.maxHp) < opponent.maxHp, `${champion.id} hurt its target`)
-    assert.equal(frame.getEntities().length, 0, `${champion.id}'s shot is spent`)
+    // (The shot, that is: what an auto leaves behind, such as the Hellhound's blood, is not a shot.)
+    assert.equal(frame.getEntities().filter((entity) => entity.defId.startsWith('auto-shot')).length, 0, `${champion.id}'s shot is spent`)
   }
 })

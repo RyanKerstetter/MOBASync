@@ -9,11 +9,11 @@ export type Headgear =
   | 'goggles' | 'jesterHat' | 'ninjaMask' | 'chainMask' | 'leafCrown' | 'topknot' | 'bloodCrown' | 'antlers' | 'wildHair' | 'vampire'
 export type Weapon =
   | 'longsword' | 'warhammer' | 'katana' | 'daggers' | 'sickleChain' | 'skullStaff' | 'waterStaff' | 'fireStaff' | 'leafStaff'
-  | 'bow' | 'rifle' | 'launcher' | 'stick' | 'fists' | 'cleaver' | 'branches' | 'claws'
+  | 'bow' | 'crystalBow' | 'crossbow' | 'rifle' | 'launcher' | 'stick' | 'fists' | 'cleaver' | 'branches' | 'claws'
 export type BackPiece = 'cape' | 'longCape' | 'quiver' | 'backpack' | 'satchel' | 'tatters' | 'beads' | 'pelt' | 'none'
 // How an attack or a cast is played: a one-handed swing, a two-handed slam, quick stabs with both hands, punches, a thrust of a
 // staff, a spell flung with both hands, a bow drawn and loosed, a gun fired, something thrown overhand, claws raked across.
-export type Style = 'blade' | 'heavy' | 'dual' | 'unarmed' | 'staff' | 'spell' | 'bow' | 'gun' | 'throw' | 'claw'
+export type Style = 'blade' | 'heavy' | 'dual' | 'unarmed' | 'staff' | 'spell' | 'bow' | 'gun' | 'crossbow' | 'throw' | 'claw'
 
 export type Look = {
   // How broad and how tall it is, against the usual (1).
@@ -43,8 +43,8 @@ const SKIN = ['#e2b48f', '#c99470', '#f0c9a8', '#a8724e']
 export const CHAMPION_LOOKS: Readonly<Record<string, Look>> = {
   // A hooded hexer in tattered purple, with a skull on its staff and a curse burning in it.
   cursebearer: { bulk: 0.95, tall: 1, armor: 'robe', head: 'cowl', weapon: 'skullStaff', back: 'tatters', cloth: '#2a1838', trim: '#140c1c', accent: '#5a3480', skin: SKIN[2], eyes: '#8a62bf', attack: 'staff', cast: 'spell', detail: 'cursebearer' },
-  // A hunter in green leather with a feathered cap, a longbow and a quiver.
-  archer: { bulk: 0.9, tall: 1.02, armor: 'leather', head: 'featherCap', weapon: 'bow', back: 'quiver', cloth: '#3f6b35', trim: '#6b4a2e', accent: '#6dd39b', skin: SKIN[0], attack: 'bow', cast: 'bow', detail: 'archer' },
+  // A crossbowman in green leather with a feathered cap, a crossbow carried in both hands, and a quiver of bolts.
+  archer: { bulk: 0.9, tall: 1.02, armor: 'leather', head: 'featherCap', weapon: 'crossbow', back: 'quiver', cloth: '#3f6b35', trim: '#6b4a2e', accent: '#6dd39b', skin: SKIN[0], attack: 'crossbow', cast: 'crossbow', detail: 'archer' },
   // A knight in full plate with a visored, plumed helm, a heraldic tabard and cape, and a longsword (built in detail: knight.ts).
   swordsman: { bulk: 1.05, tall: 1.02, armor: 'plate', head: 'knightHelm', weapon: 'longsword', back: 'cape', cloth: '#2f4a7a', trim: '#c9b27a', accent: '#f2c14e', skin: SKIN[0], attack: 'blade', cast: 'blade', detail: 'knight' },
   // A water mage in deep blue, horned like a goat, with a staff holding an orb of water.
@@ -74,6 +74,24 @@ export const CHAMPION_LOOKS: Readonly<Record<string, Look>> = {
   aurel: { bulk: 1.02, tall: 1.05, armor: 'vampire', head: 'vampire', weapon: 'claws', back: 'longCape', cloth: '#1c141a', trim: '#7a0f1c', accent: '#d23a48', skin: '#e6dfe6', eyes: '#ff3a4a', attack: 'claw', cast: 'claw', detail: 'aurel' },
   // A treant: bark for a body, branches for arms, a crown of leaves and antlers of wood, and eyes that glow green.
   ent: { bulk: 1.3, tall: 1.12, armor: 'bark', head: 'antlers', weapon: 'branches', back: 'none', cloth: '#6b4a2e', trim: '#4f7d34', accent: '#7fbf4d', skin: '#7a5638', eyes: '#b6ff6a', attack: 'unarmed', cast: 'heavy', detail: 'ent' },
+  // A hound of hell: hunched and broad, scorched hide, wild mane, burning eyes, and claws.
+  hellhound: { bulk: 1.12, tall: 0.98, armor: 'berserker', head: 'wildHair', weapon: 'claws', back: 'pelt', cloth: '#3a1210', trim: '#1c0a08', accent: '#ff5a1a', skin: '#5a2a22', eyes: '#ff7a1a', attack: 'claw', cast: 'claw' },
+  // A guardian of stone: broad in heavy grey plate, horned helm and shield, swinging a hammer.
+  stone: { bulk: 1.25, tall: 1.04, armor: 'heavyplate', head: 'hornedHelm', weapon: 'warhammer', back: 'none', shield: true, cloth: '#6f6a5f', trim: '#3d3a33', accent: '#c9b27a', skin: SKIN[1], attack: 'heavy', cast: 'heavy' },
+  // A scavenger in a ragged hooded cloak of dun and moss, with hooked claws.
+  vulture: { bulk: 0.95, tall: 1.02, armor: 'cloak', head: 'hood', weapon: 'claws', back: 'tatters', cloth: '#3a2f24', trim: '#5f8f2e', accent: '#a6ff4d', skin: SKIN[3], eyes: '#c8ff6a', attack: 'claw', cast: 'throw' },
+  // A knife fighter in dark leathers, masked, with a pair of long knives.
+  blade: { bulk: 0.9, tall: 1, armor: 'leather', head: 'ninjaMask', weapon: 'daggers', back: 'none', cloth: '#2b2f36', trim: '#c0c8d0', accent: '#e0e6ee', skin: SKIN[0], attack: 'dual', cast: 'throw' },
+  // A blood mage in deep red robes, crowned in blood, with a staff that drips.
+  sanguine: { bulk: 0.95, tall: 1.02, armor: 'robe', head: 'bloodCrown', weapon: 'skullStaff', back: 'tatters', cloth: '#5a0f1c', trim: '#1c0a0e', accent: '#d23a48', skin: '#e6dfe6', eyes: '#ff3a4a', attack: 'staff', cast: 'spell' },
+  // A woodland hunter in browns and greens, hooded, with a longbow and a quiver.
+  hunter: { bulk: 0.95, tall: 1.03, armor: 'leather', head: 'hood', weapon: 'bow', back: 'quiver', cloth: '#4a5a2e', trim: '#5a3d22', accent: '#9bd36d', skin: SKIN[1], attack: 'bow', cast: 'bow' },
+  // A crystal archer in pale blue leathers, hooded, with a bow grown of crystal and a quiver of crystal arrows.
+  crystal: { bulk: 0.92, tall: 1.02, armor: 'leather', head: 'hood', weapon: 'crystalBow', back: 'quiver', cloth: '#2c4a6e', trim: '#d6eef7', accent: '#9fe7ff', skin: SKIN[0], eyes: '#bff4ff', attack: 'bow', cast: 'bow' },
+  // A paladin of light in white and gold plate, with a longsword and a cape.
+  sorin: { bulk: 1.08, tall: 1.03, armor: 'plate', head: 'knightHelm', weapon: 'longsword', back: 'cape', cloth: '#e9e1cf', trim: '#c9a23a', accent: '#ffe08a', skin: SKIN[0], eyes: '#fff2b0', attack: 'blade', cast: 'blade' },
+  // A marksman in a long dark coat, hooded, goggles on, with a long rifle.
+  sniper: { bulk: 0.92, tall: 1.02, armor: 'cloak', head: 'goggles', weapon: 'rifle', back: 'backpack', cloth: '#2f3a3f', trim: '#5a4a32', accent: '#ffd36a', skin: SKIN[2], attack: 'gun', cast: 'gun' },
 }
 
 // The look of a champion with none of its own: a robed caster if it shoots, a swordsman if not, in its own colour.

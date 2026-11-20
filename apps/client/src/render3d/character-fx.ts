@@ -1,6 +1,9 @@
 import {
   AdditiveBlending,
+  BoxGeometry,
   CircleGeometry,
+  ConeGeometry,
+  MeshStandardMaterial,
   OctahedronGeometry,
   CylinderGeometry,
   DoubleSide,
@@ -15,6 +18,15 @@ import {
 import {
   BURN_MAX_STACKS,
   BURN_STACK_KEY,
+  CARRION_KEY,
+  CHARGE_FULL_TICKS,
+  CHARGE_KEY,
+  CRACK_KEY,
+  GAME_TPS,
+  HOUND_BLEED_KEY,
+  KNIFE_KEY,
+  KNIFE_MAX,
+  SHRED_KEY,
   CURSE_KEY,
   CURSE_MAX_STACKS,
   FEAR_KEY,
@@ -28,6 +40,7 @@ import {
 import type { RenderedCharacter } from '../game-state.ts'
 import type { Release } from './character-models.ts'
 import { burst } from './effects/kits.ts'
+import { bloodSpray } from './effects/kits-melee.ts'
 import type { EffectContext } from './effects/visual.ts'
 import { HumanoidModel } from './models/humanoid.ts'
 import { ease, easeOut } from './models/model.ts'
@@ -43,7 +56,7 @@ type Transient = { mesh: Mesh; material: MeshBasicMaterial; born: number; life: 
 // (or is drawn by something else: a dash by its trail, a stick by its entity).
 const NOT_CASTS = new Set(['detonate', 'shadowstep', 'shadowreturn', 'recall', 'link', 'stick', 'warp', 'whirl'])
 // The abilities that move their caster, whose dash is drawn with the champion's own trail.
-const MOVEMENT = new Set(['leap', 'shadowstep', 'shadowreturn', 'lunge', 'cutthrough', 'bloodrush', 'hammerdrop'])
+const MOVEMENT = new Set(['leap', 'shadowstep', 'shadowreturn', 'lunge', 'cutthrough', 'bloodrush', 'hammerdrop', 'pounce', 'swoop', 'rampart', 'tether', 'bladedash', 'dawnstep', 'glide', 'tumble', 'disengage'])
 // Each champion's dash trail: its colour, and whether it is smoke (dark) or light.
 const DASH_TRAILS: Readonly<Record<string, { color: string; smoke?: true }>> = {
   archer: { color: '#6dd39b' },
@@ -52,6 +65,14 @@ const DASH_TRAILS: Readonly<Record<string, { color: string; smoke?: true }>> = {
   cloak: { color: '#8e6bd9' },
   aurel: { color: '#d23a48' },
   hammer: { color: '#b9a88c', smoke: true },
+  hellhound: { color: '#ff5a1a' },
+  stone: { color: '#b9a88c', smoke: true },
+  vulture: { color: '#2a241c', smoke: true },
+  blade: { color: '#e0e6ee' },
+  sorin: { color: '#ffe08a' },
+  hunter: { color: '#9bd36d' },
+  crystal: { color: '#9fe7ff' },
+  sniper: { color: '#8a8270', smoke: true },
 }
 // The colour of a champion's shield bubble.
 const SHIELD_COLOURS: Readonly<Record<string, string>> = { monk: '#ffd36a', soldier: '#7be0c3' }
@@ -65,11 +86,19 @@ export const EMPOWERING: Readonly<Record<string, { color: string; full: number }
   flurry: { color: '#ff9a3c', full: 3 },
   sword: { color: '#f2c14e', full: 3 },
   shadow: { color: '#9b7cff', full: 3 },
+  // The Grenadier primed (his passive): his launcher burns ember orange until the next ability spends it.
+  primed: { color: '#ff9a2e', full: 1 },
+  // Sorin's Smite: his sword burns with dawn for the blows it has left.
+  smite: { color: '#ffe08a', full: 3 },
+  // Crystal's Shardstorm: her bow glitters for the shard arrows left.
+  shardstorm: { color: '#9fe7ff', full: 3 },
+  // The Hunter's Volley: his bow glows green for the volleys left.
+  volley: { color: '#9bd36d', full: 3 },
 }
 
 // The marks a champion puts on an enemy that the 3D view shows on the ground under it, each its own way, and not as pips (see
 // `CharacterFx.marks`).
-export const GROUND_MARKS: ReadonlySet<string> = new Set([CURSE_KEY, TRICK_KEY, SIGHTED_KEY, BURN_STACK_KEY, SAGE_KEY, FEAR_KEY])
+export const GROUND_MARKS: ReadonlySet<string> = new Set([CURSE_KEY, TRICK_KEY, SIGHTED_KEY, BURN_STACK_KEY, SAGE_KEY, FEAR_KEY, HOUND_BLEED_KEY, CARRION_KEY, CRACK_KEY, SHRED_KEY])
 
 // How empowered a champion's next blow is, from 0 to 1, and in what colour: by its empowering stacks, or fully, in its own colour,
 // for an ability that readies its next auto (Shackle, Hush and the like: `ready:` markers).
@@ -88,6 +117,10 @@ type Memory = {
   castAt: Map<string, number>
   invisible: boolean
   lastPosition?: Point3
+  // Whether it was bleeding from the Hellhound last frame, to see it start.
+  houndBleed: number
+  // Since when it has been seen drawing a bead (the Sniper's Steady Aim), in seconds, while it is.
+  chargingSince?: number
 }
 
 // What is seen on and around the characters that is not an entity of the game: each ability that is only a buff, a dash or a
@@ -102,6 +135,16 @@ export class CharacterFx {
   private readonly tethers = new Map<number, { mesh: Mesh; material: MeshBasicMaterial }>()
   // The mark that floats over the head of an enemy the Cloak has feared lately, by character.
   private readonly markers = new Map<number, Group>()
+  // Blade's knives, floating in a ring high over him, one for each he has, by character; and how many he had last frame, to see one come or go.
+  private readonly knives = new Map<number, { ring: Group; knives: Group[]; had: number }>()
+  private readonly knifeBlade = new ConeGeometry(2.4, 20, 4).scale(1, 1, 0.35)
+  private readonly knifeGuard = new BoxGeometry(7, 1.5, 2)
+  private readonly knifeGrip = new CylinderGeometry(1.1, 1.1, 6, 6)
+  private readonly knifeSteel = new MeshStandardMaterial({ color: '#e0e6ee', metalness: 0.95, roughness: 0.18, emissive: '#5a6a80', emissiveIntensity: 0.6 })
+  private readonly knifeDark = new MeshStandardMaterial({ color: '#2b2f36', roughness: 0.6, metalness: 0.3 })
+  // The carrion mark over the head of an enemy the Vulture has marked, by character.
+  private readonly carrion = new Map<number, Group>()
+  private readonly carrionMaterial = new MeshBasicMaterial({ color: '#a6ff4d', transparent: true, opacity: 0.95, depthWrite: false })
   private readonly markerGeometry = new OctahedronGeometry(1, 0)
   private readonly markerMaterial = new MeshBasicMaterial({ color: '#c06bff', transparent: true, opacity: 0.95, depthWrite: false })
   private readonly sphere = new SphereGeometry(1, 20, 14)
@@ -128,9 +171,11 @@ export class CharacterFx {
         this.marks(character, ctx)
       } else {
         this.markers.get(character.id)?.removeFromParent()
+        this.carrion.get(character.id)?.removeFromParent()
       }
       this.shield(character, ctx)
       this.tether(character, byId, ctx)
+      this.floatingKnives(character, ctx)
       const model = ctx.models.modelOf(character.id)
       if (model) memory.lastPosition = { x: model.root.position.x, y: model.root.position.y, z: model.root.position.z }
     }
@@ -141,6 +186,16 @@ export class CharacterFx {
       if (present.has(id)) continue
       marker.removeFromParent()
       this.markers.delete(id)
+    }
+    for (const [id, marker] of this.carrion) {
+      if (present.has(id)) continue
+      marker.removeFromParent()
+      this.carrion.delete(id)
+    }
+    for (const [id, knives] of this.knives) {
+      if (present.has(id)) continue
+      knives.ring.removeFromParent()
+      this.knives.delete(id)
     }
     for (let index = this.transients.length - 1; index >= 0; index -= 1) {
       const item = this.transients[index]
@@ -162,6 +217,13 @@ export class CharacterFx {
     this.sphere.dispose()
     this.markerGeometry.dispose()
     this.markerMaterial.dispose()
+    this.carrionMaterial.dispose()
+    for (const knives of this.knives.values()) knives.ring.removeFromParent()
+    this.knifeBlade.dispose()
+    this.knifeGuard.dispose()
+    this.knifeGrip.dispose()
+    this.knifeSteel.dispose()
+    this.knifeDark.dispose()
     this.beam.dispose()
     this.arc.dispose()
     this.rake.dispose()
@@ -181,6 +243,13 @@ export class CharacterFx {
     if (release.kind === 'attack') {
       if (!(model instanceof HumanoidModel)) {
         if (character.monster && targetAt) burst(ctx, targetAt, { count: 8, speed: 80, color: colour('#ffffff'), size: 4, life: 0.2 })
+        // The Hellhound's forepaw raking across, burning, and blood out of what it tears.
+        if (character.champion.id === 'hellhound') {
+          const yaw = model.root.rotation.y
+          const ahead = { x: model.root.position.x + Math.sin(yaw) * model.height * 0.6, y: model.root.position.y + model.height * 0.55, z: model.root.position.z + Math.cos(yaw) * model.height * 0.6 }
+          this.rakeAt(ahead, character, '#ff5a1a', ctx, yaw)
+          if (targetAt) bloodSpray(ctx, targetAt, 14)
+        }
         return
       }
       const style = model.look.attack
@@ -252,6 +321,45 @@ export class CharacterFx {
         break
       case 'medic':
         burst(ctx, from, { count: 18, speed: 70, color: colour('#7be0c3'), size: 6, life: 0.5, up: 1 })
+        break
+      case 'howl': {
+        // Jaws thrown open: a gout of fire and ash at the mouth.
+        const yaw = model.root.rotation.y
+        const mouth = { x: model.root.position.x + Math.sin(yaw) * model.height * 0.45, y: model.root.position.y + model.height * 0.75, z: model.root.position.z + Math.cos(yaw) * model.height * 0.45 }
+        burst(ctx, mouth, { count: 30, speed: 140, color: colour('#ffb03a'), colorEnd: colour('#c4302b'), size: 8, life: 0.45 })
+        burst(ctx, mouth, { count: 12, speed: 60, color: colour('#2a1410'), size: 18, life: 0.9, puff: true, alpha: 0.45, up: 0.8 })
+        break
+      }
+      case 'dawnbeam':
+        // The light gathered at his sword before it goes.
+        burst(ctx, from, { count: 30, speed: 90, color: colour('#ffffff'), colorEnd: colour('#ffd36a'), size: 8, life: 0.4 })
+        this.shockRing({ x: model.root.position.x, y: 4, z: model.root.position.z }, 80, '#ffe08a', 0.4, ctx)
+        break
+      case 'spidermine': {
+        // Set down: a puff of dirt at his feet.
+        const at = model.root.position
+        burst(ctx, { x: at.x, y: 4, z: at.z }, { count: 12, speed: 60, color: colour('#6a5a44'), size: 10, life: 0.5, puff: true, alpha: 0.4 })
+        break
+      }
+      case 'bloodpact':
+        // A lash of blood from her hand to the one she binds.
+        if (targetAt) {
+          this.beamBetween(from, targetAt, '#8a0a16', 5, 0.35, ctx)
+          this.stream(targetAt, from, '#ff3a4a', 16, 0.45, ctx)
+          bloodSpray(ctx, targetAt, 20)
+        }
+        break
+      case 'crystalbolt':
+        burst(ctx, from, { count: 18, speed: 80, color: colour('#ffffff'), colorEnd: colour('#5fd0ff'), size: 5, life: 0.35 })
+        break
+      case 'arrowrain':
+        // Arrows loosed high, up into the sky.
+        for (let index = 0; index < 14; index += 1) {
+          ctx.fx.glow.emit({ x: from.x + (Math.random() - 0.5) * 10, y: from.y, z: from.z + (Math.random() - 0.5) * 10, vx: (Math.random() - 0.5) * 60, vy: 500 + Math.random() * 200, vz: (Math.random() - 0.5) * 60, life: 0.5, size: 5, sizeEnd: 2, color: colour('#c8f0a0'), alpha: 0.9 })
+        }
+        break
+      case 'tether':
+        burst(ctx, from, { count: 10, speed: 70, color: colour('#b9a88c'), size: 8, life: 0.4, puff: true, alpha: 0.4 })
         break
       case 'monster-slam': {
         const at = model.root.position
@@ -356,6 +464,75 @@ export class CharacterFx {
       case 'bloodrush':
         burst(ctx, chest, { count: 18, speed: 120, color: colour('#ff4a5a'), colorEnd: colour('#5a1018'), size: 6, life: 0.35 })
         break
+      case 'pounce':
+        burst(ctx, feet, { count: 20, speed: 150, color: colour('#3a2a24'), size: 14, life: 0.5, puff: true, alpha: 0.45, up: 0.2 })
+        burst(ctx, chest, { count: 18, speed: 120, color: colour('#ffb03a'), colorEnd: colour('#c4302b'), size: 6, life: 0.4 })
+        break
+      case 'shove':
+        burst(ctx, hand, { count: 16, speed: 80, color: colour('#c9b27a'), size: 6, life: 0.4 })
+        burst(ctx, feet, { count: 10, speed: 70, color: colour('#8a8270'), size: 12, life: 0.6, puff: true, alpha: 0.4 })
+        break
+      case 'rampart':
+        // Planted like a wall: a ring of stone dust and gold.
+        this.shockRing(feet, 110, '#c9b27a', 0.5, ctx)
+        burst(ctx, feet, { count: 26, speed: 160, color: colour('#8a8270'), size: 16, life: 0.8, puff: true, alpha: 0.45, up: 0.3 })
+        burst(ctx, chest, { count: 16, speed: 70, color: colour('#ffe08a'), size: 6, life: 0.5 })
+        break
+      case 'carrionstrike':
+        // A dark green glow on his claws, and a croak of carrion birds' feathers.
+        burst(ctx, hand, { count: 18, speed: 80, color: colour('#c8ff6a'), colorEnd: colour('#2a4a12'), size: 6, life: 0.45 })
+        burst(ctx, chest, { count: 8, speed: 70, color: colour('#1a1814'), size: 6, life: 1, puff: true, gravity: -60, up: 1 })
+        break
+      case 'swoop':
+        burst(ctx, chest, { count: 14, speed: 120, color: colour('#1a1814'), size: 7, life: 0.9, puff: true, gravity: -80, up: 0.8 })
+        break
+      case 'bladedash':
+        burst(ctx, chest, { count: 16, speed: 140, color: colour('#ffffff'), colorEnd: colour('#9aa3ad'), size: 5, life: 0.3 })
+        break
+      case 'frenzy':
+        // Steel flashing in both hands, and a pulse of red.
+        this.shockRing(feet, 60, '#e0e6ee', 0.35, ctx)
+        if (model instanceof HumanoidModel) {
+          for (const side of ['left', 'right'] as const) burst(ctx, model.handPoint(side), { count: 14, speed: 80, color: colour('#ffffff'), colorEnd: colour('#c4302b'), size: 5, life: 0.4 })
+        }
+        break
+      case 'bloodshot':
+      case 'bloodshotagain':
+        bloodSpray(ctx, hand, 8)
+        break
+      case 'coagulate':
+        burst(ctx, chest, { count: 20, speed: 60, color: colour('#6a0812'), size: 5, life: 0.6, puff: true, up: 0.6 })
+        this.shockRing(feet, 50, '#8a0a16', 0.4, ctx)
+        break
+      case 'volley':
+        this.shockRing(feet, 55, '#9bd36d', 0.4, ctx)
+        burst(ctx, hand, { count: 20, speed: 80, color: colour('#e0ffd0'), colorEnd: colour('#4f8f2e'), size: 6, life: 0.5 })
+        break
+      case 'disengage':
+        burst(ctx, feet, { count: 16, speed: 120, color: colour('#cfeedd'), size: 12, life: 0.5, puff: true, alpha: 0.4, up: 0.2 })
+        break
+      case 'glide':
+        burst(ctx, chest, { count: 20, speed: 100, color: colour('#ffffff'), colorEnd: colour('#5fd0ff'), size: 5, life: 0.4 })
+        break
+      case 'shardstorm':
+        // Crystals grow out of her bow.
+        this.shockRing(feet, 60, '#9fe7ff', 0.4, ctx)
+        burst(ctx, hand, { count: 26, speed: 70, color: colour('#ffffff'), colorEnd: colour('#5fd0ff'), size: 6, life: 0.6, up: 0.6 })
+        break
+      case 'smite':
+        // His sword takes the dawn: a column of light down on him.
+        this.lightColumn(feet, 26, 160, '#ffe08a', 0.45, ctx)
+        burst(ctx, hand, { count: 24, speed: 90, color: colour('#ffffff'), colorEnd: colour('#ffd36a'), size: 7, life: 0.5 })
+        break
+      case 'dawnstep':
+        burst(ctx, chest, { count: 18, speed: 120, color: colour('#fff2c0'), colorEnd: colour('#ffb43a'), size: 6, life: 0.35 })
+        break
+      case 'tumble':
+        burst(ctx, feet, { count: 14, speed: 90, color: colour('#8a8270'), size: 12, life: 0.5, puff: true, alpha: 0.4, up: 0.2 })
+        break
+      case 'steadyaim':
+        burst(ctx, hand, { count: 10, speed: 40, color: colour('#ffd36a'), size: 4, life: 0.4 })
+        break
       default:
         burst(ctx, hand, { count: 12, speed: 70, color: colour(model instanceof HumanoidModel ? model.accent : '#ffffff'), size: 6, life: 0.4 })
     }
@@ -409,7 +586,7 @@ export class CharacterFx {
     if (character.champion.id === 'soldier' && kinds.has('stat') && kinds.has('haste') && chance(26)) {
       ctx.fx.glow.emit({ ...around(base.y + Math.random() * model.height * 0.8), vy: 50, life: 0.5, size: 8, sizeEnd: 2, color: colour('#ff5a3a'), alpha: 0.7 })
     }
-    if (character.meter && chance(40)) {
+    if (character.meter && character.champion.meter && chance(40)) {
       ctx.fx.glow.emit({ ...around(base.y + Math.random() * model.height), vy: 70, life: 0.45, size: 12, sizeEnd: 3, color: colour('#ff6a4a'), colorEnd: colour('#7a1010'), alpha: 0.85 })
     }
     // An empowered next blow: what it strikes with glows (see `empowerOf`), and sparks of that colour come off it.
@@ -421,6 +598,36 @@ export class CharacterFx {
           ctx.fx.glow.emit({ x: at.x + (Math.random() - 0.5) * 10, y: at.y + (Math.random() - 0.5) * 10, z: at.z + (Math.random() - 0.5) * 10, vy: 24, life: 0.4, size: 7, sizeEnd: 1, color: colour(empowered.color), alpha: 0.95 })
         }
       }
+    }
+    // The Hellhound's bleed starting: a gout of blood out of it, a red flash, and blood thrown on the ground.
+    const bleed = character.stacks[HOUND_BLEED_KEY] ?? 0
+    if (bleed > memory.houndBleed) {
+      const chestAt = { x: base.x, y: base.y + model.height * 0.55, z: base.z }
+      bloodSpray(ctx, chestAt, 40)
+      this.shockRing({ x: base.x, y: base.y + 3, z: base.z }, r * 2, '#d01020', 0.4, ctx)
+      burst(ctx, chestAt, { count: 14, speed: 90, color: colour('#ff4a4a'), colorEnd: colour('#5a0610'), size: 7, life: 0.35 })
+      ctx.lights.light(base.x, base.y + 40, base.z, '#ff2020', 2.5, 160)
+    }
+    memory.houndBleed = bleed
+    // Drawing a bead (the Sniper's Steady Aim): light gathers at the muzzle, drawn in from round him, brighter the longer he holds, and a ring tightens at his feet;
+    // once it is at its fullest, it burns gold and throbs.
+    if ((character.stacks[CHARGE_KEY] ?? 0) > 0) {
+      memory.chargingSince ??= ctx.t
+      const held = Math.min(1, (ctx.t - memory.chargingSince) / (CHARGE_FULL_TICKS / GAME_TPS))
+      const full = held >= 1
+      const css = full ? '#ffd36a' : '#fff4c8'
+      for (let index = 0, count = Math.ceil(ctx.dt * (30 + held * 80)); index < count; index += 1) {
+        const angle = Math.random() * Math.PI * 2
+        const out = 30 + Math.random() * 30
+        const life = 0.3
+        ctx.fx.glow.emit({ x: hand.x + Math.cos(angle) * out, y: hand.y + (Math.random() - 0.5) * out, z: hand.z + Math.sin(angle) * out, vx: -Math.cos(angle) * out / life, vy: 0, vz: -Math.sin(angle) * out / life, life, size: 4 + held * 3, sizeEnd: 1, color: colour(css), alpha: 0.9 })
+      }
+      if (chance(full ? 20 : 8)) ctx.fx.glow.emit({ ...hand, life: 0.25, size: 10 + held * 16, sizeEnd: 4, color: colour(css), alpha: full ? 0.9 : 0.6 })
+      const ring = r * (2.6 - held * 1.3)
+      ctx.glowDecals.circle(base.x, base.z, ring, 2.5, css, (0.4 + held * 0.4) * (full ? 0.7 + 0.3 * Math.sin(ctx.t * 14) : 1))
+      ctx.lights.light(hand.x, hand.y, hand.z, '#ffd36a', 0.5 + held * 2, 120)
+    } else {
+      memory.chargingSince = undefined
     }
     if (character.dodging && chance(20)) ctx.fx.puff.emit({ ...around(base.y + Math.random() * model.height, r * 1.2), vy: 6, life: 0.4, size: 12, sizeEnd: 4, color: colour('#3a2a5a'), alpha: 0.35 })
 
@@ -509,6 +716,66 @@ export class CharacterFx {
         ctx.decals.ellipse(x + Math.cos(turn) * r * 1.35, z + Math.sin(turn) * r * 1.35, 6, 3.5, '#8ee6a0', 0.9)
       }
     }
+    // Bleeding from the Hellhound: a pool of blood under it, a throbbing red ring, and blood dripping from it.
+    if ((stacks[HOUND_BLEED_KEY] ?? 0) > 0) {
+      const throb = 0.75 + 0.25 * Math.sin(t * 7)
+      ctx.decals.softDisc(x, z, r * 1.7, '#4a050a', 0.6, 0.45)
+      ctx.decals.circle(x, z, r * 1.55, 4, '#d01020', 0.9 * throb)
+      if (Math.random() < ctx.dt * 22) ctx.fx.puff.emit({ x: x + (Math.random() - 0.5) * r, y: model.root.position.y + model.height * (0.3 + Math.random() * 0.4), z: z + (Math.random() - 0.5) * r, vy: -10, life: 0.6, size: 3, color: colour('#8a0a14'), alpha: 1, gravity: -500 })
+    }
+    // Shredded by Blade's knives: a ring of silver in three pieces, one lit for each shred, with cuts across the ground.
+    const shreds = stacks[SHRED_KEY] ?? 0
+    if (shreds > 0) {
+      this.segments(x, z, r * 1.3, 3, shreds, '#e0e6ee', ctx, 0.85)
+      for (let index = 0; index < shreds; index += 1) {
+        const turn = index * 2.1 + 0.4
+        ctx.decals.line({ x: x + Math.cos(turn) * r * 1.6, y: z + Math.sin(turn) * r * 1.6 }, { x: x + Math.cos(turn + 0.5) * r * 0.9, y: z + Math.sin(turn + 0.5) * r * 0.9 }, 2.5, '#1a1c20', 0.6)
+      }
+    }
+    // Cracked by Crystal's bolt: shards of crystal standing out of the ground round it, a cold ring, and glints rising off it.
+    if ((stacks[CRACK_KEY] ?? 0) > 0) {
+      const pulse = 0.7 + 0.3 * Math.sin(t * 8)
+      ctx.glowDecals.circle(x, z, r * 1.4, 3, '#9fe7ff', 0.8 * pulse)
+      for (let index = 0; index < 6; index += 1) {
+        const turn = index / 6 * Math.PI * 2 + 0.3
+        const from = { x: x + Math.cos(turn) * r * 1.4, y: z + Math.sin(turn) * r * 1.4 }
+        const to = { x: x + Math.cos(turn) * r * 2.1, y: z + Math.sin(turn) * r * 2.1 }
+        ctx.glowDecals.line(from, to, 4, '#bff4ff', 0.75 * pulse)
+      }
+      if (Math.random() < ctx.dt * 16) ctx.fx.glow.emit({ x: x + (Math.random() - 0.5) * r * 2, y: model.root.position.y + Math.random() * model.height, z: z + (Math.random() - 0.5) * r * 2, vy: 30, life: 0.6, size: 5, sizeEnd: 1, color: colour('#bff4ff'), alpha: 0.9 })
+    }
+    // Carrion (the Vulture's mark): dark wings wheeling over it as shadows on the ground, a sickly green ring, and a green mark over its head, so it is plain who
+    // is marked from across a fight.
+    const carrion = this.carrion.get(character.id)
+    if ((stacks[CARRION_KEY] ?? 0) > 0) {
+      const pulse = 0.7 + 0.3 * Math.sin(t * 5)
+      ctx.decals.softDisc(x, z, r * 2, '#1a2a0a', 0.35, 0.5)
+      ctx.glowDecals.circle(x, z, r * 1.7, 3.5, '#a6ff4d', 0.75 * pulse)
+      for (let index = 0; index < 3; index += 1) {
+        const turn = t * 1.2 + index * Math.PI * 2 / 3
+        const at = { x: x + Math.cos(turn) * r * 2.4, y: z + Math.sin(turn) * r * 2.4 }
+        const wing = { x: -Math.sin(turn) * 12, y: Math.cos(turn) * 12 }
+        const side = { x: Math.cos(turn) * 4, y: Math.sin(turn) * 4 }
+        ctx.decals.quad({ x: at.x - wing.x * 0.2 - side.x, y: at.y - wing.y * 0.2 - side.y }, { x: at.x + wing.x, y: at.y + wing.y }, { x: at.x - wing.x * 0.2 + side.x, y: at.y - wing.y * 0.2 + side.y }, { x: at.x - wing.x, y: at.y - wing.y }, '#0a0a06', 0.55)
+      }
+      let mark = carrion
+      if (!mark) {
+        mark = new Group()
+        const gem = new Mesh(this.markerGeometry, this.carrionMaterial)
+        gem.scale.set(7, 11, 7)
+        mark.add(gem)
+        const halo = new Mesh(this.sphere, new MeshBasicMaterial({ color: '#5f8f2e', transparent: true, opacity: 0.4, blending: AdditiveBlending, depthWrite: false }))
+        halo.scale.setScalar(14)
+        mark.add(halo)
+        this.carrion.set(character.id, mark)
+      }
+      if (!mark.parent) this.group.add(mark)
+      mark.position.set(x, model.root.position.y + model.height + 30 + Math.sin(t * 4) * 3, z)
+      mark.rotation.y = t * 2
+      if (Math.random() < ctx.dt * 10) ctx.fx.glow.emit({ x: x + (Math.random() - 0.5) * r * 2, y: model.root.position.y + 4, z: z + (Math.random() - 0.5) * r * 2, vy: 40, life: 0.8, size: 5, sizeEnd: 1, color: colour('#a6ff4d'), alpha: 0.8 })
+    } else {
+      carrion?.removeFromParent()
+    }
     const feared = (stacks[FEAR_KEY] ?? 0) > 0
     if (feared) {
       // On the ground: a violet sigil turning under it. Over its head: a mark that bobs, so it can be picked out in a crowd.
@@ -548,6 +815,63 @@ export class CharacterFx {
       const next = index === lit && lit === pieces - 1
       const alpha = on ? strength : next ? strength * (0.35 + 0.35 * Math.sin(ctx.t * 10)) : 0.18
       ctx.decals.ring(x, z, radius - 3, radius + 3, css, alpha, from, from + span - gap)
+    }
+  }
+
+  // Blade's knives: one for each he has, floating point down in a ring high over his head, turning slowly and bobbing, glinting. One that comes flashes in; one he
+  // spends is gone. Everyone who sees him sees how many he has.
+  private floatingKnives(character: RenderedCharacter, ctx: EffectContext): void {
+    const count = Math.min(KNIFE_MAX, character.stacks[KNIFE_KEY] ?? 0)
+    const model = ctx.models.modelOf(character.id)
+    let knives = this.knives.get(character.id)
+    if (count === 0 && !knives) return
+    if (!knives) {
+      const ring = new Group()
+      const each = Array.from({ length: KNIFE_MAX }, () => {
+        const knife = new Group()
+        const blade = new Mesh(this.knifeBlade, this.knifeSteel)
+        blade.rotation.x = Math.PI
+        knife.add(blade)
+        const guard = new Mesh(this.knifeGuard, this.knifeDark)
+        guard.position.y = 11
+        knife.add(guard)
+        const grip = new Mesh(this.knifeGrip, this.knifeDark)
+        grip.position.y = 15
+        knife.add(grip)
+        ring.add(knife)
+        return knife
+      })
+      knives = { ring, knives: each, had: count }
+      this.knives.set(character.id, knives)
+    }
+    const shown = count > 0 && !character.dead && model !== undefined && model.root.visible
+    if (!shown) {
+      knives.ring.removeFromParent()
+      knives.had = count
+      return
+    }
+    if (!knives.ring.parent) this.group.add(knives.ring)
+    const base = model.root.position
+    const height = base.y + model.height + 26
+    knives.ring.position.set(base.x, height, base.z)
+    knives.ring.rotation.y = ctx.t * 0.9
+    const radius = 14 + count * 3
+    knives.knives.forEach((knife, index) => {
+      knife.visible = index < count
+      if (!knife.visible) return
+      const turn = index / count * Math.PI * 2
+      knife.position.set(Math.cos(turn) * radius, Math.sin(ctx.t * 3 + index * 1.3) * 3, Math.sin(turn) * radius)
+      // Point down and a little out, the edge turned outward.
+      knife.rotation.set(0, -turn, 0.25)
+    })
+    if (count > knives.had) {
+      const turn = (count - 1) / count * Math.PI * 2 + knives.ring.rotation.y
+      burst(ctx, { x: base.x + Math.cos(turn) * radius, y: height, z: base.z - Math.sin(turn) * radius }, { count: 10, speed: 50, color: colour('#ffffff'), colorEnd: colour('#9aa3ad'), size: 4, life: 0.35 })
+    }
+    knives.had = count
+    if (Math.random() < ctx.dt * count * 1.5) {
+      const angle = Math.random() * Math.PI * 2
+      ctx.fx.glow.emit({ x: base.x + Math.cos(angle) * radius, y: height + 6, z: base.z + Math.sin(angle) * radius, life: 0.2, size: 8, sizeEnd: 2, color: colour('#ffffff'), alpha: 0.9 })
     }
   }
 
@@ -781,7 +1105,7 @@ export class CharacterFx {
   private memoryOf(id: number): Memory {
     let memory = this.memory.get(id)
     if (!memory) {
-      memory = { castAt: new Map(), invisible: false }
+      memory = { castAt: new Map(), invisible: false, houndBleed: 0 }
       this.memory.set(id, memory)
     }
     return memory

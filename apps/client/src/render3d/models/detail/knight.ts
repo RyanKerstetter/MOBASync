@@ -5,7 +5,6 @@ import {
   DoubleSide,
   Mesh,
   SRGBColorSpace,
-  type BufferAttribute,
   type BufferGeometry,
   type Group,
   type Material,
@@ -13,9 +12,8 @@ import {
   type Texture,
 } from 'three'
 import { CapsuleGeometry, ConeGeometry, CylinderGeometry, SphereGeometry, TorusGeometry } from './shapes.ts'
-import { smoothstep } from '../../space.ts'
-import { approach, joint } from '../model.ts'
-import { lathe, radiusAt, Sculpt, shaped, type Detail, type DetailKit, type Rig, type Triple } from './kit.ts'
+import { joint } from '../model.ts'
+import { Cape, lathe, radiusAt, Sculpt, shaped, type Detail, type DetailKit, type Rig, type Triple } from './kit.ts'
 import type { Look } from '../looks.ts'
 
 // The Swordsman, in full: a knight in plate, built piece by piece on the humanoid's skeleton (see humanoid.ts), which still poses
@@ -402,7 +400,7 @@ export function knight(kit: DetailKit, rig: Rig, look: Look, b: number): Detail 
       const length = 0.12 - segment * 0.012
       reach = length * 0.92
       const material = segment === 2 ? plumeWhite : index % 2 === 0 ? cloth : lining
-      kit.part(link, shaped(new SphereGeometry(1, 10, 6), { size: [0.034 - segment * 0.006, length / 2 + 0.01, 0.01] }), material, 0, length / 2, 0)
+      add(link, material, shaped(new SphereGeometry(1, 10, 6), { size: [0.034 - segment * 0.006, length / 2 + 0.01, 0.01], at: [0, length / 2, 0] }))
       joints.push(link)
       parent = link
     }
@@ -413,44 +411,7 @@ export function knight(kit: DetailKit, rig: Rig, look: Look, b: number): Detail 
   // ---- the cape: hung from the rosettes, draped over the shoulders, falling past the back and blowing behind as it walks
   const capeWidth = 0.54 * b
   const capeLength = 0.92
-  const capeGeometry = shaped(new BoxGeometry(capeWidth, capeLength, 0.016, 14, 22, 1), { at: [0, -capeLength / 2, 0] })
-  const capeRest = (capeGeometry.getAttribute('position') as BufferAttribute).array.slice()
-  const cape = new Mesh(capeGeometry, [gold, gold, gold, gold, lining, capeOuter])
-  cape.castShadow = true
-  cape.receiveShadow = true
-  joint(torso, 0, 0.5, -front(0.5) - 0.012).add(cape)
-  let capeTrail = 0.1
-
-  const drape = (t: number, walk: number, dead: boolean): void => {
-    const positions = capeGeometry.getAttribute('position') as BufferAttribute
-    const out = positions.array as Float32Array
-    const trail = Math.max(0.02, capeTrail)
-    for (let index = 0; index < out.length; index += 3) {
-      const x0 = capeRest[index]
-      const y0 = capeRest[index + 1]
-      const z0 = capeRest[index + 2]
-      const s = Math.min(1, Math.max(0, -y0 / capeLength))
-      const edge = x0 / (capeWidth / 2)
-      // Gathered at the top and falling wider.
-      const x = x0 * (0.8 + 0.2 * smoothstep(0, 0.35, s)) * (1 + 0.12 * s)
-      // Away from the body: out over the shoulder blades, and bent back along its length as it trails.
-      const bend = trail * s
-      const y = -capeLength * Math.sin(bend) / trail
-      let z = -capeLength * (1 - Math.cos(bend)) / trail - 0.06 * smoothstep(0, 0.16, s)
-      // Round the shoulders at the top, folds down its length, and a ripple running down it.
-      z += edge * edge * 0.12 * (1 - smoothstep(0, 0.3, s))
-      z += Math.sin(x0 * 36 + 0.8) * 0.014 * smoothstep(0.05, 0.6, s)
-      if (!dead) z += Math.sin(t * 4.3 - s * 5.5 + x0 * 7) * (0.008 + 0.03 * walk) * s
-      out[index] = x
-      out[index + 1] = y
-      out[index + 2] = z + z0
-    }
-    positions.needsUpdate = true
-    capeGeometry.computeVertexNormals()
-  }
-  drape(0, 0, false)
-  capeGeometry.computeBoundingSphere()
-  if (capeGeometry.boundingSphere) capeGeometry.boundingSphere.radius *= 2
+  const cape = new Cape(sculpt, torso, [gold, gold, gold, gold, lining, capeOuter], { width: capeWidth, length: capeLength, at: [0, 0.5, -front(0.5) - 0.012] })
 
   // ---- the sword
   // Built along +Y, turned to point ahead of the fist, and held edge on: its flats face the sides.
@@ -489,12 +450,12 @@ export function knight(kit: DetailKit, rig: Rig, look: Look, b: number): Detail 
     add(sword, gold, shaped(new SphereGeometry(0.014, 8, 6), { at: [0, -0.18, 0] }))
   }
 
-  sculpt.onFrame(({ t, dt, walk, hipL, hipR, dead }) => {
+  sculpt.onFrame((frame) => {
+    const { t, walk, hipL, hipR } = frame
     for (const { dome, shoulder } of pauldrons) dome.rotation.set(shoulder.rotation.x * 0.35, 0, shoulder.rotation.z * 0.6)
     // The tabard is pushed forward by whichever leg is ahead.
     tabard.rotation.x = Math.min(0, hipL, hipR) * 0.92 - 0.03
-    capeTrail = approach(capeTrail, dead ? 0.02 : 0.1 + 0.62 * walk + Math.sin(t * 1.7) * 0.03, 5, dt)
-    drape(t, walk, dead)
+    cape.update(frame)
     for (const { joints, phase } of feathers) {
       joints[0].rotation.x = -0.6 - 0.3 * walk + Math.sin(t * 3.1 + phase) * 0.04
       joints[1].rotation.x = -0.5 - 0.15 * walk + Math.sin(t * 3.7 + phase) * 0.07

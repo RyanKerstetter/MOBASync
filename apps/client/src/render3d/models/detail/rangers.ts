@@ -12,7 +12,7 @@ import { joint } from '../model.ts'
 import { arms, band, belt, boots, chest, chestFront, face, hand, legs, ring, strap } from './body.ts'
 import { lathe, paintTexture, roughen, Sculpt, shade, shaped, Skirt, sweep, weave, type Detail, type DetailKit, type Rig, type Triple } from './kit.ts'
 
-// The ones who shoot: the Archer with a longbow, and the Soldier and the Grenadier with guns carried in both hands (see
+// The ones who shoot: the Crossbowman with a crossbow, and the Soldier and the Grenadier with guns, all carried in both hands (see
 // `Detail.carried`), built along +Y from the grip, their top toward -Z.
 
 // A box with its edges rounded off a little, as made things are.
@@ -32,7 +32,7 @@ function pouch(s: Sculpt, parent: Object3D, material: Material, flap: Material, 
 
 // A hunter in a green jerkin laced over a linen shirt, a dagged hood down on the shoulders, a peaked cap with a long feather, a
 // bracer on the bow arm and a glove on the other, tall boots turned down at the top, a quiver of fletched arrows on the back, and
-// a recurved longbow with a wrapped grip.
+// a crossbow carried in both hands.
 export function archer(kit: DetailKit, rig: Rig, look: Look, b: number): Detail {
   const s = new Sculpt(kit, rig, look, b)
   const jerkin = s.cloth(look.cloth, { roughness: 0.75 })
@@ -127,21 +127,39 @@ export function archer(kit: DetailKit, rig: Rig, look: Look, b: number): Detail 
   strap(s, rig.torso, darkLeather, [0.15 * b, 0.5, -chestFront(s, 0.5, 0.15 * b) - 0.01], [-0.12 * b, 0.12, -chestFront(s, 0.12, -0.12 * b) - 0.015], 0.035, 0.008)
   s.add(rig.torso, brass, shaped(new TorusGeometry(0.014, 0.004, 4, 10), { at: [0.0, 0.3, chestFront(s, 0.3) + 0.02] }))
 
-  // The bow, in the left hand: its +X points back at the archer, its belly at the hand, its string behind.
-  const off = joint(s.left.hand)
-  const bow = joint(off)
-  bow.rotation.y = Math.PI / 2
-  hand(s, off, -1, skin, 'grip', 1, 'y')
+  // The crossbow, carried in both hands as a gun is (see `carried`), built along +Y from the grip with its top toward -Z: a stock of dark wood with a brass butt
+  // plate, a steel prod across its head with a stirrup in front, the string drawn back to the nut, a bolt laid in the groove, and a trigger lever under it.
+  const gun = carried(s)
+  const steel = s.surface('#9aa3ad', { roughness: 0.35, metalness: 0.85 })
+  const darkWood = s.surface('#5a3a20', { roughness: 0.55 })
+  s.add(gun, darkWood, shaped(new BoxGeometry(0.05, 0.36, 0.075), { at: [0, -0.16, 0.01] }))
+  s.add(gun, brass, shaped(new BoxGeometry(0.054, 0.02, 0.08), { at: [0, -0.345, 0.01] }))
+  s.add(gun, wood, shaped(new BoxGeometry(0.045, 0.62, 0.05), { at: [0, 0.2, -0.01] }))
+  s.add(gun, darkLeather, shaped(new BoxGeometry(0.05, 0.1, 0.055), { at: [0, 0.02, -0.01] }))
+  // The groove the bolt lies in, and the nut that holds the string.
+  s.add(gun, darkWood, shaped(new BoxGeometry(0.02, 0.5, 0.012), { at: [0, 0.26, -0.038] }))
+  s.add(gun, brass, shaped(new CylinderGeometry(0.016, 0.016, 0.05, 10), { turn: [0, 0, Math.PI / 2], at: [0, 0.08, -0.04] }))
+  // The trigger lever, long, under the stock.
+  s.add(gun, steel, sweep([[0, 0.06, 0.03], [0, 0.0, 0.06], [0, -0.14, 0.07]], 0.006, 4, 8))
+  // The prod: two steel limbs bent forward, bound to the stock.
   for (const flip of [1, -1]) {
-    const limb: Triple[] = [[0, 0.04 * flip, 0], [0.04, 0.22 * flip, 0], [0.15, 0.42 * flip, 0], [0.27, 0.54 * flip, 0], [0.25, 0.6 * flip, 0]]
-    s.add(bow, wood, sweep(limb, (u) => 0.022 - u * 0.013, 7, 30).scale(1, 1, 1.5))
-    s.add(bow, white, shaped(new SphereGeometry(0.012, 8, 6), { at: [0.25, 0.6 * flip, 0] }))
+    const limb: Triple[] = [[0, 0.48, -0.02], [0.12 * flip, 0.5, -0.02], [0.24 * flip, 0.47, -0.02], [0.31 * flip, 0.42, -0.02]]
+    s.add(gun, steel, sweep(limb, (u) => 0.016 - u * 0.007, 6, 16))
+    s.add(gun, brass, shaped(new SphereGeometry(0.01, 8, 6), { at: [0.31 * flip, 0.42, -0.02] }), false)
+    // The string, from the tip of each limb back to the nut.
+    const from: Triple = [0.31 * flip, 0.42, -0.02]
+    const to: Triple = [0.012 * flip, 0.09, -0.04]
+    strap(s, gun, string, from, to, 0.004, 0.004)
   }
-  s.add(bow, wood, shaped(new CapsuleGeometry(0.024, 0.12, 4, 8), { size: [1, 1, 1.3] }))
-  s.add(bow, darkLeather, shaped(new CylinderGeometry(0.028, 0.028, 0.11, 10), { size: [1, 1, 1.3] }))
-  s.add(bow, gem, shaped(new SphereGeometry(0.012, 8, 6), { at: [-0.02, 0.09, 0] }), false)
-  s.add(bow, string, shaped(new CylinderGeometry(0.003, 0.003, 1.08, 3), { at: [0.265, 0, 0] }), false)
-  return s.finish({ main: joint(s.right.hand), mainHold: 'free', off, offHold: 'bow', tip: bow, strike: bow, strikeShape: { x: 0.8, y: 2.6, z: 0.8 } })
+  for (const y of [0.45, 0.5]) s.add(gun, darkLeather, shaped(new BoxGeometry(0.06, 0.018, 0.062), { at: [0, y, -0.01] }))
+  // The stirrup, a hoop of steel at the head, to set a foot in when it is spanned.
+  s.add(gun, steel, shaped(new TorusGeometry(0.045, 0.007, 4, 12, Math.PI * 1.2), { turn: [0, Math.PI / 2, Math.PI * 1.6], at: [0, 0.54, -0.005] }))
+  // The bolt: a short heavy shaft, a steel head, stiff fletching.
+  s.add(gun, wood, shaped(new CylinderGeometry(0.006, 0.006, 0.36, 6), { at: [0, 0.27, -0.05] }))
+  s.add(gun, steel, shaped(new ConeGeometry(0.013, 0.05, 4), { at: [0, 0.47, -0.05] }))
+  for (const turn of [-0.5, 0.5]) s.add(gun, feather, shaped(new BoxGeometry(0.002, 0.05, 0.022), { turn: [0, turn, 0], at: [0, 0.12, -0.056] }))
+  s.add(gun, gem, shaped(new SphereGeometry(0.011, 8, 6), { at: [0.028, 0.18, -0.01] }), false)
+  return s.finish({ main: joint(s.right.hand), mainHold: 'free', carried: gun, tip: joint(gun, 0, 0.5, -0.05), strike: joint(gun, 0, 0.3, 0), strikeShape: { x: 0.7, y: 2, z: 0.7 } })
 }
 
 // ---------------------------------------------------------------------------------------------------------------- guns

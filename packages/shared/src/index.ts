@@ -196,6 +196,12 @@ export const GameFrameMovementSchema = z.union([
 export const GameFrameDashSchema = z.object({
   target: Vector2Schema,
   speed: z.number().finite().positive(),
+  // The last tick it moves on. It is over at the end of it wherever it has got to, so a dash that is held back (shoving someone along) takes no
+  // longer than it would have unheld.
+  endTick: TickSchema,
+  // From this tick on, the one dashing can act (cast, and attack) while it carries on to its end (see `GAME_DASH_FREE_TICKS`). Not until it ends,
+  // if not given.
+  freeTick: TickSchema.optional(),
   // A dash that passes through other characters instead of shoving them along.
   through: z.boolean().optional(),
   // A dash whose effects happen as it goes: the definition that has them, where it started from, the
@@ -214,7 +220,7 @@ export const StatusSchema = z.object({
   id: z.string().min(1),
   // A bleed and a spore are burns of other names (damage every pulse), so that what reads them (Aurel's kit, the Ent's) can tell them apart. Airborne is a knock-up: it holds the unit
   // as a stun does.
-  kind: z.enum(['slow', 'haste', 'attackrange', 'resist', 'root', 'stun', 'shield', 'burn', 'poison', 'bleed', 'spore', 'blind', 'silence', 'disarm', 'fear', 'airborne', 'invisible', 'dodge', 'stat', 'lifesteal']),
+  kind: z.enum(['slow', 'haste', 'attackrange', 'resist', 'root', 'stun', 'shield', 'burn', 'poison', 'bleed', 'spore', 'blind', 'silence', 'disarm', 'fear', 'airborne', 'invisible', 'dodge', 'stat', 'lifesteal', 'invulnerable']),
   rootId: z.string(),
   ownerId: z.number().int().positive(),
   startTick: TickSchema,
@@ -302,6 +308,9 @@ export const GameFrameCharacterSchema = z.object({
   movement: GameFrameMovementSchema.optional(),
   attackTarget: GameFrameAttackTargetSchema.optional(),
   dash: GameFrameDashSchema.optional(),
+  // The last tick it dealt or took damage, or started a cast: what a champion that is readied by going quiet counts from (`ChampionDef.primesWhenQuiet`).
+  // The start of the game, if it has done none of them.
+  activeTick: TickSchema.optional(),
   action: GameFrameActionSchema.optional(),
   // Ready tick per ability ID.
   cooldowns: z.record(z.string(), TickSchema),
@@ -338,6 +347,9 @@ export const GameFrameCharacterSchema = z.object({
   // it. It is in the frame because what a hit took cannot be worked out afterwards from the health alone (a heal in between hides it). Entries older than the champion's memory are
   // dropped, and it is absent when there are none, and for every champion that does not remember.
   wounds: z.array(z.object({ tick: TickSchema, amount: z.number().int().positive() })).optional(),
+  // How much of its resource a champion that has one has (`ChampionDef.resource`, Sorin's light), from 0 to its most. In the frame because what it can cast and how
+  // hard it hits turn on it. Absent is none.
+  resource: z.number().int().positive().optional(),
 })
 
 export const GameFrameEntitySchema = z.object({
@@ -510,10 +522,11 @@ export const GameStatusSchema = z.enum(['idle', 'selecting', 'starting', 'runnin
 
 // How a game ended, as every player is shown it: who won (the team ahead, or none if none was), how each team
 // scored, and what each player did. `reason` is the game's own end (a team reaching the score limit, or the last team standing in Core
-// Destruction), or the leader ending the game.
+// Destruction), the leader ending the game, or a forfeit: every other team's players left a game that started with more than one team in it, so
+// the team that stayed wins.
 export const GameResultSchema = z.object({
   mode: GameModeSchema,
-  reason: z.enum(['limit', 'ended']),
+  reason: z.enum(['limit', 'ended', 'forfeit']),
   winner: z.number().int().positive().optional(),
   scoreLimit: z.number().int().positive().optional(),
   teams: z.array(z.object({
@@ -640,6 +653,8 @@ export {
   touchesStructures,
   towardTarget,
   when,
+  invulnerable,
+  REVEAL_KEY,
 } from './effects.js'
 export type {
   Scaling,
@@ -661,8 +676,10 @@ export {
   abilityName,
   abilityOnKey,
   castRangeAgainst,
+  castRangeFor,
   getAbilityDef,
   meetsRequirement,
+  hasNeededStacks,
   quantizeDirection,
   withinCastRange,
   // The marks champions put on what they hit, and how many make a full set, for the page to show them.
@@ -671,11 +688,29 @@ export {
   CURSE_KEY,
   CURSE_MAX_STACKS,
   FEAR_KEY,
+  PRIMED_KEY,
   SAGE_KEY,
   SIGHTED_AUTOS,
   SIGHTED_KEY,
   TRICK_HITS,
   TRICK_KEY,
+  // And the newer champions' marks and buffs, which the page draws each its own way.
+  BEAM_HALF_WIDTH,
+  BEAM_LENGTH,
+  CARRION_KEY,
+  CHARGE_FULL_TICKS,
+  CHARGE_KEY,
+  CRACK_KEY,
+  FOCUS_KEY,
+  FOCUS_MAX,
+  HOUND_BLEED_KEY,
+  KNIFE_KEY,
+  KNIFE_MAX,
+  HOWL_HALF_ANGLE,
+  SHARD_KEY,
+  SHRED_KEY,
+  SMITE_KEY,
+  VOLLEY_KEY,
 } from './abilities.js'
 export type { AbilityDef, AbilityIndicator } from './abilities.js'
 export { abilityNumbers, amountValue, healPreview } from './ability-info.js'

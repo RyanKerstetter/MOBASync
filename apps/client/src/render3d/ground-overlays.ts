@@ -136,6 +136,22 @@ export class GroundOverlays {
     if (preview.range > 0 && preview.targeting !== 'direction') paint.circle(from.x, from.y, preview.range, 2.5, PREVIEW_COLOR, 0.5)
     if (preview.minRange) paint.circle(from.x, from.y, preview.minRange, 1.5, PREVIEW_COLOR, 0.3)
     const target = preview.target
+    if (target?.mode === 'direction' && preview.charge) {
+      // A held shot being drawn: a faint lane out to the most it can reach, the part it reaches now bright and widening as it grows, and a bar across its end.
+      const { fraction, most } = preview.charge
+      const far = { x: from.x + target.dir.x * most, y: from.y + target.dir.y * most }
+      const end = { x: from.x + target.dir.x * preview.range, y: from.y + target.dir.y * preview.range }
+      const width = preview.indicator?.width ?? 20
+      const full = fraction >= 1
+      const css = full ? '#ffd36a' : PREVIEW_COLOR
+      paint.line(from, far, width, PREVIEW_COLOR, 0.08)
+      paint.line(from, far, 1.5, PREVIEW_COLOR, 0.3)
+      paint.line(from, end, width * (0.5 + fraction * 0.5), css, 0.2 + fraction * 0.15)
+      paint.line(from, end, 3, css, 0.9)
+      const side = { x: -target.dir.y * width * 0.9, y: target.dir.x * width * 0.9 }
+      paint.line({ x: end.x + side.x, y: end.y + side.y }, { x: end.x - side.x, y: end.y - side.y }, 4, css, full ? 0.6 + 0.4 * Math.sin(performance.now() / 70) : 0.9)
+      return
+    }
     if (target?.mode === 'direction') {
       const end = { x: from.x + target.dir.x * preview.range, y: from.y + target.dir.y * preview.range }
       const width = preview.indicator?.width

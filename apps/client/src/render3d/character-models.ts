@@ -7,8 +7,8 @@ import { EMPOWERING, GROUND_MARKS } from './character-fx.ts'
 import { layoutCorpse } from '../render/corpse.ts'
 import { layoutStackPips } from '../render/stack-pips.ts'
 import { GolemModel, SlimeModel, WolfModel } from './models/creatures.ts'
-import { championFigure, HumanoidModel } from './models/humanoid.ts'
-import { championLook } from './models/looks.ts'
+import { championModel } from './models/champion-model.ts'
+import { HumanoidModel } from './models/humanoid.ts'
 import { RELEASE_SECONDS, type FxContext, type Model } from './models/model.ts'
 import { CoreModel, HealingZoneModel, StructureModel, TurretModel } from './models/structures.ts'
 import { angleDelta, colour, yawToward } from './space.ts'
@@ -31,6 +31,8 @@ type Actor = {
   lastPosition?: Vector2
   movedAt: number
   speed: number
+  // Whether it was dashing last frame, to know when a dash ends.
+  dashing?: boolean
   yaw: number
   // The action under way last frame, to know when one goes off, and what it was: which ability, aimed at whom.
   action?: 'attack' | 'cast'
@@ -133,6 +135,13 @@ export class CharacterModels3D {
         }
       }
       actor.lastPosition = character.dead ? undefined : { x: position.x, y: position.y }
+      // A dash that has just ended leaves no running behind it: the dash's speed is let go at once, and so is the grace that carries a walk over a
+      // still frame, unless it walks on from there this frame.
+      if (actor.dashing && !character.dashing) {
+        actor.speed = 0
+        if (!(moved > STEP_EPSILON && moved <= JUMP_DISTANCE)) actor.movedAt = Number.NEGATIVE_INFINITY
+      }
+      actor.dashing = character.dashing === true
       const moving = !character.dead && t - actor.movedAt < MOVING_GRACE
       if (!moving) actor.speed *= 0.9
 
@@ -348,6 +357,6 @@ function buildModel(character: RenderedCharacter, vision: VisionShading): Model 
     if (id === 'wolf') return new WolfModel(vision, radius)
     return radius >= 36 ? new GolemModel(vision, radius) : new WolfModel(vision, radius)
   }
-  return championFigure(vision, radius, championLook(character.champion), id)
+  return championModel(vision, character.champion)
 }
 

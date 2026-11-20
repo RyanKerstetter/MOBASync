@@ -32,6 +32,8 @@ test('the indicator of every ability aimed in a direction reaches as far as what
         for (const entity of simulator.at(tick).getEntities()) {
           if (entity.ownerId !== 1) continue
           const shape = getEntityDef(entity.defId)
+          // One that is not drawn (a recast's window on the caster) is not something it fires.
+          if (shape?.visual === 'hidden') continue
           const half = shape?.box?.halfLength ?? shape?.radius ?? 0
           const centre = entityPosAt(entity, tick).x - ORIGIN.x
           if (!furthest || centre + half > furthest.far) furthest = { near: centre - half, far: centre + half }

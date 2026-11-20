@@ -3,6 +3,7 @@ import {
   createVision,
   DEFAULT_VISION_SYSTEM,
   GAME_VISION_RANGE,
+  getEntityDef,
   visionSystems,
   type Terrain,
   type VisionGround,
@@ -48,7 +49,7 @@ export class TeamVision {
   }
 
   // Works out what the team sees, from where its champions are drawn now. Call it each frame before anything asks.
-  update(characters: readonly RenderedCharacter[], localTeam: number | undefined, options: { reveal?: boolean } = {}): void {
+  update(characters: readonly RenderedCharacter[], localTeam: number | undefined, options: { reveal?: boolean; entities?: readonly RenderedEntity[] } = {}): void {
     this.team = localTeam
     this.view = undefined
     this.teamOf.clear()
@@ -66,10 +67,18 @@ export class TeamVision {
         if (bush !== undefined) this.occupied.add(bush)
       }
     }
-    this.view = this.system.see(alive.map((character) => ({
-      position: character.position,
-      range: character.turret?.visionRange ?? GAME_VISION_RANGE,
-    })))
+    // A champion that sees farther (the Sniper) looks as far as it does, and what the team has put out that sees (`EntityDef.sight`, a Scan) looks too.
+    const lookouts = (options.entities ?? []).flatMap((entity) => {
+      const sight = getEntityDef(entity.defId)?.sight
+      return sight !== undefined && this.teamOf.get(entity.ownerId) === localTeam ? [{ position: entity.position, range: sight }] : []
+    })
+    this.view = this.system.see([
+      ...alive.map((character) => ({
+        position: character.position,
+        range: character.turret?.visionRange ?? character.champion.visionRange ?? GAME_VISION_RANGE,
+      })),
+      ...lookouts,
+    ])
   }
 
   // The picture of what is seen, for the darkness: none when everything is shown.
@@ -79,6 +88,8 @@ export class TeamVision {
 
   isVisible(character: RenderedCharacter): boolean {
     if (!this.view || character.team === this.team) return true
+    // One the team has revealed is seen, whatever would hide it.
+    if (character.revealedBy?.some((id) => this.teamOf.get(id) === this.team)) return true
     // An enemy that is invisible is not seen, however near: it is what the status is.
     if (character.invisible) return false
     if (!character.turret && this.isHiddenByBush(character.position)) return false
@@ -107,9 +118,20 @@ export class TeamVision {
     return this.view ? characters.filter((character) => !this.isVisible(character)) : []
   }
 
+  // One its owner's team alone is to see (`EntityDef.ownTeamOnly`, a hidden mine) is left out for anyone else, whatever they see, fog or no fog: once it has hidden, for
+  // one that is seen by all for a moment first.
   visibleEntities(entities: readonly RenderedEntity[]): RenderedEntity[] {
-    return this.view ? entities.filter((entity) => this.isEntityVisible(entity)) : [...entities]
+    const shown = entities.filter((entity) => !hiddenFromOthers(entity) || this.team === undefined || this.teamOf.get(entity.ownerId) === this.team)
+    return this.view ? shown.filter((entity) => this.isEntityVisible(entity)) : shown
   }
+}
+
+// Whether an entity is hidden from everyone but its owner's team now (`EntityDef.ownTeamOnly`): always, or once it has been out as long as it is seen by all.
+export function hiddenFromOthers(entity: Pick<RenderedEntity, 'defId' | 'progress' | 'lifetimeTicks'>): boolean {
+  const only = getEntityDef(entity.defId)?.ownTeamOnly
+  if (!only) return false
+  if (only === true) return true
+  return entity.progress * (entity.lifetimeTicks ?? 0) >= only.afterTicks
 }
 
 // Which system the page asks for in its address (`?vision=range`): by name, "off" for none, and the default when it says

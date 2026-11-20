@@ -44,6 +44,8 @@ export interface SimReader {
   entitiesOf(ownerId: number, defId: string): Array<{ id: string; position: Vector2 }>
   // Whether the unit is in the game and alive. A dead unit is a ghost.
   isAlive(unitId: number): boolean
+  // How much of its resource (`ChampionDef.resource`) the unit has, as it stands before this tick's writes: 0 for one with none.
+  resourceOf(unitId: number): number
 }
 
 export interface SimWriter {
@@ -56,6 +58,7 @@ export interface SimWriter {
   // Starts a dash toward `target` at `speed` (distance per second) from the next tick.
   // With `through`, the unit passes through other characters on the way instead of pushing them.
   // With `contact`, the dash runs a `DashDef`'s effects as it goes (see `dash`).
+  // With `free`, the unit can act again for the last few ticks of it (`GAME_DASH_FREE_TICKS`): for a champion's own dash.
   startDash(
     unitId: number,
     target: Vector2,
@@ -63,6 +66,7 @@ export interface SimWriter {
     options?: {
       through?: boolean
       contact?: { defId: string; origin: Vector2; sourceId: string; orderId: string }
+      free?: boolean
     },
   ): void
   // Puts the unit at the point as the tick ends (held inside the arena). Unlike a dash, nothing
@@ -83,6 +87,8 @@ export type GameEvent =
   | { type: 'reset-attack-timer'; id: string; rootId: string; ownerId: number; unitId: number }
   // Takes health straight off, ignoring shields and resistance, and never the last point.
   | { type: 'lose-health'; id: string; rootId: string; ownerId: number; unitId: number; amount: number }
+  // Adds to (or, below 0, takes from) a champion's resource, held between 0 and its most. What would go over the most is turned into healing (see `ChampionDef.resource`).
+  | { type: 'resource'; id: string; rootId: string; ownerId: number; unitId: number; amount: number }
   // Restores health up to the maximum. A unit already at 0 health is past saving.
   | { type: 'heal'; id: string; rootId: string; ownerId: number; unitId: number; amount: number }
   // Cancels a windup that has not launched yet. Nothing is spent and no stun is left behind.
@@ -175,6 +181,8 @@ interface EntityDefBase {
   // A summon can use it to end when the shield it came with is broken. An entity with neither
   // `lifetimeTicks` nor `landAtAim` has no timer, so this is the only thing that ends it.
   stayWhile?: (sim: SimReader, src: EffectSource) => boolean
+  // Runs once, at the point it was, when `stayWhile` ends it (and not when its lifetime does): a shield that bursts when it is broken.
+  onStayEnd?: readonly Effect[]
   // The entity hangs on its owner by a spring instead of flying a straight line. It is pulled
   // toward a rest point (the owner's position plus `offset`) with an acceleration of `stiffness`
   // times its distance from the rest point, minus `damping` times its velocity, in px/s. A
@@ -192,6 +200,11 @@ interface EntityDefBase {
   visual?: 'bolt' | 'field' | 'telegraph' | 'flash' | 'hidden'
   // Client-only fill colour for the drawing, for example '#6dd39b'.
   color?: string
+  // Client-only: drawn only for its owner's team, and never for anyone else, whatever they can see (a mine laid in hiding). With `afterTicks`, everyone sees it for
+  // that long after it is laid, and only then does it hide.
+  ownTeamOnly?: true | { afterTicks: number }
+  // Client-only: its owner's team sees round it this far while it is out, as round a champion of theirs (the Sniper's Scan).
+  sight?: number
 }
 
 // An entity has one shape: a circle (`radius`) or a rectangle (`box`), never both. A rectangle
@@ -210,6 +223,14 @@ export function getEntityDef(id: string): EntityDef | undefined {
 
 export function runEffects<C>(effects: readonly Effect<C>[], sim: C, src: EffectSource): void {
   for (const effect of effects) effect(sim, src)
+}
+
+// Runs `effects` once at each entity of this definition the caster has out, from where it is now (as its cast origin), each with a source of its own, so
+// what each one spawns is its own: every knife a champion left lying, called back at once.
+export const fromEachOwnEntity = <C extends SimReader>(defId: string, effects: readonly Effect<C>[]): Effect<C> => (sim, src) => {
+  sim.entitiesOf(src.ownerId, defId).forEach((entity, index) => {
+    runEffects(effects, sim, { ...src, id: `${src.id}:each:${defId}:${index}`, at: { ...entity.position } })
+  })
 }
 
 // Characters on different teams are enemies, and a character is no enemy of itself or its team. This
@@ -862,6 +883,27 @@ export const heal = (
   to: Selector = self(),
 ): Effect<SimReader & Pick<SimWriter, 'emitEvent'>> => noted(changeHealth('heal')(amount, to), { kind: 'heal', amount: describeAmount(amount) })
 
+// Gives the selected units (the caster, by default) this much of their resource (`ChampionDef.resource`), or with `spendResource` takes it. A unit with no resource is untouched.
+export const gainResource = (
+  amount: Amount,
+  to: Selector = self(),
+): Effect<SimReader & Pick<SimWriter, 'emitEvent'>> => (sim, src) => {
+  const value = Math.round(resolveAmount(amount, sim, src))
+  if (value === 0) return
+  for (const unitId of to(sim, src)) {
+    sim.emitEvent({ type: 'resource', id: src.id, rootId: src.rootId, ownerId: src.ownerId, unitId, amount: value })
+  }
+}
+export const spendResource = (amount: number, from: Selector = self()): Effect<SimReader & Pick<SimWriter, 'emitEvent'>> => gainResource(-amount, from)
+
+// How much of its resource the first selected unit (the caster, by default) has.
+export const resource = (
+  on: Selector = self(),
+): ((sim: SimReader, src: EffectSource) => number) => (sim, src) => {
+  const [unitId] = on(sim, src)
+  return unitId === undefined ? 0 : sim.resourceOf(unitId)
+}
+
 // How much health the first selected unit is missing, for damage that grows as a target weakens.
 export const missingHealth = (
   on: Selector = subject(),
@@ -902,7 +944,7 @@ export const subjectWithin = (range: number) => (sim: SimReader, src: EffectSour
 // stun does, and is told and drawn as being thrown into the air. Being invisible is a status too, for as long as it lasts:
 // an enemy cannot see or aim at one that is, and it is over (and what it does when it is, see `ChampionDef.onLeaveInvisibility`) as soon as it attacks or casts, except
 // an ability that keeps it (`AbilityDef.keepsInvisibility`).
-const crowdControl = (kind: 'root' | 'stun' | 'blind' | 'silence' | 'disarm' | 'fear' | 'airborne' | 'invisible' | 'dodge', defaultTo = subject) => (
+const crowdControl = (kind: 'root' | 'stun' | 'blind' | 'silence' | 'disarm' | 'fear' | 'airborne' | 'invisible' | 'dodge' | 'invulnerable', defaultTo = subject) => (
   durationTicks: number,
   to: Selector = defaultTo(),
 ): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
@@ -917,6 +959,12 @@ export const disarm = crowdControl('disarm')
 export const fear = crowdControl('fear')
 export const knockUp = crowdControl('airborne')
 export const invisible = crowdControl('invisible')
+// Untouchable while it lasts: no damage, crowd control, burn or push from an enemy lands on the unit (see the simulator's write step). For the caster, by default.
+export const invulnerable = crowdControl('invulnerable', self)
+
+// A marker of this key that an enemy has put on a unit shows it to that enemy's team, invisible or hidden in a bush or the dark, while it lasts: it can be aimed at,
+// and the page draws it (the Sniper's Scan).
+export const REVEAL_KEY = 'revealed'
 
 // The statuses that are crowd control: what a cleanse takes off. A slow is one; a burn, a bleed or a poison is not (it is damage), and neither is a push (a dash, not a status).
 export const CROWD_CONTROL_KINDS = ['slow', 'root', 'stun', 'blind', 'silence', 'disarm', 'fear', 'airborne'] as const satisfies readonly Status['kind'][]
@@ -979,6 +1027,8 @@ export const knockback = (
       push = Math.min(push, Math.max(0, toEnd) + options.pastEnd)
     }
     if (push <= 0) continue
+    // An untouchable enemy is not pushed (see `invulnerable`).
+    if (unitId !== src.ownerId && sim.statusesOn(unitId).some((status) => status.kind === 'invulnerable')) continue
     sim.startDash(unitId, { x: from.x + dir.x * push, y: from.y + dir.y * push }, speed)
   }
 }
@@ -998,15 +1048,18 @@ export const interrupt = (
 }
 
 // Extra auto attack range, in the same units as the champion's attackRange.
+// `named` makes it the owner's one status of that name, which each time it is given is renewed instead of added to (see `namedStatusId`).
 export const attackRangeBonus = (
   range: Amount,
   durationTicks: number,
   to: Selector = self(),
+  options: { named?: string } = {},
 ): Effect<SimReader & Pick<SimWriter, 'addStatus'>> => (sim, src) => {
   const amount = Math.max(0, resolveAmount(range, sim, src))
   if (amount === 0) return
+  const id = options.named === undefined ? `${src.id}:attackrange` : namedStatusId(src, options.named, 'attackrange')
   for (const unitId of to(sim, src)) {
-    sim.addStatus(unitId, statusFor(src, `${src.id}:attackrange`, 'attackrange', durationTicks, amount))
+    sim.addStatus(unitId, statusFor(src, id, 'attackrange', durationTicks, amount))
   }
 }
 
@@ -1088,6 +1141,8 @@ export const dash = (
       const ticks = typeof options.over === 'function' ? Math.max(1, options.over(sim, src)) : options.over
       sim.startDash(unitId, end, ticks === undefined ? speed : travel * GAME_TPS / ticks, {
         ...(options.through ? { through: true } : {}),
+        // Its own dash (not a jump, which comes down when it comes down) can be acted out of before it ends.
+        ...(unitId === src.ownerId && ticks === undefined ? { free: true } : {}),
         ...(def ? { contact: { defId: def.id, origin: { ...src.at }, sourceId: src.id, orderId: src.rootId } } : {}),
       })
     }
@@ -1364,7 +1419,7 @@ function ticksBeforeWall(terrain: Terrain, from: Vector2, velocity: Vector2, rad
   return Math.max(1, Math.floor(seconds * GAME_TPS))
 }
 
-function resolveAmount(amount: Amount, sim: SimReader, src: EffectSource): number {
+export function resolveAmount(amount: Amount, sim: SimReader, src: EffectSource): number {
   return typeof amount === 'number' ? amount : amount(sim, src)
 }
 

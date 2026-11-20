@@ -15,6 +15,7 @@ import {
   GAME_SNAPSHOT_HISTORY_TICKS,
   GAME_TPS,
   FINALIZE_LAG,
+  abilityName,
   abilityOnKey,
   arenaMaxRounds,
   arenaResetTick,
@@ -22,6 +23,8 @@ import {
   BACK_ABILITY_ID,
   buyProblem,
   castRangeAgainst,
+  castRangeFor,
+  PRIMED_KEY,
   clamp,
   distanceBetween,
   hasStatus,
@@ -40,6 +43,7 @@ import {
   itemAttackSpeedBonus,
   itemTotals,
   meetsRequirement,
+  REVEAL_KEY,
   namedStatusTicksLeft,
   NOT_IN_SHOP,
   quantizeDirection,
@@ -157,7 +161,7 @@ export type RenderedCharacter =
     linkedBy?: number
     // The bar over a champion that shows how long one of its statuses has left, such as a rage (see `ChampionMeterDef`): how full it is, from 0 to 1, and its
     // colour. Only there while it has any left.
-    meter?: { fraction: number; color: string }
+    meter?: { fraction: number; color: string; marks?: readonly number[] }
     // For the champion you control, when one of its abilities that heals it shows on its health bar what it would heal (`AbilityDef.healthBarPreview`) and is ready: how much, in
     // health. Left out otherwise, and when it would heal nothing.
     healPreview?: number
@@ -185,6 +189,8 @@ export type RenderedCharacter =
     feared: boolean
     // Not to be seen by an enemy, or aimed at by one (see `invisible`): the page draws it faintly to those it is not hidden from.
     invisible: boolean
+    // Whoever has revealed it (a `REVEAL_KEY` marker of theirs is on it): their team sees it, invisible, in a bush or in the dark (the Sniper's Scan).
+    revealedBy?: number[]
     // Dodging every auto attack aimed at it.
     dodging: boolean
     // What it is in the middle of, if anything: an auto attack or an ability winding up.
@@ -200,6 +206,12 @@ export type RenderedCharacter =
     attackRange: number
     attackCooldownTicks: number
   }
+// Who has a reveal marker on a character (see `RenderedCharacter.revealedBy`), for the character's view: nothing when no one has.
+function revealersOf(markers: readonly Marker[]): { revealedBy?: number[] } {
+  const by = [...new Set(markers.filter((marker) => marker.key === REVEAL_KEY).map((marker) => marker.ownerId))]
+  return by.length > 0 ? { revealedBy: by } : {}
+}
+
 export type RenderedEntity = SimEntity & {
   position: Vector2
   // The circle's radius, or for a box the radius that encloses it. Only circles are drawn from it.
@@ -231,6 +243,13 @@ export type AbilityCooldown = {
   abilityId: string
   ticksRemaining: number
   cooldownTicks: number
+  // The champion's next ability is primed (the Grenadier's passive: see `PRIMED_KEY`), which every slot shows.
+  primed?: true
+  // For one that spends stacks the champion gains over time (`AbilityDef.needsStacks` of its `gainsOverTime`, such as the Sniper's scans and Blade's knives): how many it has.
+  charges?: number
+  // It cannot be cast for want of the stacks it needs (`AbilityDef.needsStacks`), which the slot shows as it does a cooldown. For stacks that come back over time,
+  // `ticksRemaining` is then until the next, and `cooldownTicks` how long one takes.
+  locked?: true
 }
 // Where an ability is aimed: the ground under the pointer, which an ability aimed at a point or in a direction goes to, and the point
 // of whoever the pointer is over (in 3D, a body stands up off the ground, so pointing at its head is pointing at it), which an ability
@@ -254,6 +273,8 @@ export type CastPreview = {
   target?: CastTarget
   // A unit ability aimed at an enemy (or for allies, a teammate) beyond its range: it would not cast yet, but walk up to them and cast on reaching them.
   outOfRange?: boolean
+  // While a held ability is held (`AbilityDef.held`): how far it has grown, from 0 to 1, and how far it reaches at the most (`range` is how far it reaches now).
+  charge?: { fraction: number; most: number }
 }
 
 // How long a cast stays in `RenderedCharacter.casts`, in milliseconds.
@@ -269,7 +290,7 @@ function characterName(character: SimCharacter): string {
 
 // A champion's stats at the level a frame has it, with what its items and its statuses add to them.
 function statsOf(champion: Champion, state: CharacterTickSnapshot | undefined): ChampionStats {
-  return withStatBuffs(withItems(champion.statsAt(state?.getLevel() ?? 1), state?.getItems()), state?.getStatuses())
+  return withStatBuffs(withItems(champion.statsAt(state?.getLevel() ?? 1), state?.getItems(), undefined, champion.lowHealthSpeedBonus(state?.getLevel() ?? 1, state?.getHealthState())), state?.getStatuses())
 }
 
 // How high a knocked-up character is drawn at `tick`, as a share of the most a knock-up lifts it: up and back down over the knock-up that has the longest to run, as an arc.
@@ -596,7 +617,8 @@ export class ClientGameState {
   castMustWait(slot: number, now = performance.now()): string | undefined {
     const ability = this.abilityInSlot(slot)
     if (!ability.ok) return undefined
-    const tick = this.nextOrderTick(now)
+    // It is asked every frame while a cast is held, so it looks at about the tick the cast would go on without taking that tick (see `peekOrderTick`).
+    const tick = this.peekOrderTick(now)
     const frame = this.simulator.at(tick)
     const state = frame.get(ability.localCharacterId)
     if (!state) return undefined
@@ -607,9 +629,9 @@ export class ClientGameState {
   }
 
   // Whether the champion is in the middle of something the simulator will not start a cast during: an attack or an ability winding up
-  // (but not Back, which a cast breaks off), or a dash. It ends by itself, so it is worth waiting for.
+  // (but not Back, which a cast breaks off), or a dash (but not the last few ticks of its own, see `GAME_DASH_FREE_TICKS`). It ends by itself, so it is worth waiting for.
   private busyWith(state: CharacterTickSnapshot, tick: number): string | undefined {
-    if (state.isDashing()) return 'You cannot cast while dashing.'
+    if (state.dashHolds(tick)) return 'You cannot cast while dashing.'
     const action = state.getAction()
     if (action && action.launchTick > tick && !(action.kind === 'cast' && action.abilityId === BACK_ABILITY_ID)) {
       return action.kind === 'attack' ? 'You cannot cast while an attack winds up.' : 'You cannot cast while another ability winds up.'
@@ -643,6 +665,9 @@ export class ClientGameState {
         wait: false,
       }
     }
+    if (def.needsStacks && !state.hasStacksFor(def)) {
+      return { reason: `${abilityName(def)} is not ready yet.`, wait: false }
+    }
     return undefined
   }
 
@@ -671,15 +696,50 @@ export class ClientGameState {
     const aimed = this.castTarget(def, origin, aim, now, frame, characters)
     // Aimed at a unit it reaches farther to (`rangeAgainst`), the ring is drawn as far as it reaches to that one.
     const aimedUnit = aimed.ok && aimed.target.mode === 'unit' ? frame.get(aimed.target.unitId) : undefined
+    // A held ability being held: its recast, reaching as far as it has grown.
+    const held = ability.def.held
+    const heldFor = held && def.id !== ability.def.id ? this.heldTicks(frame, localCharacterId, def) : undefined
+    if (held && heldFor !== undefined) {
+      return {
+        abilityId: def.id,
+        targeting: def.targeting,
+        range: held.reach(heldFor),
+        ...(def.indicator ? { indicator: { ...def.indicator } } : {}),
+        ...(aimed.ok ? { target: aimed.target } : {}),
+        charge: { fraction: clamp(heldFor / held.full, 0, 1), most: held.reach(held.full) },
+      }
+    }
     return {
       abilityId: def.id,
       targeting: def.targeting,
-      range: aimedUnit ? castRangeAgainst(def, aimedUnit.getStatuses()) : def.range,
+      range: aimedUnit ? castRangeAgainst(def, aimedUnit.getStatuses(), aimedUnit.getMarkers()) : this.rangeOf(def, frame, ability.localCharacterId),
       ...(def.minRange ? { minRange: def.minRange } : {}),
       ...(def.indicator ? { indicator: { ...def.indicator } } : {}),
       ...(aimed.ok ? { target: aimed.target } : {}),
       ...(aimed.ok && aimed.outOfRange ? { outOfRange: true } : {}),
     }
+  }
+
+  // How long a held ability has been held, in ticks of this frame: since the entity its recast needs came out.
+  private heldTicks(frame: GameTickSnapshot, characterId: number, recast: AbilityDef): number | undefined {
+    const window = recast.requires && frame.getEntities().find((entity) => entity.ownerId === characterId && entity.defId === recast.requires?.entity)
+    return window ? Math.max(0, frame.tick - window.startTick) : undefined
+  }
+
+  // The ability in a slot that is held (`AbilityDef.held`), as it is on the key itself (not its recast): how long it may be held, in ticks. Nothing for any other.
+  heldAbility(slot: number): { ticks: number } | undefined {
+    const ability = this.abilityInSlot(slot)
+    return ability.ok ? ability.def.held : undefined
+  }
+
+  // Whether the key of a held ability has turned into the recast that letting it go casts: the ability has gone off, and is being held. It is asked every frame, so,
+  // like the preview, it reads the frame being drawn: reading the next order's tick would run the simulation a tick ahead with every call, and the orders after it
+  // would be stamped ever further in the future, until the server refused them.
+  isHolding(slot: number, now = performance.now()): boolean {
+    const ability = this.abilityInSlot(slot)
+    if (!ability.ok || !ability.def.held) return false
+    const frame = this.getSnapshotAtEstimatedTick(now)
+    return abilityOnKey(ability.def, this.entityOut(frame, ability.localCharacterId)).id !== ability.def.id
   }
 
   private abilityInSlot(slot: number):
@@ -691,6 +751,12 @@ export class ClientGameState {
     const def = abilityId === undefined ? undefined : getAbilityDef(abilityId)
     if (!def) return { ok: false, reason: 'No ability is bound to that key.' }
     return { ok: true, localCharacterId: character.id, def }
+  }
+
+  // How far an ability of this character's reaches in a frame: longer while it carries the marker that lengthens it (the Grenadier primed: see `castRangeFor`).
+  private rangeOf(def: AbilityDef, frame: GameTickSnapshot, characterId: number): number {
+    const markers = frame.get(characterId)?.getMarkers() ?? []
+    return castRangeFor(def, (key) => markers.some((marker) => marker.key === key))
   }
 
   // `frame` is where the simulator will measure a unit's reach from: its position there is what
@@ -713,7 +779,8 @@ export class ClientGameState {
       // An ability with a least distance has no heading from right on top of the caster.
       if (distance === 0 && minRange > 0) return { ok: false, reason: 'Aim away from your champion.' }
       // Held between the nearest and the farthest it can be aimed.
-      const held = clamp(distance, minRange, def.range)
+      const self = this.localCharacterId
+      const held = clamp(distance, minRange, self === undefined ? def.range : this.rangeOf(def, frame, self))
       const scale = distance === 0 ? 1 : held / distance
       return { ok: true, target: { mode: 'point', point: { x: origin.x + (aim.x - origin.x) * scale, y: origin.y + (aim.y - origin.y) * scale } } }
     }
@@ -739,7 +806,7 @@ export class ClientGameState {
     const unitAt = unit?.getPosition()
     // Out of its reach it is still cast: the simulator walks the champion up to the target, as it does to attack an enemy, and casts on reaching it. Its reach can be longer to
     // this unit than to others (`rangeAgainst`), as the simulator will measure it.
-    if (!unitAt || !withinCastRange(origin, unitAt, castRangeAgainst(def, unit?.getStatuses() ?? []))) return { ok: true, target, outOfRange: true }
+    if (!unitAt || !withinCastRange(origin, unitAt, castRangeAgainst(def, unit?.getStatuses() ?? [], unit?.getMarkers() ?? []))) return { ok: true, target, outOfRange: true }
     return { ok: true, target }
   }
 
@@ -759,11 +826,41 @@ export class ClientGameState {
     const snapshot = this.getSnapshotAtEstimatedTick(now)
     const state = snapshot.get(character.id)
     const entityOut = this.entityOut(snapshot, character.id)
+    const primed = state?.getMarkers().some((marker) => marker.key === PRIMED_KEY) === true
     return character.champion.abilities.flatMap((keyed, slot) => {
       const keyedDef = getAbilityDef(keyed)
       if (!keyedDef) return []
       // A key that has turned into its recast shows that ability and its cooldown instead.
       const def = abilityOnKey(keyedDef, entityOut)
+      const needs = def.needsStacks
+      if (needs && state) {
+        const have = state.getMarkers().filter((marker) => marker.key === needs.key && marker.ownerId === character.id).length
+        const gains = character.champion.gainsOverTime?.key === needs.key ? character.champion.gainsOverTime : undefined
+        const cooldown = state.getAbilityCooldown(def.id).ticksRemaining
+        if (have < needs.count) {
+          // Out of them: until the next comes back, for those that do (on the game's clock, every `everyTicks`).
+          const nextGain = gains ? gains.everyTicks - (snapshot.tick % gains.everyTicks) : 0
+          return [{
+            slot,
+            abilityId: def.id,
+            ticksRemaining: this.fractionalTicksRemaining(snapshot.tick, Math.max(cooldown, nextGain), now),
+            cooldownTicks: gains ? gains.everyTicks : hastedCooldownTicks(def.cooldownTicks, statsOf(character.champion, state).haste),
+            locked: true as const,
+            ...(gains ? { charges: have } : {}),
+            ...(primed ? { primed: true as const } : {}),
+          }]
+        }
+        if (gains) {
+          return [{
+            slot,
+            abilityId: def.id,
+            ticksRemaining: this.fractionalTicksRemaining(snapshot.tick, cooldown, now),
+            cooldownTicks: hastedCooldownTicks(def.cooldownTicks, statsOf(character.champion, state).haste),
+            charges: have,
+            ...(primed ? { primed: true as const } : {}),
+          }]
+        }
+      }
       return [{
         slot,
         abilityId: def.id,
@@ -774,6 +871,7 @@ export class ClientGameState {
         ),
         // The whole cooldown is the ability's shortened by the champion's haste, which is what the simulator starts it at.
         cooldownTicks: hastedCooldownTicks(def.cooldownTicks, statsOf(character.champion, state).haste),
+        ...(primed ? { primed: true as const } : {}),
       }]
     })
   }
@@ -958,7 +1056,8 @@ export class ClientGameState {
       const level = local?.getLevel() ?? 1
       const itemSpeed = itemTotals(local?.getItems()).attackSpeed ?? 0
       const itemSpeedBonus = itemAttackSpeedBonus(local?.getItems())
-      total = champion.attackCooldownTicksWith(statuses, level, itemSpeed, itemSpeedBonus) - champion.attackWindupTicksWith(statuses, level, itemSpeed, itemSpeedBonus)
+      const health = local?.getHealthState()
+      total = champion.attackCooldownTicksWith(statuses, level, itemSpeed, itemSpeedBonus, health) - champion.attackWindupTicksWith(statuses, level, itemSpeed, itemSpeedBonus, health)
     }
     return clamp(1 - ticksRemaining / Math.max(1, total), 0, 1)
   }
@@ -1321,6 +1420,15 @@ export class ClientGameState {
         stacks: countMarkers(state?.getMarkers() ?? []),
         ...(linkedBy !== undefined ? { linkedBy } : {}),
         ...(meterDef && meterLeft > 0 ? { meter: { fraction: Math.min(1, meterLeft / meterDef.ticks), color: meterDef.color } } : {}),
+        // A champion's resource (Sorin's light) is drawn on the same bar, as full as it is, always while it is alive: empty too, so its lines show what it is short of.
+        ...(character.champion.resource && health?.deathTick === undefined
+          ? { meter: {
+            fraction: Math.min(1, (state?.getResource() ?? 0) / character.champion.resource.max),
+            color: character.champion.resource.color,
+            // The amounts its abilities spend, as lines across the bar.
+            ...(character.champion.resource.marks ? { marks: character.champion.resource.marks.map((amount) => amount / (character.champion.resource?.max ?? 1)) } : {}),
+          } }
+          : {}),
         ...this.healPreviewOf(character, state, snapshot.tick),
         ...this.backingOf(state, now),
         hasted: hasStatus(statuses, 'haste'),
@@ -1338,13 +1446,14 @@ export class ClientGameState {
         disarmed: hasStatus(statuses, 'disarm'),
         feared: hasStatus(statuses, 'fear'),
         invisible: hasStatus(statuses, 'invisible'),
+        ...revealersOf(state?.getMarkers() ?? []),
         dodging: hasStatus(statuses, 'dodge'),
         ...this.getActionView(snapshot, state, now),
         ...(state?.isDashing() ? { dashing: true as const } : {}),
         ...(statuses.length > 0 ? { statusKinds: [...new Set(statuses.map((status) => status.kind))] } : {}),
         ...this.castsOf(character, state, snapshot.tick, now),
         attackRange: character.champion.attackRangeWith(statuses, itemTotals(state?.getItems()).attackRange ?? 0),
-        attackCooldownTicks: character.champion.attackCooldownTicksWith(statuses, state?.getLevel() ?? 1, itemTotals(state?.getItems()).attackSpeed ?? 0, itemAttackSpeedBonus(state?.getItems())),
+        attackCooldownTicks: character.champion.attackCooldownTicksWith(statuses, state?.getLevel() ?? 1, itemTotals(state?.getItems()).attackSpeed ?? 0, itemAttackSpeedBonus(state?.getItems()), state?.getHealthState()),
         ...this.getRenderedCharacterView(character.id, now, snapshot),
       })
     }
@@ -1502,6 +1611,13 @@ export class ClientGameState {
       this.simulator.latestSnapshotTick,
       Math.floor(this.estimateTick(now)),
     ))
+  }
+
+  // About the tick the next order would be stamped with, without stamping one: the latest tick worked out, and not the one after it. `nextOrderTick` takes the tick after
+  // the latest worked out, and the frame of it is then worked out, so a page that asked it every frame would run the simulation a tick further ahead each time, and stamp
+  // its orders further and further in the future, until the server refused them as out of sequence. What is asked every frame asks this instead.
+  private peekOrderTick(now: number): number {
+    return Math.max(this.lastIssuedTick, this.simulator.commitTick + 1, this.simulator.latestSnapshotTick, Math.floor(this.estimateTick(now)))
   }
 
   private nextOrderTick(now: number): number {

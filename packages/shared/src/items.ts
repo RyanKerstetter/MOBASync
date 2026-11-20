@@ -153,14 +153,15 @@ export function itemAttackSpeedBonus(inventory: Inventory | undefined, lookup?: 
   return itemEffects(inventory, lookup).reduce((total, { effect }) => (effect.kind === 'attackSpeed' ? total + effect.bonus : total), 0)
 }
 
-// A champion's stats with what its items add to them.
-export function withItems(stats: ChampionStats, inventory: Inventory | undefined, lookup?: (id: string) => Item | undefined): ChampionStats {
+// A champion's stats with what its items add to them. `speedBonus` is a share more attack speed that comes of something else, added to the items' (the Soldier's
+// low health: see `Champion.lowHealthSpeedBonus`).
+export function withItems(stats: ChampionStats, inventory: Inventory | undefined, lookup?: (id: string) => Item | undefined, speedBonus = 0): ChampionStats {
   const totals = itemTotals(inventory, lookup)
   return {
     ...stats,
     maxHp: Math.round(stats.maxHp + (totals.maxHp ?? 0)),
     attackDamage: stats.attackDamage + (totals.attackDamage ?? 0),
-    attackSpeed: (stats.attackSpeed + (totals.attackSpeed ?? 0)) * (1 + itemAttackSpeedBonus(inventory, lookup)),
+    attackSpeed: (stats.attackSpeed + (totals.attackSpeed ?? 0)) * (1 + itemAttackSpeedBonus(inventory, lookup) + speedBonus),
     resistance: stats.resistance + (totals.resistance ?? 0),
     haste: stats.haste + (totals.haste ?? 0),
     arcane: stats.arcane + (totals.arcane ?? 0),

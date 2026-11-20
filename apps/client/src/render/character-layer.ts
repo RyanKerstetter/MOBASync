@@ -163,7 +163,10 @@ export class CharacterLayer {
       if (losing) drawBar(actor.deaggroBar, meterBarTop(above), losing.fraction, losing.color, METER_BAR_HEIGHT)
       // A meter is under the health bar in the same place (a champion has no deaggro bar, so the two are never both there), and runs down as the status does.
       actor.meterBar.visible = !character.dead && character.meter !== undefined
-      if (character.meter) drawBar(actor.meterBar, meterBarTop(above), character.meter.fraction, character.meter.color, METER_BAR_HEIGHT)
+      if (character.meter) {
+        drawBar(actor.meterBar, meterBarTop(above), character.meter.fraction, character.meter.color, METER_BAR_HEIGHT)
+        if (character.meter.marks) drawBarMarks(actor.meterBar, meterBarTop(above), character.meter.fraction, character.meter.marks, METER_BAR_HEIGHT)
+      }
       actor.statusText.text = statusLabels(character).join(' · ')
       actor.statusText.position.set(0, -above - 43)
       drawStackPips(actor.stackPips, radius, character.dead ? {} : character.stacks)
@@ -390,6 +393,17 @@ function drawBar(graphics: Graphics, y: number, fraction: number, fillColor: str
     .fill({ color: '#101827' })
     .rect(-width / 2, y, width * clamp(fraction, 0, 1), height)
     .fill({ color: fillColor })
+}
+
+// Lines across a bar where it is enough for something (a resource's cost of each ability), standing a little out of it: bright once the bar has reached it, dim before.
+function drawBarMarks(graphics: Graphics, y: number, fraction: number, marks: readonly number[], height: number): void {
+  const left = -HEALTH_BAR_WIDTH / 2
+  for (const mark of marks) {
+    const x = left + HEALTH_BAR_WIDTH * clamp(mark, 0, 1)
+    const reached = fraction >= mark
+    graphics.rect(x - 1, y - 2, 2, height + 4).fill({ color: reached ? '#ffffff' : '#0b1220', alpha: reached ? 0.95 : 0.9 })
+    if (!reached) graphics.rect(x - 0.5, y - 2, 1, height + 4).fill({ color: '#ffffff', alpha: 0.55 })
+  }
 }
 
 // Health from the left, a heal that is ready after it (paler, as health that is not there yet), the shield on the end of that, and ticks across the bar to read it by.

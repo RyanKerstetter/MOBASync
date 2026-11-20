@@ -9,13 +9,19 @@ import {
   Float32BufferAttribute,
   Group,
   LatheGeometry,
+  Matrix4,
   Mesh,
+  MeshLambertMaterial,
+  MeshStandardMaterial,
+  Skeleton,
+  SkinnedMesh,
   SRGBColorSpace,
+  Uint16BufferAttribute,
   Vector2 as ThreeVector2,
   Vector3,
+  type Bone,
   type ColorRepresentation,
   type Material,
-  MeshStandardMaterial,
   type MeshStandardMaterialParameters,
   type Object3D,
   type Texture,
@@ -207,66 +213,98 @@ class Plates {
     bin.pieces.push(geometry)
   }
 
-  // Each joint's pieces are drawn in as few meshes as can be: those of plain surfaces that differ only in colour (cloth, leather,
-  // skin, trim) are one mesh, each piece keeping its colour in its corners, as each mesh drawn costs the browser time every frame.
-  // A surface that is painted, see-through or glows (and may change as it is played) keeps a mesh of its own.
-  build(kit: DetailKit): void {
+  // The whole model's static pieces are drawn in as few meshes as can be, since each mesh drawn costs the browser time every frame:
+  //  - Across joints: the pieces of a surface on every joint are one skinned mesh, bent by the joints as its bones, so an arm's
+  //    pieces still swing with the arm.
+  //  - Across surfaces: plain surfaces that differ only in colour (cloth, leather, skin, trim) are one, each piece keeping its colour in
+  //    its corners.
+  // A surface that is painted, see-through or glows (and may change as it is played) keeps a mesh of its own, still across joints.
+  build(kit: DetailKit, root: Object3D): void {
     const groups = new Map<string, typeof this.bins>()
     for (const bin of this.bins) {
-      const key = `${bin.parent.uuid}|${bin.shadow}|${blendKey(bin.material) ?? bin.material.uuid}`
+      const key = `${bin.shadow}|${blendKey(bin.material) ?? bin.material.uuid}`
       const group = groups.get(key)
       if (group) group.push(bin)
       else groups.set(key, [bin])
     }
+    // Where every joint is now, which is how the model was built: what the pieces are bent from.
+    root.updateWorldMatrix(true, true)
+    const toRoot = new Matrix4().copy(root.matrixWorld).invert()
+    const placed = new Matrix4()
     for (const group of groups.values()) {
-      const [first] = group
-      if (group.length === 1) {
-        place(kit, first.parent, first.pieces, first.material, first.shadow)
-        continue
+      const materials = [...new Set(group.map((bin) => bin.material))]
+      let material = materials[0]
+      if (materials.length > 1) {
+        for (const bin of group) {
+          const { r, g, b } = (bin.material as MeshStandardMaterial).color
+          for (const piece of bin.pieces) {
+            const count = piece.getAttribute('position').count
+            const colors = new Float32Array(count * 3)
+            for (let index = 0; index < count; index += 1) colors.set([r, g, b], index * 3)
+            piece.setAttribute('color', new Float32BufferAttribute(colors, 3))
+          }
+        }
+        const surfaces = materials as MeshStandardMaterial[]
+        const average = (read: (surface: MeshStandardMaterial) => number): number => surfaces.reduce((sum, surface) => sum + (read(surface) ?? 0), 0) / surfaces.length
+        material = kit.surface('#ffffff', {
+          vertexColors: true,
+          roughness: average((surface) => surface.roughness),
+          metalness: average((surface) => surface.metalness),
+          side: surfaces[0].side,
+          flatShading: surfaces[0].flatShading,
+        })
       }
-      const surfaces = group.map((bin) => bin.material as MeshStandardMaterial)
+      // Each piece is moved into the model's own space from its joint's, and tied wholly to that joint.
+      const bones: Object3D[] = []
       for (const bin of group) {
-        const { r, g, b } = (bin.material as MeshStandardMaterial).color
+        let bone = bones.indexOf(bin.parent)
+        if (bone < 0) bone = bones.push(bin.parent) - 1
+        placed.multiplyMatrices(toRoot, bin.parent.matrixWorld)
         for (const piece of bin.pieces) {
+          piece.applyMatrix4(placed)
           const count = piece.getAttribute('position').count
-          const colors = new Float32Array(count * 3)
-          for (let index = 0; index < count; index += 1) colors.set([r, g, b], index * 3)
-          piece.setAttribute('color', new Float32BufferAttribute(colors, 3))
+          piece.setAttribute('skinIndex', new Uint16BufferAttribute(new Uint16Array(count * 4).map((_, index) => (index % 4 === 0 ? bone : 0)), 4))
+          piece.setAttribute('skinWeight', new Float32BufferAttribute(new Float32Array(count * 4).map((_, index) => (index % 4 === 0 ? 1 : 0)), 4))
         }
       }
-      const average = (read: (surface: MeshStandardMaterial) => number): number => surfaces.reduce((sum, surface) => sum + read(surface), 0) / surfaces.length
-      const blended = kit.surface('#ffffff', {
-        vertexColors: true,
-        roughness: average((surface) => surface.roughness),
-        metalness: average((surface) => surface.metalness),
-        side: surfaces[0].side,
-        flatShading: surfaces[0].flatShading,
-      })
-      place(kit, first.parent, group.flatMap((bin) => bin.pieces), blended, first.shadow)
+      const pieces = group.flatMap((bin) => bin.pieces)
+      // Merged pieces must all have the same attributes: where one has no texture coordinates, none keep them.
+      if (pieces.some((piece) => !piece.hasAttribute('uv'))) for (const piece of pieces) piece.deleteAttribute('uv')
+      const merged = pieces.length === 1 ? pieces[0] : mergeGeometries(pieces, false)
+      if (!merged) throw new Error('The pieces of a model could not be merged.')
+      if (merged !== pieces[0]) for (const piece of pieces) piece.dispose()
+      const mesh = new SkinnedMesh(merged, material)
+      mesh.castShadow = group[0].shadow
+      mesh.receiveShadow = group[0].shadow
+      root.add(mesh)
+      mesh.updateMatrixWorld(true)
+      // (The joints are not bones, but a skeleton only needs where each is.)
+      mesh.bind(new Skeleton(bones as Bone[]))
+      // What it can reach as it moves (an arm raised, the body fallen over) is more than it takes up as it stands, which is what it is
+      // tested against the screen by.
+      merged.computeBoundingSphere()
+      if (merged.boundingSphere) {
+        mesh.boundingSphere = merged.boundingSphere.clone()
+        mesh.boundingSphere.radius = mesh.boundingSphere.radius * 2.2 + 0.3
+      }
     }
     this.bins.length = 0
   }
 }
 
 // What a surface can be drawn together with others in: undefined for one that keeps a mesh of its own (see `Plates.build`). Surfaces
-// alike in all but colour, and near enough in how rough and how metal they are, are drawn together.
+// alike in all but colour, and near enough in how rough and how metal they are, are drawn together. A simply lit surface (Low quality)
+// has no roughness or metal to tell apart.
 function blendKey(material: Material): string | undefined {
-  if (!(material instanceof MeshStandardMaterial) || material.type !== 'MeshStandardMaterial') return undefined
+  const lit = material.type === 'MeshStandardMaterial' || material.type === 'MeshLambertMaterial'
+  if (!lit || !(material instanceof MeshStandardMaterial || material instanceof MeshLambertMaterial)) return undefined
   if (material.transparent || material.opacity < 1 || material.alphaTest > 0 || material.vertexColors) return undefined
-  if (material.map || material.normalMap || material.roughnessMap || material.metalnessMap || material.emissiveMap || material.alphaMap || material.bumpMap) return undefined
+  if (material.map || material.normalMap || material.emissiveMap || material.alphaMap || material.bumpMap) return undefined
+  if (material instanceof MeshStandardMaterial && (material.roughnessMap || material.metalnessMap)) return undefined
   if (material.emissiveIntensity > 0 && material.emissive.getHex() !== 0) return undefined
   if (material.userData.baseGlow !== undefined || material.userData.glow === true) return undefined
+  if (material instanceof MeshLambertMaterial) return `${material.side}|${material.flatShading}`
   return `${material.side}|${material.flatShading}|${Math.round(material.roughness * 5)}|${Math.round(material.metalness * 4)}`
-}
-
-// Pieces merged into one mesh on a joint.
-function place(kit: DetailKit, parent: Object3D, pieces: BufferGeometry[], material: Material, shadow: boolean): void {
-  // Merged pieces must all have the same attributes: where one has no texture coordinates, none keep them.
-  if (pieces.some((piece) => !piece.hasAttribute('uv'))) for (const piece of pieces) piece.deleteAttribute('uv')
-  const merged = pieces.length === 1 ? pieces[0] : mergeGeometries(pieces, false)
-  if (!merged) throw new Error('The pieces of a model could not be merged.')
-  if (merged !== pieces[0]) for (const piece of pieces) piece.dispose()
-  kit.part(parent, merged, material, 0, 0, 0, shadow)
 }
 
 // One detailed model being built: its pieces, its surfaces, and what moves each frame.
@@ -320,7 +358,7 @@ export class Sculpt {
   }
 
   finish(detail: Omit<Detail, 'animate'>): Detail {
-    this.plates.build(this.kit)
+    this.plates.build(this.kit, this.rig.root)
     const animators = this.animators
     return { ...detail, animate: (frame) => { for (const animate of animators) animate(frame) } }
   }

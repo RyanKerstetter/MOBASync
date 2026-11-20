@@ -5,8 +5,8 @@ import { type GameResult, type ModeRules } from '../packages/shared/src/index.ts
 import { brawler, defineChampion } from './fixtures.ts'
 import { testSpawns } from './test-spawns.ts'
 
-// How a game lives and dies on the server: it runs until a team reaches the score limit or the leader ends it,
-// players can go back to the lobby while it runs, and when no one is left in it, it shuts down.
+// How a game lives and dies on the server: it runs until a team reaches the score limit, the leader ends it, or every team but one has
+// left a game that began with more than one, players can go back to the lobby while it runs, and when no one is left in it, it shuts down.
 
 const oneShot = defineChampion({
   id: 't-one-shot',
@@ -131,12 +131,52 @@ test('players going back to the lobby leave the game, and what they did is kept 
   assert.equal(game.closeIfEmpty(), false, 'the others are still playing')
   assert.equal(game.status, 'running')
 
-  // Ann's kill is still her team's, and she is on the results as having left.
-  for (let tick = 0; tick < 30; tick += 1) game.advanceTick()
-  const result = game.end()
+  // Ann was all of team 1, so with the next tick team 2 has won by forfeit. Ann's kill is still her team's, and she is on the results as having left.
+  const result = game.advanceTick()
+  assert.equal(game.status, 'finished')
+  assert.equal(result?.reason, 'forfeit')
+  assert.equal(result?.winner, 2, 'the team that stayed')
   assert.deepEqual(result?.teams, [{ team: 1, score: 1 }, { team: 2, score: 0 }])
   assert.deepEqual(result?.players[0], { name: 'Ann', team: 1, kills: 1, left: true })
-  assert.equal(result?.winner, 1)
+})
+
+test('a game goes on while a team still has a player in it, and is won by forfeit when every other team has left', () => {
+  const { game } = runningGame({ scoreLimit: 10 })
+  assert.equal(game.leaveGame('bob'), true)
+  for (let tick = 0; tick < 30; tick += 1) assert.equal(game.advanceTick(), undefined)
+  assert.equal(game.status, 'running', 'Cy is still there for team 2')
+  assert.equal(game.leaveGame('cy'), true)
+  const result = game.advanceTick()
+  assert.deepEqual([result?.reason, result?.winner], ['forfeit', 1])
+})
+
+test('with three teams, the game goes on until only one has players left', () => {
+  const three = [{ id: 'ann', name: 'Ann', team: 1 }, { id: 'bob', name: 'Bob', team: 2 }, { id: 'cy', name: 'Cy', team: 3 }]
+  const game = new ServerGameState(testSpawns)
+  assert.equal(game.beginSelection(three, undefined, 'deathmatch', { scoreLimit: 10 }), true)
+  for (const player of three) game.lockChampion(player.id)
+  game.begin(three)
+  for (const player of three) game.markReady(player.id)
+  assert.ok(game.startIfReady())
+  game.leaveGame('cy')
+  for (let tick = 0; tick < 30; tick += 1) assert.equal(game.advanceTick(), undefined)
+  assert.equal(game.status, 'running', 'two teams are still playing')
+  game.leaveGame('bob')
+  assert.deepEqual([game.advanceTick()?.reason, game.result?.winner], ['forfeit', 1])
+})
+
+test('a game begun with one team (practising alone, or a team on its own) is never forfeited, however many leave', () => {
+  const together = [{ id: 'ann', name: 'Ann', team: 1 }, { id: 'bob', name: 'Bob', team: 1 }]
+  const game = new ServerGameState(testSpawns)
+  assert.equal(game.beginSelection(together, undefined, 'deathmatch', { scoreLimit: 10 }), true)
+  for (const player of together) game.lockChampion(player.id)
+  game.begin(together)
+  for (const player of together) game.markReady(player.id)
+  assert.ok(game.startIfReady())
+  for (let tick = 0; tick < 30; tick += 1) assert.equal(game.advanceTick(), undefined)
+  game.leaveGame('bob')
+  for (let tick = 0; tick < 30; tick += 1) assert.equal(game.advanceTick(), undefined)
+  assert.equal(game.status, 'running', 'Ann plays on')
 })
 
 test('a game shuts down when the last player has left it, and another can be started', () => {

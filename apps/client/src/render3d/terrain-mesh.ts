@@ -13,7 +13,9 @@ import {
   LinearFilter,
   Matrix4,
   Mesh,
+  MeshLambertMaterial,
   MeshStandardMaterial,
+  OctahedronGeometry,
   PlaneGeometry,
   Quaternion,
   RGBAFormat,
@@ -52,12 +54,20 @@ const MARGIN = 960
 const FAR_HEIGHT = 150
 // The sizes of grid the ground can be built on, finest first, and the most points it may have.
 const GRID_CELLS = [12, 16, 24]
-const MAX_GROUND_POINTS = 220_000
+const MAX_GROUND_POINTS = { textured: 220_000, plain: 70_000 } as const
+// A plain ground (the graphics menu) is not painted from textures in its shader but given a colour at each point of its grid, worked out as
+// the shader would (see `groundColours`), from these: the average colour of each texture (textures.ts).
+const LOW_GRASS = new Color('#487530')
+const LOW_DIRT = new Color('#7e654a')
+const LOW_ROCK = new Color('#65675c')
 // How many squares of the grid a side each piece of the ground is.
 const CHUNK_CELLS = 48
 // The size of the tiles the trees, boulders, grass and bushes are drawn a tile at a time in (see `instanced`), in world units: a
-// few across the screen, so what is off it is not drawn, and not so small that there are many more meshes to draw.
-const SCENERY_TILE = 600
+// few across the screen, so what is off it is not drawn, and not so small that there are many more meshes to draw. On Low, where each
+// tree is a few triangles and each mesh drawn costs more than they do, larger. By the scenery setting.
+const SCENERY_TILE = { high: 600, medium: 1000, low: 1500 } as const
+// With the scenery on Low, only the trees this near the open ground are made: the edge of the forest. Further in, the land is its own colour.
+const BARE_FOREST_DEPTH = 200
 
 // The ground of the map in 3D. It is one mesh, a grid of heights: zero where champions walk, and risen where the walls are
 // (and everywhere outside the arena), with the rise worked out from how far into a wall each point is, so where walls meet
@@ -78,8 +88,10 @@ export class Terrain3D {
     const { width, height } = ground
     // As fine a grid as keeps the ground to a size the graphics card draws easily (twice a frame, with the shadows). A grid line
     // on every 12 or 24 units keeps the edges of walls (which the maps put on 24s) on the grid; on 16 they are a few units in.
+    // A plain ground (the graphics menu) is coarser, and simply lit, as is all of it with simple lighting (see `scatter` for the scenery).
+    const { ground: paint, lighting } = vision.graphics
     const points = (cell: number): number => ((width + 2 * MARGIN) / cell + 1) * ((height + 2 * MARGIN) / cell + 1)
-    this.cell = GRID_CELLS.find((cell) => points(cell) <= MAX_GROUND_POINTS) ?? GRID_CELLS[GRID_CELLS.length - 1]
+    this.cell = GRID_CELLS.find((cell) => points(cell) <= MAX_GROUND_POINTS[paint]) ?? GRID_CELLS[GRID_CELLS.length - 1]
     this.x0 = -MARGIN
     this.y0 = -MARGIN
     this.cols = Math.ceil((width + 2 * MARGIN) / this.cell) + 1
@@ -129,19 +141,26 @@ export class Terrain3D {
       }
     }
 
-    const textures = {
-      grass: grassTexture(),
-      dirt: dirtTexture(),
-      rock: rockTexture(),
-      noise: noiseTexture(),
+    // The ground in square pieces, so what is off the screen (and out of the sun's shadows round it) is not drawn. Plain, a colour at
+    // each point and simple light, instead of textures mixed for every pixel.
+    let groundMaterial: Material
+    let colours: Float32Array | undefined
+    if (paint === 'plain') {
+      colours = this.groundColours(ground, solid, outside)
+      groundMaterial = vision.shade(new MeshLambertMaterial({ vertexColors: true }))
+    } else {
+      const textures = {
+        grass: grassTexture(),
+        dirt: dirtTexture(),
+        rock: rockTexture(),
+        noise: noiseTexture(),
+      }
+      const mask = this.groundMask(ground, solid, outside)
+      this.disposables.push(textures.grass, textures.dirt, textures.rock, textures.noise, mask)
+      groundMaterial = vision.shade(splatMaterial(textures, mask, new Vector4(this.x0, this.y0, (cols - 1) * cell, (rows - 1) * cell), lighting))
     }
-    const mask = this.groundMask(ground, solid, outside)
-    this.disposables.push(textures.grass, textures.dirt, textures.rock, textures.noise, mask)
-
-    // The ground in square pieces, so what is off the screen (and out of the sun's shadows round it) is not drawn.
-    const groundMaterial = vision.shade(splatMaterial(textures, mask, new Vector4(this.x0, this.y0, (cols - 1) * cell, (rows - 1) * cell)))
     this.disposables.push(groundMaterial)
-    for (const geometry of this.buildChunks()) {
+    for (const geometry of this.buildChunks(colours)) {
       const piece = new Mesh(geometry, groundMaterial)
       piece.receiveShadow = true
       piece.castShadow = true
@@ -150,7 +169,7 @@ export class Terrain3D {
     }
 
     // The plain beyond what is built, as far as anything could be seen: a frame round it, at the height its edge settles to.
-    const farMaterial = vision.shade(new MeshStandardMaterial({ color: '#2b3a26', roughness: 1 }))
+    const farMaterial = vision.shade(lighting === 'simple' ? new MeshLambertMaterial({ color: '#2b3a26' }) : new MeshStandardMaterial({ color: '#2b3a26', roughness: 1 }))
     this.disposables.push(farMaterial)
     const left = this.x0
     const top = this.y0
@@ -189,8 +208,9 @@ export class Terrain3D {
     for (const item of this.disposables) item.dispose()
   }
 
-  // The ground as pieces of `CHUNK_CELLS` squares a side, each its own geometry, sharing the points along their edges.
-  private buildChunks(): BufferGeometry[] {
+  // The ground as pieces of `CHUNK_CELLS` squares a side, each its own geometry, sharing the points along their edges, with a colour at
+  // each point if `colours` gives them (Low quality).
+  private buildChunks(colours?: Float32Array): BufferGeometry[] {
     const { cols, rows, cell, heights } = this
     const normals = new Float32Array(cols * rows * 3)
     for (let j = 0; j < rows; j += 1) {
@@ -214,6 +234,7 @@ export class Terrain3D {
         const down = j1 - cj + 1
         const positions = new Float32Array(across * down * 3)
         const chunkNormals = new Float32Array(across * down * 3)
+        const chunkColours = colours ? new Float32Array(across * down * 3) : undefined
         for (let j = cj; j <= j1; j += 1) {
           for (let i = ci; i <= i1; i += 1) {
             const local = (j - cj) * across + (i - ci)
@@ -222,6 +243,7 @@ export class Terrain3D {
             positions[local * 3 + 1] = heights[index]
             positions[local * 3 + 2] = this.y0 + j * cell
             chunkNormals.set(normals.subarray(index * 3, index * 3 + 3), local * 3)
+            if (colours && chunkColours) chunkColours.set(colours.subarray(index * 3, index * 3 + 3), local * 3)
           }
         }
         const indices = new Uint32Array((across - 1) * (down - 1) * 6)
@@ -244,6 +266,7 @@ export class Terrain3D {
         const geometry = new BufferGeometry()
         geometry.setAttribute('position', new BufferAttribute(positions, 3))
         geometry.setAttribute('normal', new BufferAttribute(chunkNormals, 3))
+        if (chunkColours) geometry.setAttribute('color', new BufferAttribute(chunkColours, 3))
         geometry.setIndex(new BufferAttribute(indices, 1))
         geometry.computeBoundingSphere()
         geometry.computeBoundingBox()
@@ -251,6 +274,54 @@ export class Terrain3D {
       }
     }
     return chunks
+  }
+
+  // The colour of the ground at each point of the grid, for a plain ground: what the ground's shader paints there (`splatMaterial`), with
+  // each texture's average colour in place of the texture, and noise for its broad patches.
+  private groundColours(ground: MapGround, solid: Uint8Array, outside: Float32Array): Float32Array {
+    const { cols, rows, cell, heights } = this
+    const path = new Float32Array(cols * rows)
+    for (const tile of ground.paths) {
+      const i0 = Math.max(0, Math.ceil((tile.x - this.x0) / cell))
+      const i1 = Math.min(cols - 1, Math.floor((tile.x + tile.width - this.x0) / cell))
+      const j0 = Math.max(0, Math.ceil((tile.y - this.y0) / cell))
+      const j1 = Math.min(rows - 1, Math.floor((tile.y + tile.height - this.y0) / cell))
+      for (let j = j0; j <= j1; j += 1) for (let i = i0; i <= i1; i += 1) path[j * cols + i] = 1
+    }
+    const soft = boxBlur(boxBlur(path, cols, rows, 2), cols, rows, 2)
+    const broad = valueNoise(211)
+    const near = valueNoise(223)
+    const colours = new Float32Array(cols * rows * 3)
+    const grass = new Color()
+    const dirt = new Color()
+    const top = new Color()
+    const rock = new Color().copy(LOW_ROCK).multiply(new Color(0.9, 0.88, 0.84))
+    const colour = new Color()
+    for (let j = 0; j < rows; j += 1) {
+      for (let i = 0; i < cols; i += 1) {
+        const index = j * cols + i
+        const x = this.x0 + i * cell
+        const y = this.y0 + j * cell
+        const h = heights[index]
+        const nx = heights[j * cols + Math.max(0, i - 1)] - heights[j * cols + Math.min(cols - 1, i + 1)]
+        const nz = heights[Math.max(0, j - 1) * cols + i] - heights[Math.min(rows - 1, j + 1) * cols + i]
+        const up = 2 * cell / Math.hypot(nx, 2 * cell, nz)
+        const patch = broad(x / 700, y / 700)
+        const fine = near(x / 90, y / 90)
+        grass.copy(LOW_GRASS).multiplyScalar(0.8 + 0.34 * patch)
+        dirt.copy(LOW_DIRT).multiplyScalar(0.86 + 0.24 * fine)
+        const onPath = smoothstep(0.36, 0.62, soft[index] + (fine - 0.5) * 0.5)
+        colour.copy(grass).lerp(dirt, onPath).multiplyScalar(1 - 0.14 * (1 - Math.abs(onPath * 2 - 1)))
+        top.copy(grass).multiply(new Color(0.72, 0.82, 0.62)).lerp(LOW_ROCK, 0.18 + 0.3 * fine)
+        colour.lerp(top, smoothstep(3, 24, h))
+        colour.lerp(rock, smoothstep(0.35, 0.7, 1 - up))
+        const byWall = solid[index] ? 0 : 1 - smoothstep(0, 80, outside[index])
+        // (A little darker overall, as the textures it stands in for are lit unevenly and look darker than their average.)
+        colour.multiplyScalar(0.88 * (1 - 0.42 * byWall) * (1 - 0.18 * smoothstep(90, 320, h)))
+        colours.set([colour.r, colour.g, colour.b], index * 3)
+      }
+    }
+    return colours
   }
 
   // A picture over the whole grid, one texel to a point: red is where the map draws a path (softened), green is how close open
@@ -294,7 +365,8 @@ export class Terrain3D {
     const scale = new Vector3()
     const up = new Vector3(0, 1, 0)
 
-    type Placed = { x: number; y: number; size: number; kind: number; turn: number }
+    // (`depth`: how far into a wall it stands, for a tree.)
+    type Placed = { x: number; y: number; size: number; kind: number; turn: number; depth?: number }
     const trees: Placed[] = []
     const boulders: Placed[] = []
     const tufts: Placed[] = []
@@ -315,7 +387,7 @@ export class Terrain3D {
             if (!taken.has(key)) {
               taken.add(key)
               const size = Math.min(1.5, 0.75 + depth / 380) * (0.8 + random() * 0.45)
-              trees.push({ x, y, size, kind: random() < 0.55 ? 0 : 1, turn: random() * Math.PI * 2 })
+              trees.push({ x, y, size, kind: random() < 0.55 ? 0 : 1, turn: random() * Math.PI * 2, depth })
             }
           } else if (depth > 34 && depth <= 64 && random() < 0.16 * perPoint) {
             // On the top of a wall too narrow for trees: a shrub.
@@ -333,6 +405,14 @@ export class Terrain3D {
     }
 
     const tint = new Color()
+    // Each tree, boulder and bush is a few simple shapes with the scenery on Medium, and on Low there is far less of it (`bare`); there is no grass
+    // with grass off (the graphics menu).
+    const simple = vision.graphics.scenery !== 'high'
+    const bare = vision.graphics.scenery === 'low'
+    // A lit surface for scenery: simply lit with simple lighting.
+    const lit = (params: { color: string; roughness: number; flatShading?: boolean; side?: typeof DoubleSide }): Material => vision.shade(vision.graphics.lighting === 'simple'
+      ? new MeshLambertMaterial({ color: params.color, ...(params.flatShading ? { flatShading: true } : {}), ...(params.side ? { side: params.side } : {}) })
+      : new MeshStandardMaterial(params))
     // Instanced meshes of `geometry` for each of `placed`, each put where `place` says (it is handed the mesh to set the matrix and
     // colour of the instance on). They are made a tile of the map at a time (`SCENERY_TILE`), so only the tiles in view are drawn,
     // and only those near the champion cast shadows: one mesh for the whole map would draw every tree on it, twice, every frame.
@@ -349,15 +429,16 @@ export class Terrain3D {
         material.dispose()
         return
       }
-      const tileOf = (item: Placed): string => `${Math.floor(item.x / SCENERY_TILE)},${Math.floor(item.y / SCENERY_TILE)}`
+      const tile = SCENERY_TILE[vision.graphics.scenery]
+      const tileOf = (item: Placed): string => `${Math.floor(item.x / tile)},${Math.floor(item.y / tile)}`
       const counts = new Map<string, number>()
       for (const item of placed) counts.set(tileOf(item), (counts.get(tileOf(item)) ?? 0) + 1)
       const tiles = new Map<string, { mesh: InstancedMesh; next: number }>()
-      for (const [tile, count] of counts) tiles.set(tile, { mesh: new InstancedMesh(geometry, material, count), next: 0 })
+      for (const [key, count] of counts) tiles.set(key, { mesh: new InstancedMesh(geometry, material, count), next: 0 })
       for (const item of placed) {
-        const tile = tiles.get(tileOf(item))!
-        place(item, tile.next, tile.mesh)
-        tile.next += 1
+        const at = tiles.get(tileOf(item))!
+        place(item, at.next, at.mesh)
+        at.next += 1
       }
       for (const { mesh } of tiles.values()) {
         mesh.castShadow = shadows
@@ -369,42 +450,61 @@ export class Terrain3D {
       }
       this.disposables.push(geometry, material)
     }
-    const leafMaterial = (): MeshStandardMaterial => vision.shade(new MeshStandardMaterial({ color: '#ffffff', roughness: 0.85, flatShading: true }))
+    const leafMaterial = (): Material => lit({ color: '#ffffff', roughness: 0.85, flatShading: true })
 
-    // Trees: a trunk, and a crown of three cones (a pine) or of round clumps (a broadleaf).
-    const trunkGeometry = new CylinderGeometry(3.2, 5, 26, 6).translate(0, 13, 0)
-    const pineGeometry = mergeGeometries([
-      new ConeGeometry(30, 46, 7).translate(0, 40, 0),
-      new ConeGeometry(24, 40, 7).translate(0, 62, 0),
-      new ConeGeometry(16, 34, 7).translate(0, 82, 0),
-    ])
-    const leafGeometry = mergeGeometries([
-      new IcosahedronGeometry(26, 0).translate(0, 50, 0),
-      new IcosahedronGeometry(19, 0).translate(15, 40, 6),
-      new IcosahedronGeometry(18, 0).translate(-13, 44, -8),
-      new IcosahedronGeometry(16, 0).translate(3, 68, -3),
-    ])
+    // Trees: a trunk, and a crown of three cones (a pine) or of round clumps (a broadleaf). Simple, a crown of one or two plain shapes
+    // over a four-sided trunk: about a fifth of the triangles.
+    const trunkGeometry = new CylinderGeometry(3.2, 5, 26, simple ? 4 : 6, 1, simple).translate(0, 13, 0)
+    const pineGeometry = simple
+      ? mergeGeometries([new ConeGeometry(30, 52, 5).translate(0, 42, 0), new ConeGeometry(20, 44, 5).translate(0, 70, 0)])
+      : mergeGeometries([
+        new ConeGeometry(30, 46, 7).translate(0, 40, 0),
+        new ConeGeometry(24, 40, 7).translate(0, 62, 0),
+        new ConeGeometry(16, 34, 7).translate(0, 82, 0),
+      ])
+    const leafGeometry = simple
+      ? new OctahedronGeometry(28, 0).scale(1, 1.15, 1).translate(0, 52, 0)
+      : mergeGeometries([
+        new IcosahedronGeometry(26, 0).translate(0, 50, 0),
+        new IcosahedronGeometry(19, 0).translate(15, 40, 6),
+        new IcosahedronGeometry(18, 0).translate(-13, 44, -8),
+        new IcosahedronGeometry(16, 0).translate(3, 68, -3),
+      ])
     const treeMatrix = (item: Placed): Matrix4 => {
       position.set(item.x, this.heightAt(item.x, item.y) - 2, item.y)
       rotation.setFromAxisAngle(up, item.turn)
       scale.set(item.size, item.size * (0.85 + (item.turn % 0.3)), item.size)
       return matrix.compose(position, rotation, scale)
     }
-    instanced(trunkGeometry, vision.shade(new MeshStandardMaterial({ color: '#5a3e2b', roughness: 1 })), trees, (item, index, mesh) => {
-      mesh.setMatrixAt(index, treeMatrix(item))
-    })
-    instanced(pineGeometry, leafMaterial(), trees.filter((tree) => tree.kind === 0), (item, index, mesh) => {
-      mesh.setMatrixAt(index, treeMatrix(item))
-      mesh.setColorAt(index, tint.setHSL(0.3 + random() * 0.06, 0.45 + random() * 0.15, 0.2 + random() * 0.08))
-    })
-    instanced(leafGeometry, leafMaterial(), trees.filter((tree) => tree.kind === 1), (item, index, mesh) => {
-      mesh.setMatrixAt(index, treeMatrix(item))
-      mesh.setColorAt(index, tint.setHSL(0.22 + random() * 0.1, 0.45 + random() * 0.2, 0.24 + random() * 0.1))
-    })
+    // Bare (Low): only the edge of the forest, each tree one spike of four faces, pine or not, with no trunk.
+    const pineTint = (): Color => tint.setHSL(0.3 + random() * 0.06, 0.45 + random() * 0.15, 0.2 + random() * 0.08)
+    const leafTint = (): Color => tint.setHSL(0.22 + random() * 0.1, 0.45 + random() * 0.2, 0.24 + random() * 0.1)
+    if (bare) {
+      trunkGeometry.dispose()
+      pineGeometry?.dispose()
+      leafGeometry.dispose()
+      const spike = new ConeGeometry(28, 84, 4, 1, true).translate(0, 44, 0)
+      instanced(spike, leafMaterial(), trees.filter((tree) => (tree.depth ?? 0) < BARE_FOREST_DEPTH), (item, index, mesh) => {
+        mesh.setMatrixAt(index, treeMatrix(item))
+        mesh.setColorAt(index, item.kind === 0 ? pineTint() : leafTint())
+      })
+    } else {
+      instanced(trunkGeometry, lit({ color: '#5a3e2b', roughness: 1 }), trees, (item, index, mesh) => {
+        mesh.setMatrixAt(index, treeMatrix(item))
+      })
+      instanced(pineGeometry, leafMaterial(), trees.filter((tree) => tree.kind === 0), (item, index, mesh) => {
+        mesh.setMatrixAt(index, treeMatrix(item))
+        mesh.setColorAt(index, pineTint())
+      })
+      instanced(leafGeometry, leafMaterial(), trees.filter((tree) => tree.kind === 1), (item, index, mesh) => {
+        mesh.setMatrixAt(index, treeMatrix(item))
+        mesh.setColorAt(index, leafTint())
+      })
+    }
 
     // Boulders: a lumpy stone, turned and squashed differently each time.
     const tilt = new Vector3()
-    instanced(jitter(new DodecahedronGeometry(1, 1), 0.18, 5), vision.shade(new MeshStandardMaterial({ color: '#ffffff', roughness: 0.95, flatShading: true })), boulders, (item, index, mesh) => {
+    instanced(simple ? new DodecahedronGeometry(1, 0) : jitter(new DodecahedronGeometry(1, 1), 0.18, 5), lit({ color: '#ffffff', roughness: 0.95, flatShading: true }), bare ? [] : boulders, (item, index, mesh) => {
       position.set(item.x, this.heightAt(item.x, item.y) - item.size * 0.25, item.y)
       rotation.setFromAxisAngle(tilt.set(random() - 0.5, 1, random() - 0.5).normalize(), item.turn)
       scale.set(item.size * (0.9 + random() * 0.5), item.size * (0.6 + random() * 0.5), item.size * (0.9 + random() * 0.4))
@@ -421,7 +521,8 @@ export class Terrain3D {
     }
     const tuftGeometry = mergeGeometries([blade(0, 2), blade(1.1, -3), blade(2.2, 1), blade(0.6, -1).scale(0.8, 0.75, 0.8), blade(1.7, 3).scale(0.9, 0.85, 0.9)])
     tuftGeometry.computeVertexNormals()
-    instanced(tuftGeometry, vision.shade(new MeshStandardMaterial({ color: '#ffffff', roughness: 0.9, side: DoubleSide })), tufts, (item, index, mesh) => {
+    // (None with grass off: thousands of them, each too small to matter much.)
+    instanced(tuftGeometry, lit({ color: '#ffffff', roughness: 0.9, side: DoubleSide }), vision.graphics.grass ? tufts : [], (item, index, mesh) => {
       position.set(item.x, 0, item.y)
       rotation.setFromAxisAngle(up, item.turn)
       scale.set(item.size, item.size, item.size)
@@ -431,7 +532,8 @@ export class Terrain3D {
 
     // Bushes: their rectangle filled with low clumps of leaves, low enough that a champion's head shows over them. The shrubs
     // on the narrow walls are the same clumps.
-    const clumps: Placed[] = [...shrubs]
+    // (Bare, the bushes only: they hide champions, so they are kept, and the shrubs on the walls are not.)
+    const clumps: Placed[] = bare ? [] : [...shrubs]
     for (const bush of ground.bushes) {
       for (let y = bush.y + 12; y <= bush.y + bush.height - 8; y += 22) {
         for (let x = bush.x + 12; x <= bush.x + bush.width - 8; x += 22) {
@@ -439,11 +541,15 @@ export class Terrain3D {
         }
       }
     }
-    const clumpGeometry = mergeGeometries([
-      new IcosahedronGeometry(16, 0).translate(0, 16, 0),
-      new IcosahedronGeometry(11, 0).translate(9, 12, 5),
-      new IcosahedronGeometry(10, 0).translate(-8, 13, -4),
-    ])
+    const clumpGeometry = bare
+      ? new OctahedronGeometry(18, 0).scale(1.15, 0.8, 1.15).translate(0, 12, 0)
+      : simple
+      ? new IcosahedronGeometry(17, 0).scale(1.15, 0.9, 1.15).translate(0, 15, 0)
+      : mergeGeometries([
+        new IcosahedronGeometry(16, 0).translate(0, 16, 0),
+        new IcosahedronGeometry(11, 0).translate(9, 12, 5),
+        new IcosahedronGeometry(10, 0).translate(-8, 13, -4),
+      ])
     instanced(clumpGeometry, leafMaterial(), clumps, (item, index, mesh) => {
       position.set(item.x, this.heightAt(item.x, item.y) - 3, item.y)
       rotation.setFromAxisAngle(up, item.turn)
@@ -473,12 +579,16 @@ export class Terrain3D {
 }
 
 // The ground's material: lit as any surface, with its colour mixed in the shader from the detail pictures.
+// With simple lighting it is painted the same, and lit simply.
 function splatMaterial(
   textures: { grass: Texture; dirt: Texture; rock: Texture; noise: Texture },
   mask: Texture,
   maskRect: Vector4,
-): MeshStandardMaterial {
-  const material = new MeshStandardMaterial({ color: '#ffffff', roughness: 0.94, metalness: 0 })
+  lighting: 'detailed' | 'simple' = 'detailed',
+): Material {
+  const material = lighting === 'simple'
+    ? new MeshLambertMaterial({ color: '#ffffff' })
+    : new MeshStandardMaterial({ color: '#ffffff', roughness: 0.94, metalness: 0 })
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, {
       tGrass: { value: textures.grass },
@@ -531,7 +641,7 @@ function splatMaterial(
       }`,
     )
   }
-  material.customProgramCacheKey = () => 'moba-ground-splat'
+  material.customProgramCacheKey = () => `moba-ground-splat-${lighting}`
   return material
 }
 

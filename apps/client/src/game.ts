@@ -10,6 +10,7 @@ import {
   GamePongSchema,
   GameResultSchema,
   GameSnapshotSchema,
+  GAME_TPS,
   ReliableMessenger,
   lagConfigFromQuery,
   withLag,
@@ -43,7 +44,9 @@ import { createResultsView } from './ui/results-view.ts'
 import { createGameMap } from './render/game-map.ts'
 import { FlatRenderer, type GameRenderer } from './render/game-renderer.ts'
 import { rendererFromSearch, type RendererKind } from './render/renderer-kind.ts'
-import { createPixiApp } from './render/pixi-app.ts'
+import { sameGraphics } from './render/graphics-quality.ts'
+import { createPixiApp, pixiResolution } from './render/pixi-app.ts'
+import { zoomAfterWheel } from './render/zoom.ts'
 import { WorldRenderer3D } from './render3d/world-renderer-3d.ts'
 import { createScoreboardView } from './ui/scoreboard-view.ts'
 import { createShopView } from './ui/shop-view.ts'
@@ -128,7 +131,7 @@ export async function startGame({
   // The keys that cast each ability slot, which move off W when W, A, S and D steer (see movement-keys.ts).
   let abilityKeys = abilityKeyCodes(settings.movementKeys)
   const movementKeys = new MovementKeys()
-  const app = await createPixiApp(container, { maxFPS: settings.maxFps })
+  const app = await createPixiApp(container, { maxFPS: settings.maxFps, graphics: settings.graphics })
   // The sprite sheets, before anything is drawn. If they cannot be loaded, champions are circles.
   let spriteSets: Map<string, LoadedSpriteSet> = await loadSpriteSets(championSprites).catch((error: unknown) => {
     console.warn('Could not load the champion sprites, so champions are drawn as circles.', error)
@@ -192,7 +195,8 @@ export async function startGame({
   const makeRenderer = (kind: RendererKind): GameRenderer => {
     if (kind === '3d') {
       try {
-        const made = new WorldRenderer3D({ container, app, ground })
+        const made = new WorldRenderer3D({ container, app, ground, graphics: settings.graphics, maxFps: settings.maxFps })
+        made.zoom = settings.zoom
         // The page's own canvas is clear where it draws nothing, so the 3D world shows through it.
         app.renderer.background.alpha = 0
         return made
@@ -202,6 +206,7 @@ export async function startGame({
     }
     app.renderer.background.alpha = 1
     flat = flat ? flat.attach() : new FlatRenderer(app, { map, spriteSets })
+    flat.zoom = settings.zoom
     return flat
   }
   let world: GameRenderer = makeRenderer(rendererFromSearch(window.location.search) ?? settings.renderer)
@@ -213,9 +218,10 @@ export async function startGame({
     world.follow(center)
   }
   updateCamera(cameraCenter)
-  // Draws the world the other way, keeping what the player had on.
-  const switchRenderer = (kind: RendererKind): void => {
-    if (kind === world.kind) return
+  // Draws the world the other way, keeping what the player had on. With `rebuild`, the 3D world is made again even if it is already
+  // drawn in 3D (the quality changed).
+  const switchRenderer = (kind: RendererKind, rebuild = false): void => {
+    if (kind === world.kind && !rebuild) return
     const { effects, debug } = world
     world.destroy()
     world = makeRenderer(kind)
@@ -359,11 +365,23 @@ export async function startGame({
         saveSettings(settings)
         switchRenderer(kind)
       },
+      getGraphics: () => settings.graphics,
+      setGraphics: (graphics) => {
+        if (sameGraphics(graphics, settings.graphics)) return
+        settings.graphics = { ...graphics }
+        saveSettings(settings)
+        // The names and bars over the world are drawn at the screen's own density only with the resolution on High. (Whether their edges
+        // are smoothed is fixed when the page's canvas is made, so that waits for the next game.)
+        app.renderer.resolution = pixiResolution(graphics)
+        // The 3D world is made again, most of what the settings change being fixed when it is made.
+        if (world.kind === '3d') switchRenderer('3d', true)
+      },
       getMaxFps: () => settings.maxFps,
       setMaxFps: (fps) => {
         settings.maxFps = readMaxFps(fps)
         // The ticker takes it from the next frame, so the change is seen as the button is pressed.
         app.ticker.maxFPS = settings.maxFps
+        if (world instanceof WorldRenderer3D) world.maxFps = settings.maxFps
         saveSettings(settings)
       },
       getDebugView: () => world.debug,
@@ -505,6 +523,18 @@ export async function startGame({
   }
   const onContextMenu = (event: MouseEvent): void => event.preventDefault()
   app.canvas.addEventListener('contextmenu', onContextMenu)
+  // The mouse wheel zooms the camera in and out, as far as zoom.ts allows, and the zoom is remembered for next time. (It does not
+  // scroll the page.)
+  const onWheel = (event: WheelEvent): void => {
+    event.preventDefault()
+    const zoom = zoomAfterWheel(settings.zoom, event.deltaY)
+    if (zoom === settings.zoom) return
+    settings.zoom = zoom
+    world.zoom = zoom
+    world.follow(cameraCenter)
+    saveSettings(settings)
+  }
+  app.canvas.addEventListener('wheel', onWheel, { passive: false })
   // An ability pressed while the champion cannot cast yet (winding something up, dashing, stunned) is held, if the controls say so, and
   // cast the moment it can, at wherever the mouse is then (see `castBuffered`). Pressing another ability replaces it, and it is let go
   // after `BUFFER_MS` if the champion still cannot cast.
@@ -529,6 +559,27 @@ export async function startGame({
     const { slot, selfCast } = buffered
     buffered = undefined
     sendAttempt(gameState.createCastOrder(slot, castAim(), now, selfCast, { keepAttacking: settings.castKeepsAttack }))
+  }
+  // A held ability (`AbilityDef.held`, the Sniper's Steady Aim): its key went down and cast it, and letting the key go casts its recast at the cursor. Until then the
+  // champion moves and clicks as it likes. `letGo` is set once the key is up (or it has been held as long as it may be), and the recast is sent the first frame
+  // the key has turned into it (the ability may not have gone off yet when the key comes up), or dropped after `HELD_RELEASE_MS`.
+  let holding: { slot: number; at: number; most: number; letGo?: number } | undefined
+  const HELD_RELEASE_MS = 600
+  const releaseHeld = (now: number): void => {
+    if (!holding) return
+    if (!inPlay() || gameState.isLocalDead()) {
+      holding = undefined
+      return
+    }
+    if (holding.letGo === undefined && now - holding.at >= holding.most) holding.letGo = now
+    if (holding.letGo === undefined) return
+    if (gameState.isHolding(holding.slot, now)) {
+      const { slot } = holding
+      holding = undefined
+      sendAttempt(gameState.createCastOrder(slot, castAim(), now, false, { keepAttacking: settings.castKeepsAttack }))
+    } else if (now - holding.letGo > HELD_RELEASE_MS) {
+      holding = undefined
+    }
   }
   // Alt on its own would open the browser's menu bar when it is let go, so it is kept from doing that while the game is being played.
   const isAlt = (event: KeyboardEvent): boolean => event.code === 'AltLeft' || event.code === 'AltRight'
@@ -583,6 +634,25 @@ export async function startGame({
         castAtCursor(abilitySlot, true)
         return
       }
+      // A held ability is cast as its key goes down, and is not aimed: letting go fires it.
+      const held = gameState.heldAbility(abilitySlot)
+      if (held) {
+        castControl.cancel()
+        const now = performance.now()
+        if (gameState.isHolding(abilitySlot, now)) {
+          // Still held from before (its key's release was missed): this press lets it go.
+          holding = { slot: abilitySlot, at: now, most: 0, letGo: now }
+          return
+        }
+        const blocker = gameState.getCastBlocker(abilitySlot)
+        if (blocker && !(settings.bufferAbilities && gameState.castMustWait(abilitySlot) !== undefined)) {
+          onStatus(blocker, true)
+          return
+        }
+        castAtCursor(abilitySlot)
+        holding = { slot: abilitySlot, at: now, most: held.ticks / GAME_TPS * 1000 }
+        return
+      }
       const action = castControl.press(abilitySlot, gameState.abilityNeedsAim(abilitySlot))
       if (action.type === 'cast') {
         castAtCursor(abilitySlot)
@@ -614,6 +684,11 @@ export async function startGame({
     }
     const abilitySlot = abilityKeys.indexOf(event.code)
     if (abilitySlot < 0) return
+    if (holding?.slot === abilitySlot && holding.letGo === undefined) {
+      holding.letGo = performance.now()
+      releaseHeld(holding.letGo)
+      return
+    }
     if (castControl.release(abilitySlot).type !== 'cast') return
     if (!inPlay() || gameState.isLocalDead()) return
     castAtCursor(abilitySlot)
@@ -821,7 +896,8 @@ export async function startGame({
     const dead = local?.dead ?? false
     // What the team sees, before anything is picked or drawn: the debug view (P) shows everything.
     const sight = visionOf()
-    sight.update(characters, gameState.getLocalTeam(), { reveal: world.debug })
+    const allEntities = gameState.getEntities(now)
+    sight.update(characters, gameState.getLocalTeam(), { reveal: world.debug, entities: allEntities })
     if (dead) castControl.cancel()
     const aimed = castControl.aiming
     // Only an enemy a right click would attack is marked as hovered: not while an ability is being
@@ -838,7 +914,6 @@ export async function startGame({
     const inspected = picked && !picked.dead && inPlay() && sight.isVisible(picked) ? picked : undefined
     const seenCharacters = sight.visibleCharacters(characters)
     const unseenCharacters = sight.hiddenCharacters(characters)
-    const allEntities = gameState.getEntities(now)
     const seenEntities = sight.visibleEntities(allEntities)
     // The attacks that went off or landed this frame, heard from where the champion is (or the camera, while it is dead). Only what the
     // team sees is heard.
@@ -873,7 +948,9 @@ export async function startGame({
       localCharacterId,
       ...(local ? { localAttackCooldown: gameState.getAttackCooldownProgress(now) } : {}),
       ...(world.debug ? { debugPath: gameState.getLocalPath(now) } : {}),
-      ...(aimed === undefined ? {} : { castPreview: gameState.getCastPreview(aimed, castAim(), now, characters) }),
+      ...(aimed === undefined
+        ? holding && !dead && gameState.isHolding(holding.slot, now) ? { castPreview: gameState.getCastPreview(holding.slot, castAim(), now, characters) } : {}
+        : { castPreview: gameState.getCastPreview(aimed, castAim(), now, characters) }),
       attackMarkers: chooseAttackMarkers({
         hoveredId: hovered?.id,
         lockedId: gameState.getLocalAttackTarget(now),
@@ -935,6 +1012,7 @@ export async function startGame({
     guarded('The diagnostics', () => debugOverlay.frame(now, () => gameState.getDebugInfo()))
     guarded('A held command', () => giveHeldCommand(now))
     guarded('A buffered cast', () => castBuffered(now))
+    guarded('A held ability', () => releaseHeld(now))
     guarded('Steering', () => resumeSteering(now))
     guarded('Drawing the frame', () => drawFrame(now))
   })
@@ -944,6 +1022,7 @@ export async function startGame({
     window.clearInterval(pingTimer)
     window.clearInterval(startPingTimer)
     app.canvas.removeEventListener('contextmenu', onContextMenu)
+    app.canvas.removeEventListener('wheel', onWheel)
     window.removeEventListener('pointerup', onPointerUp)
     window.removeEventListener('pointercancel', onPointerCancel)
     window.removeEventListener('keydown', onKeyDown)

@@ -40,11 +40,9 @@ import {
   SHADOW_KEY,
   SHADOW_MAX_STACKS,
   SHADOW_STACK_TICKS,
-  SIGHTED_AUTOS,
-  SIGHTED_HASTE,
-  SIGHTED_HASTE_TICKS,
-  SIGHTED_KEY,
-  SIGHTED_WINDOW_TICKS,
+  PRIMED_KEY,
+  PRIMED_QUIET_TICKS,
+  PRIMED_QUIET_TICKS_PER_LEVEL,
   terrify,
   TRICK_BONUS_DAMAGE,
   TRICK_HASTE,
@@ -60,14 +58,38 @@ import {
   SHADOW_AUTO_BONUS,
   firstStrike,
   refreshBleed,
+  bladeAutoDamage,
+  FOCUS_ATTACK_SPEED,
+  FOCUS_MAX,
+  FOCUS_RANGE,
+  houndAutoDamage,
+  hunterFocus,
+  LIGHT_MAX,
+  LIGHT_OVERFLOW_HEAL,
+  LIGHT_PER_AUTO,
+  LIGHT_PER_KILL,
+  smiteOnHit,
+  SCAN_CHARGES,
+  SCAN_KEY,
+  SCAN_RECHARGE_TICKS,
+  SNIPER_VISION_BONUS,
+  shardOnHit,
+  volleyOnHit,
+  houndBleedStack,
+  KNIFE_EVERY_TICKS,
+  KNIFE_KEY,
+  KNIFE_MAX,
+  BEAM_COST,
+  DAWNSTEP_COST,
 } from './abilities.js'
-import { GAME_TPS } from './constants.js'
+import { GAME_TPS, GAME_VISION_RANGE } from './constants.js'
 import {
   areEnemies,
   arcane,
   attackDamage,
   damage,
   endNamed,
+  gainResource,
   haste,
   heal,
   linear,
@@ -75,6 +97,7 @@ import {
   popMarkers,
   prolong,
   reduceCooldown,
+  resetAutoTimer,
   runEffects,
   scaled,
   self,
@@ -117,6 +140,20 @@ export interface ChampionMeterDef {
   color: string
 }
 
+// A resource a champion builds and spends (Sorin's light): from none up to `max`, a point gained every `everyTicks` by itself (if it says, and none by itself if not) and
+// `onKill` for each champion it kills (its
+// abilities and autos give and take the rest: see `gainResource`). What would go over `max` heals it instead, `overflowHeal` of its maximum health for each point.
+// The page draws it as a bar under its health in `color`.
+export interface ChampionResourceDef {
+  max: number
+  everyTicks?: number
+  // The amounts its abilities spend (Sorin's Dawnstep and Dawn Beam), which the page draws as lines across its bar, so it can be seen at a glance what it has enough for.
+  marks?: readonly number[]
+  onKill: number
+  overflowHeal: number
+  color: string
+}
+
 export interface ChampionDef {
   id: string
   name: string
@@ -147,6 +184,19 @@ export interface ChampionDef {
   onAttackHit?: readonly Effect[]
   // Runs for the caster whenever one of its abilities launches, after the ability's own effects.
   onCast?: readonly Effect[]
+  // More attack speed the lower its health is: none at full health, and at none, `base` and `perLevel` for each level it is, as a share more (0.3 is 30%), in
+  // proportion between (the Soldier's passive).
+  lowHealthAttackSpeed?: { base: number; perLevel: number }
+  // Readies its next ability (a marker of `key` on itself) once it has gone `ticks` (less `ticksPerLevel` for each level past the first) without dealing or
+  // taking damage or starting a cast. Once it has it, it keeps it until an ability spends it (the Grenadier's passive). See `Simulator`'s quiet step.
+  primesWhenQuiet?: { key: string; ticks: number; ticksPerLevel: number }
+  // Gains a marker of `key` on itself every `everyTicks`, up to `cap` of them, whatever it is doing (Blade's knives), and starts the game with `start` of them. Each lasts
+  // until it is spent.
+  gainsOverTime?: { key: string; everyTicks: number; cap: number; start?: number }
+  // How far it sees, for its team, in place of `GAME_VISION_RANGE` (the Sniper's passive). Client-only, as all vision is.
+  visionRange?: number
+  // A resource it builds and spends, such as Sorin's light (see `ChampionResourceDef`).
+  resource?: ChampionResourceDef
   // A bar over the champion that shows how long one of its statuses has left. Nothing is drawn while it has none.
   meter?: ChampionMeterDef
   // Every hit it does (an auto or an ability) does this much more, as a share of itself (0.3 is 30% more), to a unit that has a status of this kind that the
@@ -284,6 +334,11 @@ export class Champion {
   // instant attack, or the launch of the shot that carries them.
   readonly onAttackLaunch: readonly Effect[]
   readonly onCast: readonly Effect[]
+  readonly lowHealthAttackSpeed: { base: number; perLevel: number } | undefined
+  readonly primesWhenQuiet: { key: string; ticks: number; ticksPerLevel: number } | undefined
+  readonly gainsOverTime: { key: string; everyTicks: number; cap: number; start?: number } | undefined
+  readonly resource: ChampionResourceDef | undefined
+  readonly visionRange: number | undefined
   readonly meter: ChampionMeterDef | undefined
   readonly bonusAgainst: { status: Status['kind']; fraction: number } | undefined
   readonly resetsCooldownsOnKill: boolean
@@ -366,6 +421,11 @@ export class Champion {
     )]
     this.onAttackLaunch = this.attackProjectile ? [launchAutoShot(this.attackProjectile)] : this.attackEffects
     this.onCast = def.onCast ?? []
+    this.lowHealthAttackSpeed = def.lowHealthAttackSpeed ? { ...def.lowHealthAttackSpeed } : undefined
+    this.primesWhenQuiet = def.primesWhenQuiet ? { ...def.primesWhenQuiet } : undefined
+    this.gainsOverTime = def.gainsOverTime ? { ...def.gainsOverTime } : undefined
+    this.resource = def.resource ? { ...def.resource } : undefined
+    this.visionRange = def.visionRange
     this.meter = def.meter ? { ...def.meter } : undefined
     if (def.bonusAgainst && !(def.bonusAgainst.fraction > 0 && Number.isFinite(def.bonusAgainst.fraction))) {
       throw new Error(`Champion "${def.id}" has a bonus against a status that needs to be a share above 0.`)
@@ -446,9 +506,18 @@ export class Champion {
     return this.attackRange + itemRange + sumBonus(statuses, 'attackrange')
   }
 
-  attackCooldownTicksWith(statuses: readonly StatusBonus[], level = 1, itemSpeed = 0, itemSpeedBonus = 0): number {
-    const speed = (this.statsAt(level).attackSpeed + itemSpeed) * (1 + itemSpeedBonus) + sumStatBuffs(statuses, 'attackSpeed')
+  // `health`, for a champion whose attack speed grows as its health falls (`lowHealthSpeedBonus`).
+  attackCooldownTicksWith(statuses: readonly StatusBonus[], level = 1, itemSpeed = 0, itemSpeedBonus = 0, health?: { hp: number; maxHp: number }): number {
+    const speed = (this.statsAt(level).attackSpeed + itemSpeed) * (1 + itemSpeedBonus + this.lowHealthSpeedBonus(level, health)) + sumStatBuffs(statuses, 'attackSpeed')
     return Math.max(1, Math.ceil(GAME_TPS / speed))
+  }
+
+  // How much more attack speed (a share) its health being low gives it at a level (see `ChampionDef.lowHealthAttackSpeed`): none without it.
+  lowHealthSpeedBonus(level: number, health: { hp: number; maxHp: number } | undefined): number {
+    const low = this.lowHealthAttackSpeed
+    if (!low || !health || !(health.maxHp > 0)) return 0
+    const missing = Math.min(1, Math.max(0, 1 - health.hp / health.maxHp))
+    return (low.base + low.perLevel * level) * missing
   }
 
   // At level 1.
@@ -458,8 +527,8 @@ export class Champion {
 
   // How long an attack takes to land once it starts: its windup's share of the whole attack, at the attack speed it has now. The more
   // attack speed it has the shorter the whole attack is, and so the shorter its windup is, in the same share.
-  attackWindupTicksWith(statuses: readonly StatusBonus[], level = 1, itemSpeed = 0, itemSpeedBonus = 0): number {
-    return Math.round(this.attackWindup * this.attackCooldownTicksWith(statuses, level, itemSpeed, itemSpeedBonus))
+  attackWindupTicksWith(statuses: readonly StatusBonus[], level = 1, itemSpeed = 0, itemSpeedBonus = 0, health?: { hp: number; maxHp: number }): number {
+    return Math.round(this.attackWindup * this.attackCooldownTicksWith(statuses, level, itemSpeed, itemSpeedBonus, health))
   }
 
   // An ability on one of its keys, or the recast that takes the place of one while it can be cast.
@@ -475,7 +544,9 @@ export class Champion {
 }
 
 // Grenadier's passive, read when an auto lands: how many autos the target has taken so far.
-const sightedOnTarget = stacks(SIGHTED_KEY, subject())
+// Soldier's passive: up to this much more attack speed (a share), and this much more for each level, the lower his health is, in proportion to what he is missing.
+export const SOLDIER_LOW_HEALTH_SPEED = 0.3
+export const SOLDIER_LOW_HEALTH_SPEED_PER_LEVEL = 0.0115
 
 // Ninja's passive, read when an auto lands: whether it has a shadow stack to spend (one at most is
 // spent by each auto).
@@ -534,11 +605,11 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
   }),
   new Champion({
     id: 'archer',
-    name: 'Archer',
-    description: 'A mobile marksman that leaps in and out of fights and kites with a long reach.',
+    name: 'Crossbowman',
+    description: 'A mobile marksman with a crossbow that leaps in and out of fights and kites with a long reach.',
     passive: 'Every auto attack reduces the cooldown of Leap by 1 second.',
-    base: { maxHp: 700, attackDamage: 75, attackSpeed: 1, resistance: 0, haste: 0, arcane: 15 },
-    growth: { maxHp: 50, attackDamage: 14, attackSpeed: 0.05, resistance: 3, haste: 2, arcane: 4 },
+    base: { maxHp: 700, attackDamage: 68, attackSpeed: 1, resistance: 0, haste: 0, arcane: 15 },
+    growth: { maxHp: 50, attackDamage: 18, attackSpeed: 0.03, resistance: 3, haste: 3, arcane: 4 },
     moveSpeed: 150,
     radius: 19,
     attackRange: 240,
@@ -589,6 +660,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     id: 'soldier',
     name: 'Soldier',
     description: 'Shoots from range. Trades health for speed and brings a medic.',
+    passive: `Up to ${SOLDIER_LOW_HEALTH_SPEED * 100}% attack speed (${SOLDIER_LOW_HEALTH_SPEED_PER_LEVEL * 100}% more each level) the lower your health is.`,
     base: { maxHp: 750, attackDamage: 60, attackSpeed: 1, resistance: 0, haste: 0, arcane: 10 },
     growth: { maxHp: 60, attackDamage: 12, attackSpeed: 0.04, resistance: 6, haste: 4, arcane: 4 },
     moveSpeed: 150,
@@ -597,12 +669,13 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     attackWindup: 0.18,
     attackProjectile: { speed: 800, radius: 5, color: '#ffb347' },
     abilities: ['stim', 'bolt', 'medic'],
+    lowHealthAttackSpeed: { base: SOLDIER_LOW_HEALTH_SPEED, perLevel: SOLDIER_LOW_HEALTH_SPEED_PER_LEVEL },
   }),
   new Champion({
     id: 'grenadier',
     name: 'Grenadier',
     description: 'A ranged bomber that bounces off its own grenades, burns the ground, and stuns or blinds with flashbangs.',
-    passive: `After ${SIGHTED_AUTOS} auto attacks on the same enemy within ${SIGHTED_WINDOW_TICKS / GAME_TPS} seconds, gain ${SIGHTED_HASTE * 100}% move speed that fades away over ${SIGHTED_HASTE_TICKS / GAME_TPS} seconds.`,
+    passive: `After ${PRIMED_QUIET_TICKS / GAME_TPS} seconds (${PRIMED_QUIET_TICKS_PER_LEVEL / GAME_TPS} less each level) out of combat without casting, your next ability is primed: longer range, a bigger blast, more damage and longer crowd control.`,
     base: { maxHp: 800, attackDamage: 60, attackSpeed: .9, resistance: 0, haste: 0, arcane: 20 },
     growth: { maxHp: 50, attackDamage: 9, attackSpeed: 0.03, resistance: 3, haste: 7, arcane: 12 },
     moveSpeed: 145,
@@ -611,18 +684,7 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     attackWindup: 0.22,
     attackProjectile: { speed: 650, radius: 6, color: '#d4b13a' },
     abilities: ['grenade', 'molotov', 'flashbang'],
-    // Each auto marks its target; the third pops the marks for the speed instead of adding one.
-    onAttackHit: [
-      damage(attackDamage()),
-      when<SimContext>(
-        (sim, src) => sightedOnTarget(sim, src) >= SIGHTED_AUTOS - 1,
-        [
-          popMarkers(SIGHTED_KEY),
-          haste(SIGHTED_HASTE, SIGHTED_HASTE_TICKS, self(), { fades: true }),
-        ],
-        [mark(SIGHTED_KEY, SIGHTED_WINDOW_TICKS, subject(), { cap: SIGHTED_AUTOS - 1 })],
-      ),
-    ],
+    primesWhenQuiet: { key: PRIMED_KEY, ticks: PRIMED_QUIET_TICKS, ticksPerLevel: PRIMED_QUIET_TICKS_PER_LEVEL },
   }),
   new Champion({
     id: 'trinketmaster',
@@ -800,6 +862,146 @@ export const champions: ReadonlyMap<string, Champion> = new Map([
     // Q bursts roots up out of a small circle, W grows a grove in a big one, E strikes and plants a spore.
     abilities: ['rootburst', 'grove', 'spore'],
     onAttackHit: [damage(attackDamage()), entangle],
+  }),
+  new Champion({
+    id: 'hellhound',
+    name: 'Hellhound',
+    description: 'A melee hunter that makes its prey bleed, runs it down, and rakes it again and again.',
+    passive: 'Auto attacks make the enemy bleed. Your autos hit a bleeding enemy harder and speed you after it.',
+    base: { maxHp: 980, attackDamage: 66, attackSpeed: .85, resistance: 0, haste: 0, arcane: 5 },
+    growth: { maxHp: 60, attackDamage: 12, attackSpeed: 0.015, resistance: 5, haste: 8, arcane: 2 },
+    moveSpeed: 150,
+    radius: 21,
+    attackRange: 110,
+    attackWindup: 0.24,
+    // Q rakes up to three times, W howls in a cone, E pounces.
+    abilities: ['rake', 'howl', 'pounce'],
+    onAttackHit: [damage(houndAutoDamage), ...houndBleedStack],
+  }),
+  new Champion({
+    id: 'stone',
+    name: 'Stone',
+    description: 'A melee guardian that shoves, shields its allies, and ties enemies down.',
+    passive: 'Putting crowd control on an enemy gives you a small shield that grows with your level.',
+    base: { maxHp: 1150, attackDamage: 58, attackSpeed: .8, resistance: 0, haste: 0, arcane: 10 },
+    growth: { maxHp: 95, attackDamage: 6, attackSpeed: 0.01, resistance: 7, haste: 5, arcane: 3 },
+    moveSpeed: 140,
+    radius: 23,
+    attackRange: 110,
+    attackWindup: 0.26,
+    // Q readies a shoving auto, W dashes to a teammate, E throws a tether.
+    abilities: ['shove', 'rampart', 'tether'],
+  }),
+  new Champion({
+    id: 'vulture',
+    name: 'Vulture',
+    description: 'A melee scavenger that lays hidden mines, marks its prey with carrion and swoops on what is marked.',
+    passive: 'Spider Mine and Carrion Strike mark enemies with carrion. Your abilities do more to a marked enemy, spending the mark.',
+    base: { maxHp: 900, attackDamage: 68, attackSpeed: .9, resistance: 0, haste: 0, arcane: 5 },
+    growth: { maxHp: 60, attackDamage: 15, attackSpeed: 0.03, resistance: 5, haste: 5, arcane: 2 },
+    moveSpeed: 152,
+    radius: 20,
+    attackRange: 110,
+    attackWindup: 0.22,
+    // Q lays a mine, W readies a strike, E swoops onto an enemy.
+    abilities: ['spidermine', 'carrionstrike', 'swoop'],
+  }),
+  new Champion({
+    id: 'blade',
+    name: 'Blade',
+    description: 'A melee knife fighter that gathers knives over time, throws them, and calls them back through its enemies.',
+    passive: `You gain a knife every ${KNIFE_EVERY_TICKS / GAME_TPS} seconds, up to ${KNIFE_MAX}. Each makes your autos hit harder. Knife hits shred enemies, so you do more to them.`,
+    base: { maxHp: 860, attackDamage: 70, attackSpeed: .95, resistance: 0, haste: 0, arcane: 5 },
+    growth: { maxHp: 72, attackDamage: 11, attackSpeed: 0.02, resistance: 4, haste: 5, arcane: 2 },
+    moveSpeed: 155,
+    radius: 19,
+    attackRange: 105,
+    attackWindup: 0.2,
+    // Q throws a knife, W dashes and calls them back, E gives two back and speeds you up.
+    abilities: ['throwknife', 'bladedash', 'frenzy'],
+    gainsOverTime: { key: KNIFE_KEY, everyTicks: KNIFE_EVERY_TICKS, cap: KNIFE_MAX, start: KNIFE_MAX },
+    onAttackHit: [damage(bladeAutoDamage)],
+  }),
+  new Champion({
+    id: 'sanguine',
+    name: 'Sanguine',
+    description: 'A ranged blood mage that strings shots together, ties enemies to her, and heals with every hit.',
+    passive: 'Damaging enemies with your abilities heals you.',
+    base: { maxHp: 760, attackDamage: 50, attackSpeed: .8, resistance: 0, haste: 0, arcane: 30 },
+    growth: { maxHp: 60, attackDamage: 6, attackSpeed: 0.02, resistance: 3, haste: 6, arcane: 10 },
+    moveSpeed: 145,
+    radius: 19,
+    attackRange: 230,
+    attackWindup: 0.22,
+    attackProjectile: { speed: 750, radius: 6, color: '#a0101c' },
+    // Q shoots blood three times, W ties an enemy to her, E shields her in blood that bursts.
+    abilities: ['bloodshot', 'bloodpact', 'coagulate'],
+  }),
+  new Champion({
+    id: 'hunter',
+    name: 'Hunter',
+    description: 'A ranged archer that builds focus with every shot, then looses volleys, roots and rains arrows.',
+    passive: `Each auto gives a focus stack, up to ${FOCUS_MAX}: each is ${FOCUS_ATTACK_SPEED * 100}% more attack speed, and at the most you reach ${FOCUS_RANGE} farther.`,
+    base: { maxHp: 720, attackDamage: 75, attackSpeed: .85, resistance: 0, haste: 0, arcane: 10 },
+    growth: { maxHp: 55, attackDamage: 15, attackSpeed: 0.03, resistance: 3, haste: 3, arcane: 3 },
+    moveSpeed: 148,
+    radius: 19,
+    attackRange: 240,
+    attackWindup: 0.22,
+    attackProjectile: { speed: 950, radius: 5, color: '#9bd36d' },
+    // Q readies volleys at full focus, W roots and leaps back, E rains arrows.
+    abilities: ['volley', 'disengage', 'arrowrain'],
+    onAttackHit: [damage(attackDamage()), ...hunterFocus, volleyOnHit],
+  }),
+  new Champion({
+    id: 'crystal',
+    name: 'Crystal',
+    description: 'A ranged archer with a crystal bow whose every ability readies an auto, and whose arrows burst into shards.',
+    passive: 'Every ability you cast resets your auto attack.',
+    base: { maxHp: 740, attackDamage: 60, attackSpeed: .85, resistance: 0, haste: 0, arcane: 25 },
+    growth: { maxHp: 58, attackDamage: 14, attackSpeed: 0.01, resistance: 3, haste: 5, arcane: 10 },
+    moveSpeed: 145,
+    radius: 19,
+    attackRange: 230,
+    attackWindup: 0.22,
+    attackProjectile: { speed: 800, radius: 6, color: '#9fe7ff' },
+    // Q shoots a bolt that can be shattered, W glides, E readies shard autos.
+    abilities: ['crystalbolt', 'glide', 'shardstorm'],
+    onAttackHit: [damage(attackDamage()), shardOnHit],
+    onCast: [resetAutoTimer()],
+  }),
+  new Champion({
+    id: 'sorin',
+    name: 'Sorin',
+    description: 'A melee paladin who gathers light, and spends it on beams of dawn and a dash he can use again at once.',
+    passive: `Gathers light with autos and kills. Light past full heals you.`,
+    base: { maxHp: 860, attackDamage: 64, attackSpeed: .75, resistance: 0, haste: 0, arcane: 10 },
+    growth: { maxHp: 82, attackDamage: 10, attackSpeed: 0.02, resistance: 4, haste: 4, arcane: 4 },
+    moveSpeed: 150,
+    radius: 21,
+    attackRange: 100,
+    attackWindup: 0.24,
+    resource: { max: LIGHT_MAX, onKill: LIGHT_PER_KILL, overflowHeal: LIGHT_OVERFLOW_HEAL, color: '#ffe08a', marks: [DAWNSTEP_COST, BEAM_COST] },
+    // Q spends light on a beam, W readies smiting autos, E dashes and can spend light to come back at once.
+    abilities: ['dawnbeam', 'smite', 'dawnstep'],
+    onAttackHit: [damage(attackDamage()), gainResource(LIGHT_PER_AUTO, self()), smiteOnHit],
+  }),
+  new Champion({
+    id: 'sniper',
+    name: 'Sniper',
+    description: 'A long-range marksman who sees far, lines up crushing shots, rolls out of harm and scans for the hidden.',
+    passive: 'You see farther than anyone.',
+    base: { maxHp: 680, attackDamage: 66, attackSpeed: .7, resistance: 0, haste: 0, arcane: 10 },
+    growth: { maxHp: 52, attackDamage: 12, attackSpeed: 0.02, resistance: 3, haste: 4, arcane: 3 },
+    moveSpeed: 144,
+    radius: 19,
+    attackRange: 280,
+    attackWindup: 0.26,
+    attackProjectile: { speed: 1300, radius: 5, color: '#ffd36a' },
+    visionRange: GAME_VISION_RANGE + SNIPER_VISION_BONUS,
+    gainsOverTime: { key: SCAN_KEY, everyTicks: SCAN_RECHARGE_TICKS, cap: SCAN_CHARGES, start: SCAN_CHARGES },
+    // Q draws a bead and fires it, W rolls untouchable, E scans an area.
+    abilities: ['steadyaim', 'tumble', 'scan'],
   }),
 ].map((champion) => [champion.id, champion]))
 

@@ -36,12 +36,18 @@ export type ParticleSpec = {
 
 // Particles drawn as round, soft points that keep their size in the world, many at once, cheaply: a fixed pool, the oldest
 // given up when a new one needs room. One system blends by adding light (fire, sparks, magic), the other as ordinary paint
-// (smoke, water, dust); the world renderer has one of each.
+// (smoke, water, dust); the world renderer has one of each. The living ones are kept together at the front of the pool, so each
+// frame only they are moved, sent to the graphics card and drawn, however big the pool is.
 export class ParticleSystem {
   readonly points: Points
   private readonly geometry = new BufferGeometry()
   private readonly material: ShaderMaterial
   private readonly capacity: number
+  // What share of the particles let go are made (fewer, on Low quality), and how much bigger each is, so an effect still reads.
+  private readonly keep: number
+  private readonly grow: number
+  // How many are alive (the first this many slots), and, once the pool is full, the slot the next one takes.
+  private live = 0
   private next = 0
   // What each particle is, a slot each.
   private readonly position: Float32Array
@@ -57,8 +63,10 @@ export class ParticleSystem {
   private readonly drawColour: Float32Array
   private readonly drawSize: Float32Array
 
-  constructor(capacity: number, blending: 'add' | 'normal') {
+  constructor(capacity: number, blending: 'add' | 'normal', options: { keep?: number; grow?: number } = {}) {
     this.capacity = capacity
+    this.keep = options.keep ?? 1
+    this.grow = options.grow ?? 1
     this.position = new Float32Array(capacity * 3)
     this.velocity = new Float32Array(capacity * 3)
     this.age = new Float32Array(capacity).fill(1)
@@ -120,31 +128,43 @@ export class ParticleSystem {
   }
 
   emit(spec: ParticleSpec): void {
-    const slot = this.next
-    this.next = (this.next + 1) % this.capacity
+    if (this.keep < 1 && Math.random() > this.keep) return
+    let slot: number
+    if (this.live < this.capacity) {
+      slot = this.live
+      this.live += 1
+    } else {
+      slot = this.next
+      this.next = (this.next + 1) % this.capacity
+    }
     this.position.set([spec.x, spec.y, spec.z], slot * 3)
     this.velocity.set([spec.vx ?? 0, spec.vy ?? 0, spec.vz ?? 0], slot * 3)
     this.age[slot] = 0
     this.life[slot] = Math.max(0.01, spec.life)
-    this.sizes[slot * 2] = spec.size
-    this.sizes[slot * 2 + 1] = spec.sizeEnd ?? spec.size
+    this.sizes[slot * 2] = spec.size * this.grow
+    this.sizes[slot * 2 + 1] = (spec.sizeEnd ?? spec.size) * this.grow
     const end = spec.colorEnd ?? spec.color
     this.colours.set([spec.color.r, spec.color.g, spec.color.b, end.r, end.g, end.b], slot * 6)
     this.physics.set([spec.gravity ?? 0, spec.drag ?? 0, spec.fadeIn ?? 0.08], slot * 3)
     this.alphaStart[slot] = spec.alpha ?? 1
   }
 
+  // How many are alive.
+  get count(): number {
+    return this.live
+  }
+
   update(dt: number): void {
     const step = Math.min(dt, 0.1)
-    for (let slot = 0; slot < this.capacity; slot += 1) {
+    for (let slot = 0; slot < this.live;) {
       const life = this.life[slot]
-      let age = this.age[slot]
+      const age = this.age[slot] + step
       if (age >= life) {
-        this.drawSize[slot] = 0
-        this.drawColour[slot * 4 + 3] = 0
+        // Its life is over: the last living one takes its slot, and is moved on from there.
+        this.live -= 1
+        this.move(this.live, slot)
         continue
       }
-      age += step
       this.age[slot] = age
       const p = slot * 3
       const gravity = this.physics[p]
@@ -168,10 +188,35 @@ export class ParticleSystem {
       this.drawColour[q + 2] = this.colours[c + 2] + (this.colours[c + 5] - this.colours[c + 2]) * t
       this.drawColour[q + 3] = this.alphaStart[slot] * (1 - t) * grow
       this.drawSize[slot] = (this.sizes[slot * 2] + (this.sizes[slot * 2 + 1] - this.sizes[slot * 2]) * t) * (0.4 + 0.6 * grow)
+      slot += 1
     }
-    this.geometry.attributes.position.needsUpdate = true
-    this.geometry.attributes.color.needsUpdate = true
-    this.geometry.attributes.size.needsUpdate = true
+    if (this.next >= this.live) this.next = 0
+    // Only the living are drawn, and only they are sent.
+    this.geometry.setDrawRange(0, this.live)
+    this.points.visible = this.live > 0
+    if (this.live === 0) return
+    for (const name of ['position', 'color', 'size']) {
+      const attribute = this.geometry.getAttribute(name) as BufferAttribute
+      attribute.clearUpdateRanges()
+      attribute.addUpdateRange(0, this.live * attribute.itemSize)
+      attribute.needsUpdate = true
+    }
+  }
+
+  // Moves what is in one slot to another (whose particle is gone).
+  private move(from: number, to: number): void {
+    if (from === to) return
+    const copy = (array: Float32Array, size: number): void => {
+      array.copyWithin(to * size, from * size, from * size + size)
+    }
+    copy(this.position, 3)
+    copy(this.velocity, 3)
+    copy(this.age, 1)
+    copy(this.life, 1)
+    copy(this.sizes, 2)
+    copy(this.colours, 6)
+    copy(this.physics, 3)
+    copy(this.alphaStart, 1)
   }
 
   dispose(): void {

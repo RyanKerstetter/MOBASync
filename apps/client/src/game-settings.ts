@@ -1,6 +1,8 @@
 import { DEFAULT_CAST_MODE, type CastMode } from './cast-control.ts'
 import { DEFAULT_EFFECTS, readEffects, type EffectSettings } from './render/effect-settings.ts'
+import { DEFAULT_GRAPHICS, readGraphics, type GraphicsOptions } from './render/graphics-quality.ts'
 import { DEFAULT_RENDERER, RENDERER_KINDS, type RendererKind } from './render/renderer-kind.ts'
+import { DEFAULT_ZOOM, readZoom } from './render/zoom.ts'
 
 // What a player chooses for themselves, kept in the browser so it is there next time. Every setting
 // has a default and is checked on the way in, so a missing or odd stored value is just the default.
@@ -30,6 +32,10 @@ export type GameSettings = {
   maxFps: number
   // Whether the world is drawn in 3D (models, a slanted camera) or in 2D (sprites, from straight above) (the graphics menu).
   renderer: RendererKind
+  // How much the 3D world draws, setting by setting, which a preset sets all at once (the graphics menu; see graphics-quality.ts).
+  graphics: GraphicsOptions
+  // How far the camera is zoomed, as a multiple of the usual view: the mouse wheel (see zoom.ts).
+  zoom: number
   // How loud the game's sounds are, in percent: 0 is silent (the sound menu).
   soundVolume: number
 }
@@ -68,13 +74,15 @@ export const DEFAULT_SETTINGS: GameSettings = {
   clickRadius: DEFAULT_CLICK_RADIUS,
   walkKeepsAuto: false,
   walkKeepsCast: true,
-  movementKeys: false,
+  movementKeys: true,
   castKeepsAttack: true,
   bufferAbilities: true,
   attackMarkerSize: DEFAULT_ATTACK_MARKER_SIZE,
   diagnostics: true,
   maxFps: DEFAULT_MAX_FPS,
   renderer: DEFAULT_RENDERER,
+  graphics: { ...DEFAULT_GRAPHICS },
+  zoom: DEFAULT_ZOOM,
   soundVolume: DEFAULT_SOUND_VOLUME,
 }
 
@@ -129,10 +137,12 @@ export function loadSettings(storage: SettingsStorage | undefined = defaultStora
       diagnostics: typeof fields.diagnostics === 'boolean' ? fields.diagnostics : DEFAULT_SETTINGS.diagnostics,
       maxFps: readMaxFps(fields.maxFps),
       renderer: RENDERER_KINDS.find((kind) => kind === fields.renderer) ?? DEFAULT_SETTINGS.renderer,
+      graphics: readGraphics(fields.graphics),
+      zoom: readZoom(fields.zoom),
       soundVolume: readSoundVolume(fields.soundVolume),
     }
   } catch {
-    return { ...DEFAULT_SETTINGS, effects: { ...DEFAULT_SETTINGS.effects } }
+    return { ...DEFAULT_SETTINGS, effects: { ...DEFAULT_SETTINGS.effects }, graphics: { ...DEFAULT_SETTINGS.graphics } }
   }
 }
 

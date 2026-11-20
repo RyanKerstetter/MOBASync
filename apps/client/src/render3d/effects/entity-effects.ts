@@ -1,10 +1,9 @@
 import { Group, type Texture } from 'three'
-import { getTeam } from '../../../../../packages/shared/src/index.ts'
+import { GAME_TPS, getEntityDef, getTeam } from '../../../../../packages/shared/src/index.ts'
 import type { RenderedEntity } from '../../game-state.ts'
 import { BubbleVisual, BurningGroundVisual, FireBlastVisual, FireballVisual, FireRuneVisual, FireTornadoVisual, FlameWallVisual, GeyserVisual, WaveVisual, WellVisual } from './elemental.ts'
 import { emberTexture } from './fx-materials.ts'
 import {
-  ArrowVisual,
   CanisterVisual,
   EnergySlugVisual,
   ExplosionVisual,
@@ -37,7 +36,43 @@ import {
   WarpVisual,
   WhirlVisual,
 } from './kits.ts'
+import {
+  BladeBurstVisual,
+  BladeKnifeVisual,
+  BloodTrailVisual,
+  ClawMarkVisual,
+  DawnBeamVisual,
+  DawnstepVisual,
+  GroundKnifeVisual,
+  HowlVisual,
+  RakeSlashVisual,
+  SmiteVisual,
+  SpiderMineVisual,
+  SpiderVisual,
+  TetherVisual,
+  VenomBiteVisual,
+} from './kits-melee.ts'
+import {
+  ArrowRainImpactVisual,
+  ArrowRainVisual,
+  BloodGlobVisual,
+  BloodPactVisual,
+  BloodShardsVisual,
+  CoagulateVisual,
+  CrossbowBoltVisual,
+  CrystalArrowVisual,
+  CrystalBurstVisual,
+  FletchedArrowVisual,
+  ScanVisual,
+  SniperShotVisual,
+} from './kits-ranged.ts'
 import { BoltVisual, GroundShapeVisual, SlabVisual, type EffectContext, type Visual } from './visual.ts'
+
+// How long a mine is seen by everyone before it hides (`EntityDef.ownTeamOnly`), in seconds.
+const shownFor = (defId: string): number => {
+  const only = getEntityDef(defId)?.ownTeamOnly
+  return typeof only === 'object' ? only.afterTicks / GAME_TPS : 0
+}
 
 export type { EffectContext } from './visual.ts'
 
@@ -112,10 +147,60 @@ export const ENTITY_VISUALS: Readonly<Record<string, VisualFactory>> = {
   'rootburst-roots': (g, entity) => new RootsVisual(g, entity),
   'grove-warning': (g, entity) => new SproutingVisual(g, entity, true),
   'grove': (g, entity) => new GroveVisual(g, entity),
+  // The Hellhound.
+  'rake-shot': (g, entity) => new RakeSlashVisual(g, entity, false),
+  'rake-again-shot': (g, entity) => new RakeSlashVisual(g, entity, true),
+  'rake-hit': (g, entity, ctx) => new ClawMarkVisual(g, entity, ctx, 'plain'),
+  'rake-hit-bleed': (g, entity, ctx) => new ClawMarkVisual(g, entity, ctx, 'bleed'),
+  'rake-final-hit': (g, entity, ctx) => new ClawMarkVisual(g, entity, ctx, 'final'),
+  'howl-wave': (g, entity) => new HowlVisual(g, entity),
+  'blood-trail': (g, entity) => new BloodTrailVisual(g, entity),
+  // Stone.
+  'tether-shot': (g, entity, ctx) => new TetherVisual(g, entity, ctx),
+  // The Vulture.
+  'spider-mine': (g, entity) => new SpiderMineVisual(g, entity, shownFor(entity.defId)),
+  'mine-spider': (g, entity) => new SpiderVisual(g, entity),
+  'mine-bite': (g, entity, ctx) => new VenomBiteVisual(g, entity, ctx),
+  // Blade.
+  'thrown-knife': (g, entity, ctx) => new BladeKnifeVisual(g, entity, ctx, true),
+  'recalled-knife': (g, entity, ctx) => new BladeKnifeVisual(g, entity, ctx, false),
+  'ground-knife': (g, entity, ctx) => new GroundKnifeVisual(g, entity, ctx),
+  'bladedash-burst': (g, entity, ctx) => new BladeBurstVisual(g, entity, ctx),
+  // Sanguine.
+  'blood-shot': (g, entity, ctx) => new BloodGlobVisual(g, entity, ctx),
+  'blood-pact': (g) => new BloodPactVisual(g),
+  'coagulate': (g) => new CoagulateVisual(g),
+  'blood-shards': (g, entity, ctx) => new BloodShardsVisual(g, entity, ctx),
+  // The Hunter.
+  'volley-arrow': (g, entity, ctx) => new FletchedArrowVisual(g, entity, ctx, '#9bd36d', 0.9, 'leaves'),
+  'disengage-arrow': (g, entity, ctx) => new FletchedArrowVisual(g, entity, ctx, '#7bd88f', 1.4, 'vines'),
+  'arrow-rain': (g, entity) => new ArrowRainVisual(g, entity),
+  'arrow-rain-impact': (g, entity, ctx) => new ArrowRainImpactVisual(g, entity, ctx),
+  // Crystal.
+  'crystal-bolt': (g, entity, ctx) => new CrystalArrowVisual(g, entity, ctx, true),
+  'shard-burst': (g, entity, ctx) => new CrystalBurstVisual(g, entity, ctx, false),
+  'shatter-burst': (g, entity, ctx) => new CrystalBurstVisual(g, entity, ctx, true),
+  // Sorin.
+  'dawn-beam': (g, entity, ctx) => new DawnBeamVisual(g, entity, ctx),
+  'dawnstep-flash': (g, entity, ctx) => new DawnstepVisual(g, entity, ctx),
+  'smite-hit': (g, entity) => new SmiteVisual(g, entity, false),
+  'smite-final': (g, entity) => new SmiteVisual(g, entity, true),
+  // The Sniper.
+  'scan': (g) => new ScanVisual(g),
+  ...Object.fromEntries(Array.from({ length: 10 }, (_, index) => [`steady-shot-${index + 1}`, (g: Group, entity: RenderedEntity, ctx: EffectContext) => new SniperShotVisual(g, entity, ctx)])),
+}
+
+// Which visual an entity is drawn by: its ID and the tick it was spawned on. An entity spawned again under the same ID (one a champion can have only one of, such as
+// the Ninja's shadow, which a Shadow Return through an enemy leaves anew where it was cast from) is a new entity, with a new visual made where it is now, while the
+// old one ends where it was. Without the tick, a visual placed once when it is made (most that stand still are) would stay where the old one stood. An entity that
+// moves keeps its spawn tick as it goes, so its visual is never made again.
+export function visualKey(entity: Pick<RenderedEntity, 'id' | 'startTick'>): string {
+  return `${entity.id}@${entity.startTick}`
 }
 
 export class EntityEffects3D {
   readonly group = new Group()
+  // By `visualKey`.
   private readonly visuals = new Map<string, Visual | null>()
   private readonly ending: Visual[] = []
   private readonly embers = emberTexture()
@@ -123,15 +208,16 @@ export class EntityEffects3D {
   update(entities: readonly RenderedEntity[], ctx: EffectContext): void {
     const active = new Set<string>()
     for (const entity of entities) {
-      active.add(entity.id)
-      let visual = this.visuals.get(entity.id)
+      const key = visualKey(entity)
+      active.add(key)
+      let visual = this.visuals.get(key)
       if (visual === undefined) {
         visual = this.make(entity, ctx)
-        this.visuals.set(entity.id, visual)
+        this.visuals.set(key, visual)
       }
       if (visual && !visual.step(entity, ctx)) {
         visual.dispose()
-        this.visuals.set(entity.id, null)
+        this.visuals.set(key, null)
       }
     }
     for (const [id, visual] of this.visuals) {
@@ -162,7 +248,8 @@ export class EntityEffects3D {
     const ownerCharacter = ctx.characters.get(entity.ownerId)
     const owner = ownerCharacter?.champion.id
     const g = this.group
-    const dedicated = ENTITY_VISUALS[entity.defId]
+    // A primed throw of the Grenadier's (`-primed`) is drawn as the plain one is, at its own size.
+    const dedicated = ENTITY_VISUALS[entity.defId] ?? ENTITY_VISUALS[entity.defId.replace(/-primed$/, '')]
     if (dedicated) return dedicated(g, entity, ctx, this.embers)
     if (entity.visual === 'hidden') return null
     // An auto attack's shot, by whose it is.
@@ -171,7 +258,11 @@ export class EntityEffects3D {
       switch (owner) {
         case 'firemage': return new BoltVisual(g, entity, ctx, 'fire')
         case 'capricorn': return new BoltVisual(g, entity, ctx, 'water', (ownerCharacter?.stacks.empowered ?? 0) > 0)
-        case 'archer': return new ArrowVisual(g, entity, ctx, '#6dd39b')
+        case 'archer': return new CrossbowBoltVisual(g, entity, ctx, '#6dd39b')
+        case 'hunter': return new FletchedArrowVisual(g, entity, ctx, '#9bd36d', 1, (ownerCharacter?.stacks.volley ?? 0) > 0 ? 'leaves' : 'spark')
+        case 'crystal': return new CrystalArrowVisual(g, entity, ctx, false)
+        case 'sanguine': return new BloodGlobVisual(g, entity, ctx)
+        case 'sniper': return new TracerVisual(g, entity, ctx)
         case 'soldier': return new TracerVisual(g, entity, ctx)
         case 'grenadier': return new ShellVisual(g, entity, ctx)
         case 'cursebearer': return new OrbVisual(g, entity, ctx, '#6a3d9a', 'curse')

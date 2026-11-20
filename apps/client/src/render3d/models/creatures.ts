@@ -126,7 +126,8 @@ export class SlimeModel extends Model {
       positions.setXYZ(index, px, py, pz)
     }
     positions.needsUpdate = true
-    this.body.geometry.computeVertexNormals()
+    // (With models on Low its normals are left as made: it only wobbles, and working them out again every frame is most of its cost.)
+    if (this.vision.graphics.models !== 'low') this.body.geometry.computeVertexNormals()
   }
 
   override ambient(fx: FxContext, dt: number): void {
@@ -209,6 +210,8 @@ export class WolfModel extends Model {
     }
     this.tail = joint(this.body, 0, 0.05, -0.45)
     this.part(this.tail, new ConeGeometry(0.07, 0.42, 6), fur, 0, 0, -0.18).rotation.x = -Math.PI / 2 - 0.3
+    // Its parts only move with the joint they are on: drawn as one mesh a material on each.
+    this.mergeStillOnEveryJoint()
   }
 
   pose(input: PoseInput): void {

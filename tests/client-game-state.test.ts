@@ -749,3 +749,30 @@ test('the wait the bar fills over travels in a checkpoint, so a client that join
   assert.ok(bar > 0 && bar < 1, `it is part of the way through the wait: ${bar}`)
   assert.ok(Math.abs(joined.getAttackCooldownProgress(1e-6 * 1000 / GAME_TPS) - bar) < 1e-6, 'and the client that joined draws the same')
 })
+
+// What the page asks every frame (whether a held ability is held, its indicator, whether a held cast must wait) must not run the simulation ahead: it did once, a
+// tick for every frame, and the Sniper's next order was stamped so far in the future that the server refused it.
+test('asking every frame about a held ability does not run the game ahead of the clock', () => {
+  const gameState = new ClientGameState()
+  gameState.simulator.addPlayer(1, 'player-1', 'Player 1', { x: 600, y: 600 }, getChampion('sniper'))
+  gameState.simulator.addPlayer(2, 'player-2', 'Player 2', { x: 900, y: 900 }, brawler)
+  gameState.setLocalCharacterId(1)
+  gameState.resetServerTickAnchor(0, 0)
+  const aim = { x: 800, y: 600 }
+  const press = gameState.createCastOrder(0, aim, 100)
+  assert.ok(press.ok && press.order.abilityId === 'steadyaim', 'the press starts drawing the bead')
+  // A second of frames at well over the game's rate, each asking as the page does.
+  const now = 1100
+  for (let frame = 0; frame < 300; frame += 1) {
+    gameState.isHolding(0, now)
+    gameState.getCastPreview(0, aim, now)
+    gameState.castMustWait(0, now)
+    gameState.getAbilityCooldowns(now)
+  }
+  const clock = Math.floor(now * GAME_TPS / 1000)
+  assert.ok(gameState.simulator.latestSnapshotTick <= clock + 1, `worked out to ${gameState.simulator.latestSnapshotTick}, with the clock at ${clock}`)
+  assert.equal(gameState.isHolding(0, now), true, 'and the bead is being drawn')
+  const release = gameState.createCastOrder(0, aim, now)
+  assert.ok(release.ok && release.order.abilityId === 'steadyfire', 'letting go fires it')
+  assert.ok(release.ok && release.order.tick <= clock + 2, `stamped for now (${release.ok ? release.order.tick : '-'}), not the future`)
+})

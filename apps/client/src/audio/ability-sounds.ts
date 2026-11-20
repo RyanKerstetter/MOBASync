@@ -375,6 +375,176 @@ export const ABILITY_SOUNDS: Readonly<Record<string, Recipe>> = {
     woodHit(v, { gain: 0.35, size: 0.45, delay: 0.32 })
   },
   // Spore: a hard strike of wood, and a puff of spores.
+  // ---- Hellhound
+  // Rake: claws torn through the air (what each slash strikes has its own sound: `rake-hit` and the rest).
+  rake: (v) => {
+    swish(v, { low: 2600, high: 520, dur: 0.15, gain: 0.5 })
+    tone(v, { type: 'sawtooth', freq: 150, freqEnd: 110, dur: 0.14, gain: 0.08, lowpass: 900 })
+  },
+  rakeagain: (v) => {
+    swish(v, { low: 2800, high: 600, dur: 0.14, gain: 0.5 })
+    tone(v, { type: 'sawtooth', freq: 170, freqEnd: 120, dur: 0.12, gain: 0.08, lowpass: 900 })
+  },
+  // Howl: a hound's howl: a breath drawn, the voice sliding up into a long held note that wavers, and falling away at the end, with a second, lower voice under it
+  // a little behind (two throats), and a breathy edge.
+  howl: (v) => {
+    for (const [voice, gain, lag] of [[1, 0.2, 0], [0.75, 0.09, 0.05]] as const) {
+      tone(v, { type: 'triangle', freq: 330 * voice, freqEnd: 620 * voice, dur: 0.22, gain, attack: 0.08, lowpass: 2200, delay: lag })
+      tone(v, { type: 'triangle', freq: 620 * voice, freqEnd: 600 * voice, dur: 0.6, gain, attack: 0.02, lowpass: 2200, vibrato: { rate: 5.5, depth: 14 * voice }, delay: lag + 0.2 })
+      tone(v, { type: 'triangle', freq: 600 * voice, freqEnd: 360 * voice, dur: 0.32, gain: gain * 0.8, attack: 0.02, lowpass: 2000, delay: lag + 0.78 })
+    }
+    tone(v, { type: 'sine', freq: 1240, freqEnd: 1200, dur: 0.75, gain: 0.025, attack: 0.15, vibrato: { rate: 5.5, depth: 28 }, delay: 0.2 })
+    noise(v, { dur: 0.9, gain: 0.06, filter: 'bandpass', freq: 1300, q: 3, attack: 0.2, delay: 0.1 })
+  },
+  // Pounce: a snarl and a spring.
+  pounce: (v) => {
+    tone(v, { type: 'sawtooth', freq: 140, freqEnd: 110, dur: 0.18, gain: 0.22, lowpass: 1000, vibrato: { rate: 30, depth: 25 } })
+    dash(v, { gain: 0.5, dark: true, delay: 0.04 })
+  },
+  // ---- Stone
+  // Shove: stone grinding as he sets his shoulder.
+  shove: (v) => {
+    noise(v, { dur: 0.25, gain: 0.4, filter: 'lowpass', freq: 600, q: 1, attack: 0.01 })
+    crackle(v, { count: 6, dur: 0.2, gain: 0.12, freq: 900 })
+  },
+  // Rampart: a heavy charge, and the ground thudding as he plants himself.
+  rampart: (v) => {
+    dash(v, { gain: 0.45, dark: true })
+    boom(v, { gain: 0.55, low: 85, dur: 0.4, delay: 0.18 })
+    crackle(v, { count: 8, dur: 0.3, gain: 0.12, freq: 1100, delay: 0.2 })
+  },
+  // Tether: a weighted line flung out, its rope whirring.
+  tether: (v) => {
+    swish(v, { low: 1600, high: 300, dur: 0.3, gain: 0.45 })
+    rattle(v, { dur: 0.25, gain: 0.08 })
+  },
+  // ---- Vulture
+  // Spider Mine: set down with a click, and its legs tapping as it settles.
+  spidermine: (v) => {
+    clink(v, { freq: 1900, gain: 0.35 })
+    for (const delay of [0.08, 0.13, 0.19, 0.24]) noise(v, { dur: 0.02, gain: 0.12, filter: 'bandpass', freq: 3000 + Math.random() * 800, q: 4, delay })
+  },
+  // Carrion Strike: a hooked slash, and a croak.
+  carrionstrike: (v) => {
+    swish(v, { low: 2000, high: 400, dur: 0.18, gain: 0.45 })
+    tone(v, { type: 'sawtooth', freq: 520, freqEnd: 300, dur: 0.12, gain: 0.07, lowpass: 1600, delay: 0.05 })
+  },
+  // Swoop: wings beating, and a dive.
+  swoop: (v) => {
+    for (const delay of [0, 0.09]) noise(v, { dur: 0.08, gain: 0.3, filter: 'lowpass', freq: 700, attack: 0.02, delay })
+    dash(v, { gain: 0.45, delay: 0.12 })
+  },
+  // ---- Blade
+  // Throw Knife: a thin, fast whistle.
+  throwknife: (v) => {
+    swish(v, { low: 5200, high: 2400, dur: 0.12, gain: 0.32 })
+    clink(v, { freq: 4200, gain: 0.08 })
+  },
+  // Blade Dash: a dash ending in a ring of cuts (`bladedash-burst`), and the knives coming home.
+  bladedash: (v) => dash(v, { gain: 0.45 }),
+  // Frenzy: steel drawn, and a quickening pulse.
+  frenzy: (v) => {
+    for (const delay of [0, 0.07]) metalHit(v, { gain: 0.08, pitch: 3600 + delay * 3000, ring: 0.2, delay })
+    heartbeat(v, 0.25, 0.1)
+    chord(v, { freqs: [440, 660, 880], dur: 0.35, gain: 0.12, stagger: 0.04 })
+  },
+  // ---- Sanguine
+  // Blood Shot: a wet, heavy spit of blood.
+  bloodshot: (v) => {
+    noise(v, { dur: 0.16, gain: 0.45, filter: 'lowpass', freq: 900, freqEnd: 300, attack: 0.004 })
+    tone(v, { type: 'sine', freq: 260, freqEnd: 90, dur: 0.12, gain: 0.3 })
+    splash(v, 0.12, 0.03)
+  },
+  bloodshotagain: (v) => {
+    noise(v, { dur: 0.15, gain: 0.45, filter: 'lowpass', freq: 1000, freqEnd: 320, attack: 0.004 })
+    tone(v, { type: 'sine', freq: 280, freqEnd: 95, dur: 0.11, gain: 0.3 })
+    splash(v, 0.12, 0.03)
+  },
+  // Blood Pact: a low binding chord, and a heartbeat taken.
+  bloodpact: (v) => {
+    chord(v, { freqs: [110, 165], dur: 0.7, gain: 0.18, stagger: 0.05, type: 'sawtooth' })
+    heartbeat(v, 0.35, 0.1)
+  },
+  // Coagulate: blood thickening, a low hiss and a heartbeat.
+  coagulate: (v) => {
+    noise(v, { dur: 0.5, gain: 0.25, filter: 'lowpass', freq: 900, q: 1.2, attack: 0.1 })
+    heartbeat(v, 0.3, 0.05)
+  },
+  // The shield burst early (the shards are `blood-shards`).
+  coagulateburst: (v) => noise(v, { dur: 0.12, gain: 0.35, filter: 'highpass', freq: 1800, q: 1, attack: 0.005 }),
+  // ---- Hunter
+  // Volley: arrows nocked, a bowstring tested, notes rising.
+  volley: (v) => {
+    tone(v, { type: 'triangle', freq: 196, freqEnd: 186, dur: 0.2, gain: 0.25 })
+    chord(v, { freqs: [392, 523, 659], dur: 0.3, gain: 0.14, stagger: 0.05, delay: 0.05 })
+  },
+  // Disengage: a loosed arrow, and a leap back.
+  disengage: (v) => {
+    tone(v, { type: 'triangle', freq: 196, freqEnd: 182, dur: 0.2, gain: 0.3 })
+    swish(v, { low: 2000, high: 4200, dur: 0.12, gain: 0.2 })
+    dash(v, { gain: 0.35, delay: 0.05 })
+  },
+  // Arrow Rain: bowstrings, and a hiss of arrows going up (they come down as `arrow-rain-impact`).
+  arrowrain: (v) => {
+    for (const delay of [0, 0.04, 0.08]) tone(v, { type: 'triangle', freq: 200 + delay * 200, freqEnd: 185, dur: 0.18, gain: 0.15, delay })
+    noise(v, { dur: 0.5, gain: 0.22, filter: 'highpass', freq: 2600, q: 0.8, attack: 0.1, delay: 0.05 })
+  },
+  // ---- Crystal
+  // Crystal Bolt: a crystal arrow loosed, ringing.
+  crystalbolt: (v) => {
+    tone(v, { type: 'triangle', freq: 220, freqEnd: 205, dur: 0.2, gain: 0.25 })
+    chord(v, { freqs: [1568, 2093], dur: 0.35, gain: 0.08, stagger: 0.03 })
+    swish(v, { low: 2400, high: 900, dur: 0.18, gain: 0.3 })
+  },
+  // Shatter: called (each crystal breaks as `shatter-burst`).
+  shatter: (v) => tone(v, { type: 'sine', freq: 2093, freqEnd: 2600, dur: 0.12, gain: 0.08 }),
+  // Glide: a soft rush, and a glint.
+  glide: (v) => {
+    swish(v, { low: 700, high: 300, dur: 0.22, gain: 0.35 })
+    sparkle(v, { count: 4, dur: 0.25, gain: 0.04 })
+  },
+  // Shardstorm: crystals chiming as they grow on the arrows.
+  shardstorm: (v) => {
+    chord(v, { freqs: [1046, 1318, 1568, 2093], dur: 0.45, gain: 0.12, stagger: 0.04 })
+    sparkle(v, { count: 6, dur: 0.4, gain: 0.04 })
+  },
+  // ---- Sorin
+  // Dawn Beam: the dawn breaking: a choir swelling, a roar of light, a boom, and its ring going on.
+  dawnbeam: (v) => {
+    chord(v, { freqs: [262, 392, 523, 659, 784], dur: 1, gain: 0.26, stagger: 0.015, attack: 0.02 })
+    noise(v, { dur: 0.7, gain: 0.5, filter: 'bandpass', freq: 600, freqEnd: 3200, q: 0.6, attack: 0.01 })
+    boom(v, { gain: 0.8, low: 70, dur: 0.6 })
+    tone(v, { type: 'sine', freq: 1568, dur: 1, gain: 0.07, attack: 0.05, delay: 0.1 })
+    sparkle(v, { count: 10, dur: 0.8, gain: 0.05, delay: 0.1 })
+  },
+  // Smite: his sword taking the light (each smiting blow rings as `smite-hit`, the last as `smite-final`).
+  smite: (v) => {
+    chord(v, { freqs: [523, 784], dur: 0.45, gain: 0.16, stagger: 0.03 })
+    metalHit(v, { gain: 0.1, pitch: 2600, ring: 0.4 })
+  },
+  // Dawnstep: a rush of air (he lands as `dawnstep-flash`).
+  dawnstep: (v) => swish(v, { low: 900, high: 350, dur: 0.22, gain: 0.4 }),
+  // ---- Sniper
+  // Steady Aim: the breath held: a low hum rising as the bead is drawn.
+  steadyaim: (v) => {
+    tone(v, { type: 'sine', freq: 110, freqEnd: 220, dur: 1.2, gain: 0.1, attack: 0.3 })
+    tone(v, { type: 'sine', freq: 880, freqEnd: 1760, dur: 1.2, gain: 0.025, attack: 0.5 })
+    clink(v, { freq: 2200, gain: 0.15 })
+  },
+  // Fire: the bolt worked (the shot itself is `steady-shot-…`, louder the longer it was held).
+  steadyfire: (v) => clink(v, { freq: 1600, gain: 0.12, delay: 0.25 }),
+  // Tumble: a quick scuff and a roll.
+  tumble: (v) => {
+    noise(v, { dur: 0.25, gain: 0.3, filter: 'bandpass', freq: 600, q: 1.2, attack: 0.02 })
+    swish(v, { low: 400, high: 1200, dur: 0.2, gain: 0.25 })
+  },
+  // Scan: a sweep, and a ping going out.
+  scan: (v) => {
+    swish(v, { low: 400, high: 2200, dur: 0.5, gain: 0.22 })
+    tone(v, { type: 'sine', freq: 1760, dur: 0.5, gain: 0.1, delay: 0.05 })
+    tone(v, { type: 'sine', freq: 1760, dur: 0.4, gain: 0.05, delay: 0.45 })
+  },
+  // ---- Ent
   spore: (v) => {
     woodHit(v, { gain: 0.6, size: 0.6 })
     noise(v, { dur: 0.3, gain: 0.25, filter: 'lowpass', freq: 900, attack: 0.04, delay: 0.06 })
@@ -405,6 +575,94 @@ export const BACK_SOUNDS: { start: Recipe; arrive: Recipe } = {
 
 // `spawn` plays as the entity appears (only one that appears later than its ability goes off has one), `hit` as it strikes someone.
 export const ENTITY_SOUNDS: Readonly<Record<string, { spawn?: Recipe; hit?: Recipe }>> = {
+  // ---- The Hellhound's Rake, by what each slash strikes: flesh; a wound already bleeding, wet and heavy; and the third, which roots, with a roar under it.
+  'rake-hit': { spawn: (v) => {
+    for (const delay of [0, 0.025, 0.05]) noise(v, { dur: 0.06, gain: 0.32, filter: 'bandpass', freq: 2600, freqEnd: 1300, q: 2, delay })
+    tone(v, { type: 'sine', freq: 180, freqEnd: 80, dur: 0.08, gain: 0.35 })
+  } },
+  'rake-hit-bleed': { spawn: (v) => {
+    for (const delay of [0, 0.03, 0.06]) noise(v, { dur: 0.08, gain: 0.34, filter: 'bandpass', freq: 1700, freqEnd: 700, q: 1.6, delay })
+    noise(v, { dur: 0.22, gain: 0.35, filter: 'lowpass', freq: 600, freqEnd: 200, delay: 0.03 })
+    splash(v, 0.2, 0.04)
+    tone(v, { type: 'sine', freq: 140, freqEnd: 55, dur: 0.14, gain: 0.45 })
+  } },
+  'rake-final-hit': { spawn: (v) => {
+    for (const delay of [0, 0.03, 0.06, 0.09]) noise(v, { dur: 0.09, gain: 0.4, filter: 'bandpass', freq: 2200, freqEnd: 800, q: 1.4, delay })
+    boom(v, { gain: 0.75, low: 80, dur: 0.45 })
+    tone(v, { type: 'sawtooth', freq: 220, freqEnd: 120, dur: 0.4, gain: 0.16, lowpass: 1400, vibrato: { rate: 26, depth: 30 } })
+    fireRoar(v, { gain: 0.25, dur: 0.4, delay: 0.04 })
+  } },
+  // ---- The Vulture's mine: the spider springing out of the ground, and its bite.
+  'mine-spider': { spawn: (v) => {
+    noise(v, { dur: 0.18, gain: 0.4, filter: 'lowpass', freq: 900, freqEnd: 300, attack: 0.002 })
+    for (let index = 0; index < 8; index += 1) noise(v, { dur: 0.018, gain: 0.12, filter: 'bandpass', freq: 3200 + Math.random() * 1200, q: 4, delay: 0.08 + index * 0.045 })
+    tone(v, { type: 'square', freq: 1400, freqEnd: 900, dur: 0.08, gain: 0.05, lowpass: 3000 })
+  } },
+  'mine-bite': { spawn: (v) => {
+    noise(v, { dur: 0.04, gain: 0.45, filter: 'highpass', freq: 2500 })
+    sizzle(v, { dur: 0.35, gain: 0.18, delay: 0.03 })
+    tone(v, { type: 'sine', freq: 200, freqEnd: 80, dur: 0.1, gain: 0.4 })
+  } },
+  // ---- Blade: the ring of cuts where he lands.
+  'bladedash-burst': { spawn: (v) => {
+    for (const delay of [0, 0.03, 0.06, 0.09]) swish(v, { low: 1600 + delay * 6000, high: 4200, dur: 0.08, gain: 0.3, delay })
+    metalHit(v, { gain: 0.12, pitch: 3200, ring: 0.25 })
+  } },
+  // ---- Sanguine: a shot of blood striking, and the shield bursting into shards.
+  'blood-shot': { hit: (v) => {
+    splash(v, 0.35)
+    tone(v, { type: 'sine', freq: 160, freqEnd: 60, dur: 0.1, gain: 0.35 })
+  } },
+  'blood-shards': { spawn: (v) => {
+    noise(v, { dur: 0.25, gain: 0.5, filter: 'highpass', freq: 1800, attack: 0.002 })
+    for (let index = 0; index < 6; index += 1) clink(v, { freq: 1600 + Math.random() * 2000, gain: 0.1, delay: Math.random() * 0.1 })
+    splash(v, 0.3, 0.02)
+  } },
+  // ---- The Hunter's arrows coming down.
+  'arrow-rain-impact': { spawn: (v) => {
+    for (let index = 0; index < 9; index += 1) woodHit(v, { gain: 0.22, size: 1.3 + Math.random() * 0.4, delay: Math.random() * 0.22 })
+    noise(v, { dur: 0.3, gain: 0.2, filter: 'lowpass', freq: 700 })
+  } },
+  // ---- Crystal: her shards bursting, and a crack shattered.
+  'shard-burst': { spawn: (v) => {
+    for (let index = 0; index < 5; index += 1) clink(v, { freq: 2600 + Math.random() * 2600, gain: 0.12, delay: Math.random() * 0.08 })
+    noise(v, { dur: 0.12, gain: 0.25, filter: 'highpass', freq: 3500 })
+  } },
+  'shatter-burst': { spawn: (v) => {
+    noise(v, { dur: 0.3, gain: 0.5, filter: 'highpass', freq: 2800, attack: 0.002 })
+    for (let index = 0; index < 8; index += 1) clink(v, { freq: 2000 + Math.random() * 3500, gain: 0.12, delay: Math.random() * 0.15 })
+    tone(v, { type: 'sine', freq: 180, freqEnd: 70, dur: 0.12, gain: 0.35 })
+  } },
+  // ---- Sorin: landing from Dawnstep in a flash, and each smiting blow ringing out; the last, which stuns, tolls like a bell.
+  'dawnstep-flash': { spawn: (v) => {
+    boom(v, { gain: 0.55, low: 95, dur: 0.35 })
+    chord(v, { freqs: [523, 784, 1046], dur: 0.45, gain: 0.14, stagger: 0.02 })
+    sparkle(v, { count: 5, dur: 0.3, gain: 0.04 })
+  } },
+  'smite-hit': { spawn: (v) => {
+    metalHit(v, { gain: 0.2, pitch: 1900, ring: 0.45 })
+    chord(v, { freqs: [659, 988], dur: 0.35, gain: 0.12, stagger: 0.01 })
+    tone(v, { type: 'sine', freq: 170, freqEnd: 70, dur: 0.1, gain: 0.35 })
+  } },
+  'smite-final': { spawn: (v) => {
+    boom(v, { gain: 0.8, low: 75, dur: 0.55 })
+    metalHit(v, { gain: 0.3, pitch: 880, ring: 0.95 })
+    chord(v, { freqs: [440, 554, 659, 880], dur: 0.95, gain: 0.2, stagger: 0.015 })
+    sparkle(v, { count: 8, dur: 0.6, gain: 0.05, delay: 0.05 })
+  } },
+  // ---- The Sniper's shot: the crack of the rifle, deeper and louder the longer he held it.
+  ...Object.fromEntries(Array.from({ length: 10 }, (_, index) => {
+    const k = index / 9
+    return [`steady-shot-${index + 1}`, { spawn: (v: Voice) => {
+      noise(v, { dur: 0.1 + k * 0.08, gain: 0.55 + k * 0.4, filter: 'lowpass', freq: 7000, freqEnd: 900, attack: 0.001 })
+      boom(v, { gain: 0.4 + k * 0.55, low: 130 - k * 50, dur: 0.25 + k * 0.35 })
+      noise(v, { dur: 0.4 + k * 0.4, gain: 0.1 + k * 0.1, filter: 'lowpass', freq: 1200, attack: 0.02, delay: 0.04 })
+      if (k >= 1) tone(v, { type: 'sine', freq: 2400, freqEnd: 1800, dur: 0.5, gain: 0.05, delay: 0.02 })
+    }, hit: (v: Voice) => {
+      noise(v, { dur: 0.05, gain: 0.35 + k * 0.2, filter: 'bandpass', freq: 2400, q: 1.5 })
+      tone(v, { type: 'sine', freq: 210, freqEnd: 80, dur: 0.12, gain: 0.4 + k * 0.2 })
+    } }]
+  })),
   // A hex sinking into its victim.
   hex: { hit: (v) => {
     tone(v, { type: 'sine', freq: 160, freqEnd: 55, dur: 0.16, gain: 0.5 })
